@@ -1592,7 +1592,9 @@ static void state_RSQ(Context *ctx)
 
 static void state_LOOP(Context *ctx)
 {
-    if (ctx->source_args[0].regtype != REG_TYPE_LOOP)
+    if (shader_is_pixel(ctx) && !shader_version_atleast(ctx, 3, 0))
+        fail(ctx, "LOOP not supported in pixel Shader Model 2.x");
+    else if (ctx->source_args[0].regtype != REG_TYPE_LOOP)
         fail(ctx, "LOOP argument isn't loop register");
     else if (ctx->source_args[1].regtype != REG_TYPE_CONSTINT)
         fail(ctx, "LOOP argument isn't constint register");
