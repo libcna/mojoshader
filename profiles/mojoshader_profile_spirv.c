@@ -4510,8 +4510,32 @@ void emit_SPIRV_RESERVED(Context *ctx)
     // do nothing; fails in the state machine.
 } // emit_SPIRV_RESERVED
 
+void emit_SPIRV_TEXCRD(Context *ctx)
+{
+    /* The GLSL emitter grew this instruction in CNA's
+     * mojoshader-6333f74-glsl-texcrd.patch; without the same thing here the SPIR-V profile
+     * refuses every real ps_1_x XNA effect that names a texture coordinate, which is a large
+     * share of shipped XNA 4.0 game content. -CNA */
+    if (shader_version_atleast(ctx, 1, 4))
+    {
+        /* ps_1_4: `texcrd dst, src` is a masked move out of a texture-coordinate register. */
+        SpirvResult src0 = spv_load_srcarg_full(ctx, 0);
+        spv_assign_destarg(ctx, src0);
+    } // if
+    else
+    {
+        /* ps_1_1 .. ps_1_3: `texcoord t#` makes the interpolated TEXCOORD# readable in t#.
+         * emit_SPIRV_global() backs t# with a Private variable that mainline_top initialises
+         * from the matching Input, so the interpolated value is already in the register; what
+         * this instruction contributes is the assignment through the destination write mask. */
+        DestArgInfo *info = &ctx->dest_arg;
+        RegisterList *treg = spv_getreg(ctx, REG_TYPE_TEXTURE, info->regnum);
+        SpirvResult src = spv_loadreg(ctx, treg);
+        spv_assign_destarg(ctx, src);
+    } // else
+} // emit_SPIRV_TEXCRD
+
 // !!! FIXME: The following are unimplemented even in the GLSL emitter.
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXCRD)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2AR)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2GB)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2RGB)
