@@ -2264,8 +2264,34 @@ void emit_GLSL_TEXBEML(Context *ctx)
     output_line(ctx, "%s", code);
 } // emit_GLSL_TEXBEML
 
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2AR) // !!! FIXME
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2GB) // !!! FIXME
+static void emit_GLSL_texreg2(Context *ctx, const int first, const int second)
+{
+    const DestArgInfo *info = &ctx->dest_arg;
+    char sampler[64];
+    char src[128];
+    char code[512];
+
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_SAMPLER, info->regnum,
+                            sampler, sizeof (sampler));
+    make_GLSL_srcarg_string_full(ctx, 0, src, sizeof (src));
+    const char components[] = "xyzw";
+    make_GLSL_destarg_assign(ctx, code, sizeof (code),
+        "texture2D(%s, vec2((%s).%c, (%s).%c))",
+        sampler, src, components[first], src, components[second]);
+    output_line(ctx, "%s", code);
+} // emit_GLSL_texreg2
+
+void emit_GLSL_TEXREG2AR(Context *ctx)
+{
+    // Alpha supplies u and red supplies v.
+    emit_GLSL_texreg2(ctx, 3, 0);
+} // emit_GLSL_TEXREG2AR
+
+void emit_GLSL_TEXREG2GB(Context *ctx)
+{
+    // Green supplies u and blue supplies v.
+    emit_GLSL_texreg2(ctx, 1, 2);
+} // emit_GLSL_TEXREG2GB
 
 
 void emit_GLSL_TEXM3X2PAD(Context *ctx)

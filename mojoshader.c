@@ -1830,6 +1830,30 @@ static void state_TEXBEML(Context *ctx)
     state_texbem(ctx, "TEXBEML");
 } // state_TEXBEML
 
+static void state_texreg2(Context *ctx, const char *opcode,
+                          const int minimum_minor)
+{
+    if (shader_version_atleast(ctx, 1, 4))
+        failf(ctx, "%s opcode not available after Shader Model 1.3", opcode);
+    else if (!shader_version_atleast(ctx, 1, minimum_minor))
+        failf(ctx, "%s opcode not available in this Shader Model", opcode);
+    if (ctx->source_args[0].src_mod != SRCMOD_NONE)
+        failf(ctx, "%s source register must be unsigned and unmodified", opcode);
+    if (!no_swizzle(ctx->source_args[0].swizzle))
+        failf(ctx, "%s source register must not be swizzled", opcode);
+    state_texops(ctx, opcode, 2, 0);
+} // state_texreg2
+
+static void state_TEXREG2AR(Context *ctx)
+{
+    state_texreg2(ctx, "TEXREG2AR", 1);
+} // state_TEXREG2AR
+
+static void state_TEXREG2GB(Context *ctx)
+{
+    state_texreg2(ctx, "TEXREG2GB", 2);
+} // state_TEXREG2GB
+
 static void state_TEXM3X2PAD(Context *ctx)
 {
     if (shader_version_atleast(ctx, 1, 4))
