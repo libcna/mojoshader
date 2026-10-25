@@ -702,8 +702,86 @@ void emit_GLSL_start(Context *ctx, const char *profilestr)
 } // emit_GLSL_start
 
 void emit_GLSL_RET(Context *ctx);
+
+static void get_GLSL_writemask_suffix(const int writemask, char *buf, const size_t len)
+{
+    size_t i = 0;
+    if ((writemask != 0xF) && (len >= 6))
+    {
+        buf[i++] = '.';
+        if (writemask & 0x1) buf[i++] = 'x';
+        if (writemask & 0x2) buf[i++] = 'y';
+        if (writemask & 0x4) buf[i++] = 'z';
+        if (writemask & 0x8) buf[i++] = 'w';
+    } // if
+    if (len > 0)
+        buf[i < len ? i : (len - 1)] = '\0';
+} // get_GLSL_writemask_suffix
+
+static int get_GLSL_semantic_varname(Context *ctx, const int vertex_output,
+                                     const MOJOSHADER_usage usage, const int index,
+                                     char *buf, const size_t len)
+{
+    if (vertex_output && (usage == MOJOSHADER_USAGE_POSITION) && (index == 0))
+        snprintf(buf, len, "gl_Position");
+    else if (vertex_output && (usage == MOJOSHADER_USAGE_POINTSIZE) && (index == 0))
+        snprintf(buf, len, "gl_PointSize");
+#if SUPPORT_PROFILE_GLSLES
+    else if (!support_glsles(ctx) && (usage == MOJOSHADER_USAGE_COLOR) && (index <= 1))
+#else
+    else if ((usage == MOJOSHADER_USAGE_COLOR) && (index <= 1))
+#endif
+        snprintf(buf, len, vertex_output
+                              ? (index == 0 ? "gl_FrontColor" : "gl_FrontSecondaryColor")
+                              : (index == 0 ? "gl_Color" : "gl_SecondaryColor"));
+#if SUPPORT_PROFILE_GLSLES
+    else if (!support_glsles(ctx) && (usage == MOJOSHADER_USAGE_TEXCOORD) && (index < 4))
+#else
+    else if ((usage == MOJOSHADER_USAGE_TEXCOORD) && (index < 4))
+#endif
+        snprintf(buf, len, "gl_TexCoord[%d]", index);
+#if SUPPORT_PROFILE_GLSLES
+    else if (!support_glsles(ctx) && (usage == MOJOSHADER_USAGE_FOG) && (index == 0))
+#else
+    else if ((usage == MOJOSHADER_USAGE_FOG) && (index == 0))
+#endif
+        snprintf(buf, len, "gl_FogFragCoord");
+    else
+    {
+        snprintf(buf, len, "io_%i_%i", usage, index);
+        return 0;
+    } // else
+    return 1;
+} // get_GLSL_semantic_varname
+
 static void emit_GLSL_vertex_epilogue(Context *ctx)
 {
+    if (shader_version_atleast(ctx, 3, 0))
+    {
+        const RegisterList *item = ctx->attributes.next;
+        while (item != NULL)
+        {
+            if (item->regtype == REG_TYPE_OUTPUT)
+            {
+                char reg[64];
+                char semantic[64];
+                char mask[6];
+                get_GLSL_varname_in_buf(ctx, item->regtype, item->regnum,
+                                        reg, sizeof (reg));
+                get_GLSL_semantic_varname(ctx, 1, item->usage, item->index,
+                                          semantic, sizeof (semantic));
+                get_GLSL_writemask_suffix(item->writemask, mask, sizeof (mask));
+                if ((item->usage == MOJOSHADER_USAGE_POINTSIZE) && (item->index == 0))
+                    output_line(ctx, "%s = %s.x;", semantic, reg);
+                else if (item->usage == MOJOSHADER_USAGE_COLOR)
+                    output_line(ctx, "%s%s = clamp(%s%s, 0.0, 1.0);",
+                                semantic, mask, reg, mask);
+                else
+                    output_line(ctx, "%s%s = %s%s;", semantic, mask, reg, mask);
+            } // if
+            item = item->next;
+        } // while
+    } // if
     output_line(ctx, "gl_Position.xy += cnaPixelCenter * gl_Position.w;");
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     output_line(ctx, "gl_Position.y = gl_Position.y * vpFlip;");
@@ -1055,7 +1133,6 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
                          MOJOSHADER_usage usage, int index, int wmask,
                          int flags)
 {
-    // !!! FIXME: this function doesn't deal with write masks at all yet!
     const char *qualifier_in;
     const char *qualifier_out;
     const char *usage_str = NULL;
@@ -1065,6 +1142,68 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
     char var[64];
 
     get_GLSL_varname_in_buf(ctx, regtype, regnum, var, sizeof (var));
+
+    if (shader_is_pixel(ctx) && (flags & MOD_CENTROID))
+    {
+        failf(ctx, "centroid unsupported in %s profile", ctx->profile->name);
+        return;
+    } // if
+
+    if (shader_version_atleast(ctx, 3, 0) &&
+        ((shader_is_vertex(ctx) && (regtype == REG_TYPE_OUTPUT)) ||
+         (shader_is_pixel(ctx) && (regtype == REG_TYPE_INPUT))))
+    {
+        const int vertex_output = shader_is_vertex(ctx);
+        const RegisterList *first = ctx->attributes.next;
+        while ((first != NULL) &&
+               ((first->regtype != regtype) || (first->regnum != regnum)))
+            first = first->next;
+        const int first_register_declaration = (first != NULL) &&
+            (first->usage == usage) && (first->index == index) &&
+            (first->writemask == wmask);
+        char semantic[64];
+        char mask[6];
+        const int builtin = get_GLSL_semantic_varname(
+            ctx, vertex_output, usage, index, semantic, sizeof (semantic));
+        get_GLSL_writemask_suffix(wmask, mask, sizeof (mask));
+
+        if (support_glsles3(ctx))
+        {
+            qualifier_in = "in";
+            qualifier_out = "out";
+        } // if
+        else
+        {
+            qualifier_in = "varying";
+            qualifier_out = "varying";
+        } // else
+
+        push_output(ctx, &ctx->globals);
+        if (first_register_declaration)
+            output_line(ctx, "vec4 %s;", var);
+        if (!builtin)
+        {
+#if SUPPORT_PROFILE_GLSLES
+            if (support_glsles(ctx))
+                output_line(ctx, "%s highp vec4 %s;",
+                            vertex_output ? qualifier_out : qualifier_in, semantic);
+            else
+#endif
+                output_line(ctx, "%s vec4 %s;",
+                            vertex_output ? qualifier_out : qualifier_in, semantic);
+        } // if
+        pop_output(ctx);
+
+        if (!vertex_output)
+        {
+            push_output(ctx, &ctx->mainline_intro);
+            if (first_register_declaration)
+                output_line(ctx, "%s = vec4(0.0, 0.0, 0.0, 1.0);", var);
+            output_line(ctx, "%s%s = %s%s;", var, mask, semantic, mask);
+            pop_output(ctx);
+        } // if
+        return;
+    } // if
 
     //assert((flags & MOD_PP) == 0);  // !!! FIXME: is PP allowed?
 
@@ -1261,12 +1400,6 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             qualifier_in = "varying";
 
         // samplers DCLs get handled in emit_GLSL_sampler().
-
-        if (flags & MOD_CENTROID)  // !!! FIXME
-        {
-            failf(ctx, "centroid unsupported in %s profile", ctx->profile->name);
-            return;
-        } // if
 
         if (regtype == REG_TYPE_COLOROUT)
         {

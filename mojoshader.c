@@ -54,7 +54,75 @@ static void add_attribute_register(Context *ctx, const RegisterType rtype,
                                 const int regnum, const MOJOSHADER_usage usage,
                                 const int index, const int writemask, int flags)
 {
-    RegisterList *item = reglist_insert(ctx, &ctx->attributes, rtype, regnum);
+    const int semantic_dcl = shader_version_atleast(ctx, 3, 0) &&
+        (((shader_is_vertex(ctx)) &&
+          ((rtype == REG_TYPE_INPUT) || (rtype == REG_TYPE_OUTPUT))) ||
+         ((shader_is_pixel(ctx)) && (rtype == REG_TYPE_INPUT)));
+    RegisterList *item = NULL;
+
+    if (semantic_dcl)
+    {
+        if ((writemask == 0) ||
+            (shader_is_vertex(ctx) && (rtype == REG_TYPE_INPUT) &&
+             !writemask_xyzw(writemask)) ||
+            (((usage == MOJOSHADER_USAGE_POSITION) ||
+              (usage == MOJOSHADER_USAGE_POINTSIZE)) &&
+             !writemask_xyzw(writemask)))
+        {
+            fail(ctx, "DCL semantic requires a full writemask");
+            return;
+        } // if
+
+        RegisterList *candidate = ctx->attributes.next;
+        RegisterList *same_register_tail = NULL;
+        while (candidate != NULL)
+        {
+            if (candidate->regtype == rtype)
+            {
+                if ((candidate->usage == usage) && (candidate->index == index))
+                {
+                    fail(ctx, "DCL semantic must be unique within its input or output bank");
+                    return;
+                } // if
+                if (candidate->regnum == regnum)
+                {
+                    if ((candidate->writemask & writemask) != 0)
+                    {
+                        fail(ctx, "DCL semantic writemasks overlap in one register");
+                        return;
+                    } // if
+                    same_register_tail = candidate;
+                } // if
+            } // if
+            candidate = candidate->next;
+        } // while
+
+        if (same_register_tail != NULL)
+        {
+            item = (RegisterList *) Malloc(ctx, sizeof (RegisterList));
+            if (item == NULL)
+                return;
+            item->regtype = rtype;
+            item->regnum = regnum;
+            item->usage = MOJOSHADER_USAGE_UNKNOWN;
+            item->index = 0;
+            item->writemask = 0;
+            item->misc = 0;
+            item->written = 0;
+#if SUPPORT_PROFILE_SPIRV
+            item->spirv.iddecl = 0;
+            item->spirv.is_ssa = 0;
+#endif
+            item->array = NULL;
+            item->next = same_register_tail->next;
+            same_register_tail->next = item;
+        } // if
+    } // if
+
+    if (item == NULL)
+        item = reglist_insert(ctx, &ctx->attributes, rtype, regnum);
+    if (item == NULL)
+        return;
     item->usage = usage;
     item->index = index;
     item->writemask = writemask;
