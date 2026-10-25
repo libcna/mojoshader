@@ -4027,6 +4027,16 @@ static int vertex_shader_model_two_zero_opcode_allowed(const uint32 opcode)
 
 // parse various token types...
 
+static int opcode_allows_instruction_controls(const Context *ctx,
+                                               const uint32 opcode)
+{
+    if ((opcode == OPCODE_IFC) || (opcode == OPCODE_BREAKC) ||
+        (opcode == OPCODE_SETP))
+        return 1;
+
+    return (opcode == OPCODE_TEXLD) && shader_version_atleast(ctx, 2, 0);
+} // opcode_allows_instruction_controls
+
 static int parse_instruction_token(Context *ctx)
 {
     int retval = 0;
@@ -4100,6 +4110,10 @@ static int parse_instruction_token(Context *ctx)
 
     if (predicated && !shader_version_atleast(ctx, 2, 1))
         fail(ctx, "instruction predication requires Shader Model 2.x or later");
+
+    if ((controls != 0) && !opcode_allows_instruction_controls(ctx, opcode))
+        failf(ctx, "opcode '%s' does not support instruction controls.",
+              instruction->opcode_string);
 
     memset(ctx->dwords, '\0', sizeof (ctx->dwords));
     ctx->instruction_controls = controls;
