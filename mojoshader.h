@@ -1759,6 +1759,14 @@ DECLSPEC void MOJOSHADER_glProgramViewportInfo(int viewportW, int viewportH,
 DECLSPEC void MOJOSHADER_glProgramPixelCenterInfo(float x, float y);
 
 /*
+ * Invert the GLSL front-facing sign exposed through the Direct3D 9 VFACE
+ * miscellaneous register. A nonzero value flips the sign; zero preserves the
+ * OpenGL convention. This call requires a current MOJOSHADER_glContext.
+ */
+DECLSPEC void MOJOSHADER_glProgramVFaceFlipInfo(int flip);
+
+
+/*
  * Free the resources of a linked program. This will delete the GL object
  *  and free memory.
  *
