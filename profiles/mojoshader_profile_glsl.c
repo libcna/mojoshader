@@ -840,9 +840,11 @@ static void emit_GLSL_vertex_epilogue(Context *ctx)
         {
             if (item->regtype == REG_TYPE_ATTROUT)
             {
-                output_line(ctx, "io_%i_%i = clamp(io_%i_%i, 0.0, 1.0);",
-                            (int) MOJOSHADER_USAGE_COLOR, (int) item->regnum,
-                            (int) MOJOSHADER_USAGE_COLOR, (int) item->regnum);
+                char reg[64];
+                get_GLSL_varname_in_buf(ctx, item->regtype, item->regnum,
+                                        reg, sizeof (reg));
+                // The register alias follows this pair's ordinary or centroid output.
+                output_line(ctx, "%s = clamp(%s, 0.0, 1.0);", reg, reg);
             } // if
             item = item->next;
         } // while
