@@ -620,6 +620,7 @@ void emit_GLSL_end(Context *ctx)
     } // if
     else if (shader_is_vertex(ctx))
     {
+        output_line(ctx, "gl_Position.xy += cnaPixelCenter * gl_Position.w;");
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
         output_line(ctx, "gl_Position.y = gl_Position.y * vpFlip;");
 #endif
@@ -708,6 +709,8 @@ void emit_GLSL_finalize(Context *ctx)
     output_GLSL_uniform_array(ctx, REG_TYPE_CONST, ctx->uniform_float4_count);
     output_GLSL_uniform_array(ctx, REG_TYPE_CONSTINT, ctx->uniform_int4_count);
     output_GLSL_uniform_array(ctx, REG_TYPE_CONSTBOOL, ctx->uniform_bool_count);
+    if (shader_is_vertex(ctx))
+        output_line(ctx, "uniform vec2 cnaPixelCenter;");
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     if (shader_is_vertex(ctx))
         output_line(ctx, "uniform float vpFlip;");

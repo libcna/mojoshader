@@ -1750,6 +1750,15 @@ DECLSPEC void MOJOSHADER_glProgramViewportInfo(int viewportW, int viewportH,
                                                int renderTargetBound);
 
 /*
+ * Apply a clip-space X/Y correction to the prepared vertex shader output.
+ * The values are multiplied by gl_Position.w before being added, so callers
+ * provide normalized-device-coordinate offsets. Pass zeroes to disable it.
+ *
+ * This call is NOT thread safe and requires a current MOJOSHADER_glContext.
+ */
+DECLSPEC void MOJOSHADER_glProgramPixelCenterInfo(float x, float y);
+
+/*
  * Free the resources of a linked program. This will delete the GL object
  *  and free memory.
  *

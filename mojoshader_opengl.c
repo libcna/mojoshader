@@ -132,6 +132,8 @@ struct MOJOSHADER_glProgram
     // Numerous fixes for coordinate system mismatches
     GLint ps_vpos_flip_loc;
     int current_vpos_flip[2];
+    GLint vs_pixel_center_loc;
+    float current_pixel_center[2];
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     GLint vs_flip_loc;
     int current_flip;
@@ -1083,6 +1085,7 @@ static void impl_GLSL_FinalInitProgram(MOJOSHADER_glProgram *program)
     program->ps_int4_loc = glsl_uniform_loc(program, "ps_uniforms_ivec4");
     program->ps_bool_loc = glsl_uniform_loc(program, "ps_uniforms_bool");
     program->ps_vpos_flip_loc = glsl_uniform_loc(program, "vposFlip");
+    program->vs_pixel_center_loc = glsl_uniform_loc(program, "cnaPixelCenter");
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     program->vs_flip_loc = glsl_uniform_loc(program, "vpFlip");
 #endif
@@ -2479,6 +2482,7 @@ MOJOSHADER_glProgram *MOJOSHADER_glLinkProgram(MOJOSHADER_glShader *vshader,
         goto link_program_fail;
     memset(retval, '\0', sizeof (MOJOSHADER_glProgram));
     memset(retval->vertex_attrib_loc, 0xFF, sizeof(retval->vertex_attrib_loc));
+    retval->vs_pixel_center_loc = -1;
 
     numregs = 0;
     if (vshader != NULL) numregs += vshader->parseData->uniform_count;
@@ -3223,6 +3227,21 @@ void MOJOSHADER_glProgramViewportInfo(int viewportW, int viewportH,
     } // if
 #endif
 } // MOJOSHADER_glViewportInfo
+
+
+void MOJOSHADER_glProgramPixelCenterInfo(float x, float y)
+{
+    MOJOSHADER_glProgram *program = ctx->bound_program;
+
+    if ((program->vs_pixel_center_loc != -1) &&
+        ((program->current_pixel_center[0] != x) ||
+         (program->current_pixel_center[1] != y)))
+    {
+        ctx->glUniform2f(program->vs_pixel_center_loc, x, y);
+        program->current_pixel_center[0] = x;
+        program->current_pixel_center[1] = y;
+    } // if
+} // MOJOSHADER_glProgramPixelCenterInfo
 
 
 void MOJOSHADER_glDeleteProgram(MOJOSHADER_glProgram *program)
