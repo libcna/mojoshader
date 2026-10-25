@@ -2087,6 +2087,10 @@ DECLSPEC MOJOSHADER_sdlContext *MOJOSHADER_sdlCreateContext(SDL_GPUDevice *devic
                                                             MOJOSHADER_free f,
                                                             void *malloc_d);
 
+/* CNA test hook: force an available ShaderCross path on a SPIR-V-capable device. */
+DECLSPEC int MOJOSHADER_sdlSetShaderCrossTestMode(MOJOSHADER_sdlContext *context,
+                                                  int enabled);
+
 /*
  * Get any error state we might have picked up.
  *

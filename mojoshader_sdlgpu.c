@@ -16,6 +16,9 @@
 
 /* SDL_shadercross API */
 
+#if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+#include <SDL3_shadercross/SDL_shadercross.h>
+#else
 typedef enum SDL_ShaderCross_ShaderStage
 {
    SDL_SHADERCROSS_SHADERSTAGE_VERTEX,
@@ -58,6 +61,7 @@ static PFN_SDL_ShaderCross_CompileGraphicsShaderFromSPIRV SDL_ShaderCross_Compil
 #else
 #define SDL_SHADERCROSS_LIB_NAME "libSDL3_shadercross.so.0"
 #endif
+#endif
 
 /* Max entries for each register file type */
 #define MAX_REG_FILE_F 8192
@@ -89,6 +93,7 @@ struct MOJOSHADER_sdlContext
 {
     SDL_GPUDevice *device;
     const char *profile;
+    int use_shadercross;
 
     MOJOSHADER_malloc malloc_fn;
     MOJOSHADER_free free_fn;
@@ -291,6 +296,9 @@ static uint8_t update_uniform_buffer(
 unsigned int MOJOSHADER_sdlGetShaderFormats(void)
 {
     int ret = shader_format;
+#if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+    ret |= SDL_ShaderCross_GetSPIRVShaderFormats();
+#else
     if (SDL_ShaderCross_GetSPIRVShaderFormats != NULL)
         ret |= SDL_ShaderCross_GetSPIRVShaderFormats();
     else
@@ -309,6 +317,7 @@ unsigned int MOJOSHADER_sdlGetShaderFormats(void)
             SDL_shadercross_lib = NULL;
         } // if
     } // else
+#endif
     return ret;
 } // MOJOSHADER_sdlGetShaderFormats
 
@@ -336,11 +345,19 @@ MOJOSHADER_sdlContext *MOJOSHADER_sdlCreateContext(
     resultCtx->free_fn = f;
     resultCtx->malloc_data = malloc_d;
 
-        resultCtx->profile = (shader_format == SDL_GPU_SHADERFORMAT_SPIRV) ? "spirv" : "metal";
+    resultCtx->profile = (shader_format == SDL_GPU_SHADERFORMAT_SPIRV) ? "spirv" : "metal";
 
     // We only care about ShaderCross if the device doesn't natively support the profile
     if (!(SDL_GetGPUShaderFormats(device) & shader_format))
     {
+#if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+        if (!(SDL_GetGPUShaderFormats(device) & SDL_ShaderCross_GetSPIRVShaderFormats()))
+        {
+            set_error("SDL_shadercross cannot compile SPIR-V for the active SDL_gpu device");
+            goto init_fail;
+        } // if
+        resultCtx->use_shadercross = 1;
+#else
         SDL_shadercross_lib = SDL_LoadObject(SDL_SHADERCROSS_LIB_NAME);
         if (SDL_shadercross_lib != NULL)
         {
@@ -356,7 +373,12 @@ MOJOSHADER_sdlContext *MOJOSHADER_sdlCreateContext(
                 SDL_shadercross_lib,
                 "SDL_ShaderCross_CompileGraphicsShaderFromSPIRV"
             );
+            resultCtx->use_shadercross =
+                SDL_ShaderCross_GetSPIRVShaderFormats != NULL &&
+                SDL_ShaderCross_ReflectGraphicsSPIRV != NULL &&
+                SDL_ShaderCross_CompileGraphicsShaderFromSPIRV != NULL;
         } // if
+#endif
     } // if
 
     return resultCtx;
@@ -378,6 +400,7 @@ void MOJOSHADER_sdlDestroyContext(
 ) {
     uint32_t i;
 
+#if !defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
     if (SDL_shadercross_lib != NULL)
     {
         SDL_ShaderCross_GetSPIRVShaderFormats = NULL;
@@ -386,6 +409,7 @@ void MOJOSHADER_sdlDestroyContext(
         SDL_UnloadObject(SDL_shadercross_lib);
         SDL_shadercross_lib = NULL;
     } // if
+#endif
 
     if (ctx->linker_cache)
         hash_destroy(ctx->linker_cache, ctx);
@@ -394,6 +418,31 @@ void MOJOSHADER_sdlDestroyContext(
 
     ctx->free_fn(ctx, ctx->malloc_data);
 } // MOJOSHADER_sdlDestroyContext
+
+int MOJOSHADER_sdlSetShaderCrossTestMode(
+    MOJOSHADER_sdlContext *ctx,
+    int enabled
+) {
+    if (ctx == NULL)
+        return 0;
+    if (!enabled)
+    {
+        ctx->use_shadercross = 0;
+        return 1;
+    } // if
+#if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+    if (!(SDL_GetGPUShaderFormats(ctx->device) & SDL_ShaderCross_GetSPIRVShaderFormats()))
+        return 0;
+    ctx->use_shadercross = 1;
+    return 1;
+#else
+    if (SDL_ShaderCross_ReflectGraphicsSPIRV == NULL ||
+        SDL_ShaderCross_CompileGraphicsShaderFromSPIRV == NULL)
+        return 0;
+    ctx->use_shadercross = 1;
+    return 1;
+#endif
+} // MOJOSHADER_sdlSetShaderCrossTestMode
 
 static uint16_t shaderTagCounter = 1;
 
@@ -523,7 +572,7 @@ static MOJOSHADER_sdlProgram *compile_program(
         } // if
     } // else if
 
-    if (SDL_ShaderCross_CompileGraphicsShaderFromSPIRV != NULL)
+    if (ctx->use_shadercross)
     {
         crossCreateInfo.bytecode = (const Uint8*) vshaderSource;
         crossCreateInfo.bytecode_size = vshaderCodeSize;
@@ -536,11 +585,23 @@ static MOJOSHADER_sdlProgram *compile_program(
             crossCreateInfo.bytecode_size,
             0
         );
+        if (whoCares == NULL)
+        {
+            set_error(SDL_GetError());
+            if (pshaderSource != pshader->parseData->output)
+                ctx->free_fn(pshaderSource, ctx->malloc_data);
+            ctx->free_fn(program, ctx->malloc_data);
+            return NULL;
+        } // if
 
         program->vertexShader = SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
             ctx->device,
             &crossCreateInfo,
+#if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+            &whoCares->resource_info,
+#else
             whoCares,
+#endif
             0
         );
 
@@ -566,11 +627,13 @@ static MOJOSHADER_sdlProgram *compile_program(
     if (program->vertexShader == NULL)
     {
         set_error(SDL_GetError());
+        if (pshaderSource != pshader->parseData->output)
+            ctx->free_fn(pshaderSource, ctx->malloc_data);
         ctx->free_fn(program, ctx->malloc_data);
         return NULL;
     } // if
 
-    if (SDL_ShaderCross_CompileGraphicsShaderFromSPIRV != NULL)
+    if (ctx->use_shadercross)
     {
         crossCreateInfo.bytecode = (const Uint8*) pshaderSource;
         crossCreateInfo.bytecode_size = pshaderCodeSize;
@@ -583,11 +646,24 @@ static MOJOSHADER_sdlProgram *compile_program(
             crossCreateInfo.bytecode_size,
             0
         );
+        if (whoCares == NULL)
+        {
+            set_error(SDL_GetError());
+            SDL_ReleaseGPUShader(ctx->device, program->vertexShader);
+            if (pshaderSource != pshader->parseData->output)
+                ctx->free_fn(pshaderSource, ctx->malloc_data);
+            ctx->free_fn(program, ctx->malloc_data);
+            return NULL;
+        } // if
 
         program->pixelShader = SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
             ctx->device,
             &crossCreateInfo,
+#if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+            &whoCares->resource_info,
+#else
             whoCares,
+#endif
             0
         );
 
@@ -612,6 +688,8 @@ static MOJOSHADER_sdlProgram *compile_program(
     {
         set_error(SDL_GetError());
         SDL_ReleaseGPUShader(ctx->device, program->vertexShader);
+        if (pshaderSource != pshader->parseData->output)
+            ctx->free_fn(pshaderSource, ctx->malloc_data);
         ctx->free_fn(program, ctx->malloc_data);
         return NULL;
     } // if
