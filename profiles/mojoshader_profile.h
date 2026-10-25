@@ -79,6 +79,18 @@ typedef struct CtabData
     MOJOSHADER_symbol *symbols;
 } CtabData;
 
+typedef enum FlowControlBlock
+{
+    FLOW_CONTROL_BLOCK_LOOP,
+    FLOW_CONTROL_BLOCK_REP,
+    FLOW_CONTROL_BLOCK_IF_STATIC,
+    FLOW_CONTROL_BLOCK_IF_STATIC_ELSE,
+    FLOW_CONTROL_BLOCK_IF_DYNAMIC,
+    FLOW_CONTROL_BLOCK_IF_DYNAMIC_ELSE
+} FlowControlBlock;
+
+#define MAX_FLOW_CONTROL_BLOCKS 64
+
 // Context...this is state that changes as we parse through a shader...
 typedef struct Context
 {
@@ -147,6 +159,11 @@ typedef struct Context
     int coissue;
     int loops;
     int reps;
+    int loop_rep_depth;
+    int static_if_depth;
+    int dynamic_if_depth;
+    int flow_control_stack_index;
+    FlowControlBlock flow_control_stack[MAX_FLOW_CONTROL_BLOCKS];
     int current_label_register_plus_one;
     int max_reps;
     int cmps;

@@ -2145,6 +2145,8 @@ static void state_RET(Context *ctx)
         fail(ctx, "LOOP without ENDLOOP");
     if (ctx->reps > 0)
         fail(ctx, "REP without ENDREP");
+    if ((ctx->static_if_depth > 0) || (ctx->dynamic_if_depth > 0))
+        fail(ctx, "IF without ENDIF");
     ctx->current_label_register_plus_one = 0;
 } // state_RET
 
@@ -2233,6 +2235,26 @@ static void state_RSQ(Context *ctx)
         fail(ctx, "RSQ without replicate swizzle");
 } // state_RSQ
 
+static int push_flow_control_block(Context *ctx, const FlowControlBlock block)
+{
+    if (ctx->flow_control_stack_index >= MAX_FLOW_CONTROL_BLOCKS)
+    {
+        fail(ctx, "Flow-control nesting exceeds the parser limit");
+        return 0;
+    } // if
+
+    ctx->flow_control_stack[ctx->flow_control_stack_index++] = block;
+    return 1;
+} // push_flow_control_block
+
+static int flow_control_block_is_if(const FlowControlBlock block)
+{
+    return (block == FLOW_CONTROL_BLOCK_IF_STATIC) ||
+           (block == FLOW_CONTROL_BLOCK_IF_STATIC_ELSE) ||
+           (block == FLOW_CONTROL_BLOCK_IF_DYNAMIC) ||
+           (block == FLOW_CONTROL_BLOCK_IF_DYNAMIC_ELSE);
+} // flow_control_block_is_if
+
 static void state_LOOP(Context *ctx)
 {
     if (shader_is_pixel(ctx) && !shader_version_atleast(ctx, 3, 0))
@@ -2241,16 +2263,33 @@ static void state_LOOP(Context *ctx)
         fail(ctx, "LOOP argument isn't loop register");
     else if (ctx->source_args[1].regtype != REG_TYPE_CONSTINT)
         fail(ctx, "LOOP argument isn't constint register");
-    else
+    else if (push_flow_control_block(ctx, FLOW_CONTROL_BLOCK_LOOP))
+    {
         ctx->loops++;
+        ctx->loop_rep_depth++;
+        const int limit = ((ctx->major_ver == 2) && (ctx->minor_ver == 0)) ? 1 : 4;
+        if (ctx->loop_rep_depth > limit)
+            fail(ctx, "LOOP/REP nesting exceeds the shader-model limit");
+    } // else if
 } // state_LOOP
 
 static void state_ENDLOOP(Context *ctx)
 {
-    // !!! FIXME: check that we aren't straddling an IF block.
     if (ctx->loops <= 0)
+    {
         fail(ctx, "ENDLOOP without LOOP");
+        return;
+    } // if
+    if ((ctx->flow_control_stack_index <= 0) ||
+        (ctx->flow_control_stack[ctx->flow_control_stack_index - 1] !=
+         FLOW_CONTROL_BLOCK_LOOP))
+    {
+        fail(ctx, "ENDLOOP crosses another flow-control block");
+        return;
+    } // if
+    ctx->flow_control_stack_index--;
     ctx->loops--;
+    ctx->loop_rep_depth--;
 } // state_ENDLOOP
 
 static void state_BREAKP(Context *ctx)
@@ -2281,19 +2320,39 @@ static void state_REP(Context *ctx)
 {
     const RegisterType regtype = ctx->source_args[0].regtype;
     if (regtype != REG_TYPE_CONSTINT)
+    {
         fail(ctx, "REP argument isn't constint register");
+        return;
+    } // if
 
+    if (!push_flow_control_block(ctx, FLOW_CONTROL_BLOCK_REP))
+        return;
     ctx->reps++;
+    ctx->loop_rep_depth++;
     if (ctx->reps > ctx->max_reps)
         ctx->max_reps = ctx->reps;
+    const int limit = ((ctx->major_ver == 2) && (ctx->minor_ver == 0)) ? 1 : 4;
+    if (ctx->loop_rep_depth > limit)
+        fail(ctx, "LOOP/REP nesting exceeds the shader-model limit");
 } // state_REP
 
 static void state_ENDREP(Context *ctx)
 {
-    // !!! FIXME: check that we aren't straddling an IF block.
     if (ctx->reps <= 0)
+    {
         fail(ctx, "ENDREP without REP");
+        return;
+    } // if
+    if ((ctx->flow_control_stack_index <= 0) ||
+        (ctx->flow_control_stack[ctx->flow_control_stack_index - 1] !=
+         FLOW_CONTROL_BLOCK_REP))
+    {
+        fail(ctx, "ENDREP crosses another flow-control block");
+        return;
+    } // if
+    ctx->flow_control_stack_index--;
     ctx->reps--;
+    ctx->loop_rep_depth--;
 } // state_ENDREP
 
 static void state_CMP(Context *ctx)
@@ -2416,21 +2475,91 @@ static void state_IF(Context *ctx)
 {
     const RegisterType regtype = ctx->source_args[0].regtype;
     if ((regtype != REG_TYPE_PREDICATE) && (regtype != REG_TYPE_CONSTBOOL))
+    {
         fail(ctx, "IF src0 must be CONSTBOOL or PREDICATE");
+        return;
+    } // if
     else if ((regtype == REG_TYPE_PREDICATE) &&
              !shader_version_atleast(ctx, 2, 1))
+    {
         fail(ctx, "IF predicate argument requires Shader Model 2.x or later");
-    // !!! FIXME: track if nesting depth.
+        return;
+    } // else if
+
+    const int dynamic = (regtype == REG_TYPE_PREDICATE);
+    if (!push_flow_control_block(ctx, dynamic ? FLOW_CONTROL_BLOCK_IF_DYNAMIC
+                                             : FLOW_CONTROL_BLOCK_IF_STATIC))
+        return;
+    int *depth = dynamic ? &ctx->dynamic_if_depth : &ctx->static_if_depth;
+    (*depth)++;
+    if (*depth > 24)
+        fail(ctx, "IF nesting exceeds the shader-model limit");
 } // state_IF
 
 static void state_IFC(Context *ctx)
 {
     if (!replicate_swizzle(ctx->source_args[0].swizzle))
+    {
         fail(ctx, "IFC src0 must have replicate swizzle");
+        return;
+    } // if
     else if (!replicate_swizzle(ctx->source_args[1].swizzle))
+    {
         fail(ctx, "IFC src1 must have replicate swizzle");
-    // !!! FIXME: track if nesting depth.
+        return;
+    } // else if
+
+    if (!push_flow_control_block(ctx, FLOW_CONTROL_BLOCK_IF_DYNAMIC))
+        return;
+    ctx->dynamic_if_depth++;
+    if (ctx->dynamic_if_depth > 24)
+        fail(ctx, "IF nesting exceeds the shader-model limit");
 } // state_IFC
+
+static void state_ELSE(Context *ctx)
+{
+    if (ctx->flow_control_stack_index <= 0)
+    {
+        fail(ctx, "ELSE without IF");
+        return;
+    } // if
+
+    FlowControlBlock *block =
+        &ctx->flow_control_stack[ctx->flow_control_stack_index - 1];
+    if (!flow_control_block_is_if(*block))
+        fail(ctx, "ELSE crosses another flow-control block");
+    else if ((*block == FLOW_CONTROL_BLOCK_IF_STATIC_ELSE) ||
+             (*block == FLOW_CONTROL_BLOCK_IF_DYNAMIC_ELSE))
+        fail(ctx, "Multiple ELSE instructions for one IF");
+    else if (*block == FLOW_CONTROL_BLOCK_IF_STATIC)
+        *block = FLOW_CONTROL_BLOCK_IF_STATIC_ELSE;
+    else
+        *block = FLOW_CONTROL_BLOCK_IF_DYNAMIC_ELSE;
+} // state_ELSE
+
+static void state_ENDIF(Context *ctx)
+{
+    if (ctx->flow_control_stack_index <= 0)
+    {
+        fail(ctx, "ENDIF without IF");
+        return;
+    } // if
+
+    const FlowControlBlock block =
+        ctx->flow_control_stack[ctx->flow_control_stack_index - 1];
+    if (!flow_control_block_is_if(block))
+    {
+        fail(ctx, "ENDIF crosses another flow-control block");
+        return;
+    } // if
+
+    ctx->flow_control_stack_index--;
+    if ((block == FLOW_CONTROL_BLOCK_IF_STATIC) ||
+        (block == FLOW_CONTROL_BLOCK_IF_STATIC_ELSE))
+        ctx->static_if_depth--;
+    else
+        ctx->dynamic_if_depth--;
+} // state_ENDIF
 
 static void state_BREAKC(Context *ctx)
 {
@@ -4989,6 +5118,9 @@ const MOJOSHADER_parseData *MOJOSHADER_parse(const char *profile,
     } // while
 
     ctx->current_position = MOJOSHADER_POSITION_AFTER;
+
+    if (ctx->flow_control_stack_index > 0)
+        fail(ctx, "Unterminated flow-control block");
 
     // for ps_1_*, the output color is written to r0...throw an
     //  error if this register was never written. This isn't
