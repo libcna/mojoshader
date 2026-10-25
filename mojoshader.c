@@ -722,6 +722,28 @@ static void validate_sampler_register_source(Context *ctx,
     fail(ctx, "sampler pseudo-register cannot be read directly");
 } // validate_sampler_register_source
 
+static void validate_typed_control_register_source(Context *ctx,
+                                                   const RegisterType regtype,
+                                                   const int source_index)
+{
+    if (regtype == REG_TYPE_CONSTINT)
+    {
+        if (((ctx->current_opcode == OPCODE_LOOP) && (source_index == 1)) ||
+            ((ctx->current_opcode == OPCODE_REP) && (source_index == 0)))
+            return;
+
+        fail(ctx, "integer constant register requires LOOP or REP");
+    } // if
+    else if (regtype == REG_TYPE_CONSTBOOL)
+    {
+        if (((ctx->current_opcode == OPCODE_IF) && (source_index == 0)) ||
+            ((ctx->current_opcode == OPCODE_CALLNZ) && (source_index == 1)))
+            return;
+
+        fail(ctx, "Boolean constant register requires IF or CALLNZ");
+    } // else if
+} // validate_typed_control_register_source
+
 static void validate_constant_control_register(Context *ctx,
                                                const RegisterType regtype,
                                                const int regnum)
@@ -1108,6 +1130,8 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     validate_output_register_source(ctx, info->regtype);
     validate_address_register_source(ctx, info->regtype);
     validate_sampler_register_source(ctx, info->regtype, source_index);
+    validate_typed_control_register_source(ctx, info->regtype,
+                                           source_index);
     validate_constant_control_register(ctx, info->regtype, info->regnum);
 
     info->swizzle = adjust_swizzle(ctx, info->regtype, info->regnum, swizzle);

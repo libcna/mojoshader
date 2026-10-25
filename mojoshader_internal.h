@@ -446,7 +446,10 @@ void buffer_patch(Buffer *buffer, const size_t start,
 // we need to reference these by explicit value occasionally...
 #define OPCODE_RCP 6
 #define OPCODE_RSQ 7
+#define OPCODE_CALLNZ 26
+#define OPCODE_LOOP 27
 #define OPCODE_RET 28
+#define OPCODE_REP 38
 #define OPCODE_IF 40
 #define OPCODE_IFC 41
 #define OPCODE_BREAK 44
