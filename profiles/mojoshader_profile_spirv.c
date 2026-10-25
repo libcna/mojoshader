@@ -2119,6 +2119,14 @@ void emit_SPIRV_global(Context *ctx, RegisterType regtype, int regnum)
     if (r->spirv.iddecl == 0)
         r->spirv.iddecl = spv_bumpid(ctx);
 
+    if (sc == SpvStorageClassOutput && regtype == REG_TYPE_TEMP)
+    {
+        /* ps_1_x has no oC# register: r0 IS the colour output. Nothing decorated it, and a
+         * SPIR-V fragment output with no Location is not a legal entry-point interface --
+         * "Entry point arguments and return values must all have bindings". -CNA */
+        spv_output_color_location(ctx, r->spirv.iddecl, 0);
+    } // if
+
     push_output(ctx, &ctx->mainline_intro);
     spv_emit(ctx, 4, SpvOpVariable, tid, r->spirv.iddecl, sc);
     pop_output(ctx);
