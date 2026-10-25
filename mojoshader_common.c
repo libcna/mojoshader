@@ -1055,7 +1055,7 @@ size_t MOJOSHADER_printFloat(char *text, size_t maxlen, float arg)
             left -= len;
         arg -= value;
 
-        int mult = 10;
+        long long mult = 10;
         if (left > 1)
         {
             *text = '.';
