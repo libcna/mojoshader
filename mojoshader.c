@@ -3452,6 +3452,9 @@ static void state_TEXLD(Context *ctx)
         } // else if
         else if (src->src_mod != SRCMOD_NONE)
             fail(ctx, "ps_1_4 TEXLD source modifier must be NONE, DZ, or DW");
+        else if ((src->regtype == REG_TYPE_TEMP) &&
+                 (src->swizzle != 0xE4) && (src->swizzle != 0xA4))
+            fail(ctx, "ps_1_4 TEXLD temporary source must select XYZ");
         if (src->regtype == REG_TYPE_TEXTURE)
             validate_pixel14_texture_coordinate_selector(ctx, src);
         add_sampler(ctx, dst->regnum, TEXTURE_TYPE_2D, 0);
