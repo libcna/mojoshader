@@ -2253,6 +2253,45 @@ static int pixel_shader_model_one_opcode_allowed(const uint32 opcode,
     } // switch
 } // pixel_shader_model_one_opcode_allowed
 
+static int vertex_shader_model_one_opcode_allowed(const uint32 opcode)
+{
+    switch (opcode)
+    {
+        case 0:  // NOP
+        case 1:  // MOV
+        case 2:  // ADD
+        case 3:  // SUB
+        case 4:  // MAD
+        case 5:  // MUL
+        case 6:  // RCP
+        case 7:  // RSQ
+        case 8:  // DP3
+        case 9:  // DP4
+        case 10: // MIN
+        case 11: // MAX
+        case 12: // SLT
+        case 13: // SGE
+        case 14: // EXP
+        case 15: // LOG
+        case 16: // LIT
+        case 17: // DST
+        case 19: // FRC
+        case 20: // M4X4
+        case 21: // M4X3
+        case 22: // M3X4
+        case 23: // M3X3
+        case 24: // M3X2
+        case 31: // DCL
+        case 78: // EXPP
+        case 79: // LOGP
+        case 81: // DEF
+            return 1;
+
+        default:
+            return 0;
+    } // switch
+} // vertex_shader_model_one_opcode_allowed
+
 
 // parse various token types...
 
@@ -2304,6 +2343,13 @@ static int parse_instruction_token(Context *ctx)
     {
         failf(ctx, "opcode '%s' not available in pixel Shader Model 1.%d.",
               instruction->opcode_string, ctx->minor_ver);
+    } // if
+
+    if (shader_is_vertex(ctx) && (ctx->major_ver == 1) &&
+        !vertex_shader_model_one_opcode_allowed(opcode))
+    {
+        failf(ctx, "opcode '%s' not available in vertex Shader Model 1.1.",
+              instruction->opcode_string);
     } // if
 
     memset(ctx->dwords, '\0', sizeof (ctx->dwords));
