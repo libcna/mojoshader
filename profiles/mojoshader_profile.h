@@ -162,6 +162,7 @@ typedef struct Context
     int loop_rep_depth;
     int static_if_depth;
     int dynamic_if_depth;
+    int static_flow_count;
     int flow_control_stack_index;
     FlowControlBlock flow_control_stack[MAX_FLOW_CONTROL_BLOCKS];
     int current_label_register_plus_one;
