@@ -1235,6 +1235,7 @@ static int opcode_reads_sources_componentwise(const uint32 opcode)
         case 88: // CMP
         case 91: // DSX
         case 92: // DSY
+        case 80: // CND
             return 1;
         default:
             return 0;
