@@ -162,6 +162,13 @@ typedef struct Context
     int previous_writemask;
     int previous_coissue;
     int phase_count;
+    int pixel14_color_read_before_phase;
+    int pixel14_texkill_before_phase;
+    int pixel14_texdepth_consumed;
+    uint32 pixel14_texture_writes;
+    uint32 pixel14_texture_value_writes;
+    uint32 pixel14_previous_phase_temp_xy;
+    uint32 pixel14_previous_phase_temp_xyz;
     int bem_count;
     uint32 texbem_read_registers;
     int coissue;

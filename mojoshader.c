@@ -483,6 +483,43 @@ static void validate_pixel_shader_model_one_instruction_slot_count(
               ctx->pixel_arithmetic_instruction_count, ctx->minor_ver);
 } // validate_pixel_shader_model_one_instruction_slot_count
 
+static void validate_pixel_shader_model_14_phase_structure(Context *ctx,
+                                                            const uint32 opcode)
+{
+    if (!shader_is_pixel(ctx) || !shader_version_exactly(ctx, 1, 4) ||
+        !pixel_shader_model_one_texture_opcode(opcode))
+        return;
+
+    if (ctx->pixel_arithmetic_instruction_count != 0)
+        fail(ctx, "ps_1_4 texture instructions must precede arithmetic within each phase");
+
+    uint32 destination_bit = 0;
+    if (ctx->have_dest_arg && (ctx->dest_arg.regtype == REG_TYPE_TEMP) &&
+        (ctx->dest_arg.regnum >= 0) && (ctx->dest_arg.regnum < 32))
+    {
+        destination_bit = 1u << ctx->dest_arg.regnum;
+        if ((ctx->pixel14_texture_writes & destination_bit) != 0)
+            fail(ctx, "ps_1_4 texture destination stage reused in one texture block");
+    } // if
+
+    int i;
+    for (i = 0; i < ctx->current_source_arg; i++)
+    {
+        const SourceArgInfo *src = &ctx->source_args[i];
+        if ((src->regtype == REG_TYPE_TEMP) && (src->regnum >= 0) &&
+            (src->regnum < 32) &&
+            ((ctx->pixel14_texture_value_writes & (1u << src->regnum)) != 0))
+        {
+            fail(ctx, "ps_1_4 dependent texture read requires a phase boundary");
+        } // if
+    } // for
+
+    if (destination_bit != 0)
+        ctx->pixel14_texture_writes |= destination_bit;
+    if ((destination_bit != 0) && (opcode != 65) && (opcode != 87))
+        ctx->pixel14_texture_value_writes |= destination_bit;
+} // validate_pixel_shader_model_14_phase_structure
+
 static void validate_pixel_shader_model_one_destination_mask(
     Context *ctx, const uint32 opcode)
 {
@@ -963,6 +1000,13 @@ static int parse_destination_token(Context *ctx, DestArgInfo *info)
     validate_input_register(ctx, info->regtype, info->regnum);
     validate_output_register(ctx, info->regtype, info->regnum);
     validate_constant_control_register(ctx, info->regtype, info->regnum);
+
+    if (!isfail(ctx) && shader_is_pixel(ctx) &&
+        shader_version_exactly(ctx, 1, 4) && ctx->pixel14_texdepth_consumed &&
+        (info->regtype == REG_TYPE_TEMP) && (info->regnum == 5))
+    {
+        fail(ctx, "r5 is unavailable after TEXDEPTH");
+    } // if
 
     // swallow token for now, for multiple calls in a row.
     adjust_token_position(ctx, 1);
@@ -1566,6 +1610,15 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
         (ctx->current_opcode != OPCODE_TEXBEML))
     {
         failf(ctx, "Texture register t%d was consumed by TEXBEM/TEXBEML", info->regnum);
+    } // if
+
+    if (!isfail(ctx) && shader_is_pixel(ctx) && shader_version_exactly(ctx, 1, 4))
+    {
+        if (ctx->pixel14_texdepth_consumed && (info->regtype == REG_TYPE_TEMP) &&
+            (info->regnum == 5))
+            fail(ctx, "r5 is unavailable after TEXDEPTH");
+        else if ((ctx->phase_count == 0) && (info->regtype == REG_TYPE_INPUT))
+            ctx->pixel14_color_read_before_phase = 1;
     } // if
 
     if (!isfail(ctx))
@@ -3000,6 +3053,10 @@ static void state_TEXKILL(Context *ctx)
     else if (!shader_model_three && (regtype == REG_TYPE_TEMP) &&
              ((ctx->dest_arg_prior_writemask & 0x7) != 0x7))
         fail(ctx, "TEXKILL temporary XYZ components are uninitialized");
+    else if (shader_version_exactly(ctx, 1, 4) && (ctx->phase_count == 0))
+    {
+        ctx->pixel14_texkill_before_phase = 1;
+    } // else if
 
     if (shader_version_atleast(ctx, 2, 0) &&
         ((regtype == REG_TYPE_TEXTURE) ||
@@ -3270,6 +3327,12 @@ static void state_TEXDEPTH(Context *ctx)
         fail(ctx, "TEXDEPTH opcode only available in Shader Model 1.4");
     if ((ctx->dest_arg.regtype != REG_TYPE_TEMP) || (ctx->dest_arg.regnum != 5))
         fail(ctx, "TEXDEPTH destination must be r5");
+    if (ctx->phase_count == 0)
+        fail(ctx, "TEXDEPTH requires a preceding phase marker");
+    if ((ctx->pixel14_previous_phase_temp_xy & (1u << 5)) == 0)
+        fail(ctx, "TEXDEPTH requires r5.xy initialized in the previous phase");
+    if (!isfail(ctx))
+        ctx->pixel14_texdepth_consumed = 1;
 } // state_TEXDEPTH
 
 
@@ -3331,6 +3394,12 @@ static void state_TEXLD(Context *ctx)
         else if ((src->regtype != REG_TYPE_TEXTURE) &&
                  (src->regtype != REG_TYPE_TEMP))
             fail(ctx, "ps_1_4 TEXLD source must be a texture or temp register");
+        else if ((src->regtype == REG_TYPE_TEMP) &&
+                 ((ctx->phase_count == 0) ||
+                  (src->regnum < 0) || (src->regnum >= 32) ||
+                  ((ctx->pixel14_previous_phase_temp_xyz &
+                    (1u << src->regnum)) == 0)))
+            fail(ctx, "ps_1_4 TEXLD temporary source requires XYZ initialized in the previous phase");
         else if (src->src_mod == SRCMOD_DZ)
         {
             if (src->regtype != REG_TYPE_TEMP)
@@ -3781,6 +3850,7 @@ static int parse_instruction_token(Context *ctx)
     validate_restricted_destination_register(ctx, opcode);
     validate_pixel_shader_model_one_coissue_opcode(ctx, opcode);
     validate_pixel_shader_model_one_coissue_pair(ctx, opcode);
+    validate_pixel_shader_model_14_phase_structure(ctx, opcode);
 
     ctx->instruction_count += instruction->slots;
     validate_vertex_instruction_slot_count(ctx);
@@ -4616,14 +4686,36 @@ static int parse_phase_token(Context *ctx)
         fail(ctx, "phase token only available in 1.4 pixel shaders");
     else if (ctx->phase_count != 0)
         fail(ctx, "phase token may appear only once per shader");
+    else if (ctx->pixel14_color_read_before_phase)
+        fail(ctx, "ps_1_4 color registers are only available after a phase marker");
+    else if (ctx->pixel14_texkill_before_phase)
+        fail(ctx, "ps_1_4 TEXKILL must follow a phase marker when one is present");
 
     if (!isfail(ctx))
     {
+        RegisterList *reg = ctx->used_registers.next;
+        while (reg != NULL)
+        {
+            if ((reg->regtype == REG_TYPE_TEMP) &&
+                (reg->regnum >= 0) && (reg->regnum < 32))
+            {
+                const uint32 bit = 1u << reg->regnum;
+                if ((reg->written & 0x3) == 0x3)
+                    ctx->pixel14_previous_phase_temp_xy |= bit;
+                if ((reg->written & 0x7) == 0x7)
+                    ctx->pixel14_previous_phase_temp_xyz |= bit;
+                reg->written &= 0x7;
+            } // if
+            reg = reg->next;
+        } // while
+
         ctx->phase_count++;
         ctx->previous_had_dest_arg = 0;
         ctx->previous_coissue = 0;
         ctx->pixel_arithmetic_instruction_count = 0;
         ctx->pixel_texture_instruction_count = 0;
+        ctx->pixel14_texture_writes = 0;
+        ctx->pixel14_texture_value_writes = 0;
         ctx->profile->phase_emitter(ctx);
     } // if
 
@@ -5639,8 +5731,12 @@ const MOJOSHADER_parseData *MOJOSHADER_parse(const char *profile,
     //  important for vertex shaders, or shader model 2+.
     if (shader_is_pixel(ctx) && !shader_version_atleast(ctx, 2, 0))
     {
-        if (!register_was_written(ctx, REG_TYPE_TEMP, 0))
-            fail(ctx, "r0 (pixel shader 1.x color output) never written to");
+        const RegisterList *output =
+            reglist_find(&ctx->used_registers, REG_TYPE_TEMP, 0);
+        if ((output == NULL) || ((output->written & 0xF) != 0xF))
+        {
+            fail(ctx, "r0 (pixel shader 1.x color output) has uninitialized components");
+        } // if
     } // if
 
     if (!failed)
