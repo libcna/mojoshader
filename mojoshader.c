@@ -3069,14 +3069,34 @@ static void state_TEXLDL(Context *ctx)
 {
     if (!shader_version_atleast(ctx, 3, 0))
         fail(ctx, "TEXLDL in version < Shader Model 3.0");
+    else if (ctx->source_args[0].src_mod != SRCMOD_NONE)
+        fail(ctx, "TEXLDL src0 must have no modifiers");
     else if (ctx->source_args[1].regtype != REG_TYPE_SAMPLER)
         fail(ctx, "TEXLDL src1 must be sampler register");
+    else if (ctx->source_args[1].src_mod != SRCMOD_NONE)
+        fail(ctx, "TEXLDL src1 must have no modifiers");
     else
     {
         if ( ((TextureType) ctx->source_args[1].regnum) == TEXTURE_TYPE_CUBE )
             ctx->instruction_count += 3;
     } // else
 } // state_TEXLDL
+
+static void state_TEXLDD(Context *ctx)
+{
+    if (ctx->source_args[0].src_mod != SRCMOD_NONE)
+        fail(ctx, "TEXLDD src0 must have no modifiers");
+    else if (ctx->source_args[1].regtype != REG_TYPE_SAMPLER)
+        fail(ctx, "TEXLDD src1 must be sampler register");
+    else if (ctx->source_args[1].src_mod != SRCMOD_NONE)
+        fail(ctx, "TEXLDD src1 must have no modifiers");
+    else if (ctx->source_args[2].src_mod != SRCMOD_NONE)
+        fail(ctx, "TEXLDD src2 must have no modifiers");
+    else if (ctx->source_args[3].src_mod != SRCMOD_NONE)
+        fail(ctx, "TEXLDD src3 must have no modifiers");
+    else if ( ((TextureType) ctx->source_args[1].regnum) == TEXTURE_TYPE_CUBE )
+        ctx->instruction_count += 3;
+} // state_TEXLDD
 
 static void state_BEM(Context *ctx)
 {
