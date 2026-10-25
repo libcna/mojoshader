@@ -2597,7 +2597,24 @@ void emit_GLSL_DEF(Context *ctx)
 
 EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2RGB) // !!! FIXME
 EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3TEX) // !!! FIXME
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXM3X2DEPTH) // !!! FIXME
+void emit_GLSL_TEXM3X2DEPTH(Context *ctx)
+{
+    if (ctx->texm3x2pad_src0 == -1)
+        return;
+
+    char vector[64];
+    char numeratorRow[64];
+    char denominatorRow[64];
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_TEXTURE, ctx->texm3x2pad_src0,
+                            vector, sizeof (vector));
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_TEXTURE, ctx->texm3x2pad_dst0,
+                            numeratorRow, sizeof (numeratorRow));
+    get_GLSL_destarg_varname(ctx, denominatorRow, sizeof (denominatorRow));
+    output_line(ctx,
+        "gl_FragDepth = (dot(%s.xyz, %s.xyz) == 0.0) ? 1.0 : "
+        "(dot(%s.xyz, %s.xyz) / dot(%s.xyz, %s.xyz));",
+        denominatorRow, vector, numeratorRow, vector, denominatorRow, vector);
+} // emit_GLSL_TEXM3X2DEPTH
 EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3) // !!! FIXME
 
 void emit_GLSL_TEXM3X3(Context *ctx)
@@ -2633,7 +2650,13 @@ void emit_GLSL_TEXM3X3(Context *ctx)
     output_line(ctx, "%s", code);
 } // emit_GLSL_TEXM3X3
 
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXDEPTH) // !!! FIXME
+void emit_GLSL_TEXDEPTH(Context *ctx)
+{
+    char dst[64];
+    get_GLSL_destarg_varname(ctx, dst, sizeof (dst));
+    output_line(ctx, "gl_FragDepth = (%s.y == 0.0) ? 1.0 : (%s.x / %s.y);",
+                dst, dst, dst);
+} // emit_GLSL_TEXDEPTH
 
 void emit_GLSL_CMP(Context *ctx)
 {

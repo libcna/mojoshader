@@ -1883,6 +1883,20 @@ static void state_TEXM3X2TEX(Context *ctx)
         fail(ctx, "TEXM3X2TEX needs a 2D sampler");
 } // state_TEXM3X2TEX
 
+static void state_TEXM3X2DEPTH(Context *ctx)
+{
+    if (!shader_version_exactly(ctx, 1, 3))
+        fail(ctx, "TEXM3X2DEPTH opcode only available in Shader Model 1.3");
+    if (ctx->texm3x2pad_dst0 == -1)
+        fail(ctx, "TEXM3X2DEPTH opcode without matching TEXM3X2PAD");
+    state_texops(ctx, "TEXM3X2DEPTH", 0, 0);
+    if (ctx->source_args[0].regnum != ctx->texm3x2pad_src0)
+        fail(ctx, "TEXM3X2DEPTH source differs from matching TEXM3X2PAD");
+    if (ctx->dest_arg.regnum != ctx->texm3x2pad_dst0 + 1)
+        fail(ctx, "TEXM3X2DEPTH destination does not follow matching TEXM3X2PAD");
+    ctx->reset_texmpad = 1;
+} // state_TEXM3X2DEPTH
+
 static void state_TEXM3X3PAD(Context *ctx)
 {
     if (shader_version_atleast(ctx, 1, 4))
@@ -1949,6 +1963,14 @@ static void state_TEXM3X3VSPEC(Context *ctx)
 {
     state_texm3x3(ctx, "TEXM3X3VSPEC", 3);
 } // state_TEXM3X3VSPEC
+
+static void state_TEXDEPTH(Context *ctx)
+{
+    if (!shader_version_exactly(ctx, 1, 4))
+        fail(ctx, "TEXDEPTH opcode only available in Shader Model 1.4");
+    if ((ctx->dest_arg.regtype != REG_TYPE_TEMP) || (ctx->dest_arg.regnum != 5))
+        fail(ctx, "TEXDEPTH destination must be r5");
+} // state_TEXDEPTH
 
 
 static void state_TEXLD(Context *ctx)
