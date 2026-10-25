@@ -157,7 +157,7 @@ typedef WINGDIAPI void (APIENTRYP PFNGLDISABLEPROC) (GLenum cap);
 #define MAX_REG_FILE_F 8192
 #define MAX_REG_FILE_I 2047
 #define MAX_REG_FILE_B 2047
-#define MAX_TEXBEMS 3  // ps_1_1 allows 4 texture stages, texbem can't use t0.
+#define MAX_TEXBEMS 16  // D3D9 exposes 16 texture stages; BEM may use destination r0.
 
 struct MOJOSHADER_glContext
 {
@@ -3023,10 +3023,10 @@ void MOJOSHADER_glSetLegacyBumpMapEnv(unsigned int sampler, float mat00,
                                       float mat01, float mat10, float mat11,
                                       float lscale, float loffset)
 {
-    if ((sampler == 0) || (sampler > (MAX_TEXBEMS+1)))
+    if (sampler >= MAX_TEXBEMS)
         return;
 
-    GLfloat *dstf = ctx->texbem_state + (6 * (sampler-1));
+    GLfloat *dstf = ctx->texbem_state + (6 * sampler);
     *(dstf++) = (GLfloat) mat00;
     *(dstf++) = (GLfloat) mat01;
     *(dstf++) = (GLfloat) mat10;
@@ -3160,9 +3160,9 @@ void MOJOSHADER_glProgramReady(void)
             {
                 if (samps[i].texbem)
                 {
-                    assert(samps[i].index > 0);
-                    assert(samps[i].index <= MAX_TEXBEMS);
-                    memcpy(dstf, &ctx->texbem_state[6 * (samps[i].index-1)],
+                    assert(samps[i].index >= 0);
+                    assert(samps[i].index < MAX_TEXBEMS);
+                    memcpy(dstf, &ctx->texbem_state[6 * samps[i].index],
                            sizeof (GLfloat) * 6);
                     dstf[6] = 0.0f;
                     dstf[7] = 0.0f;

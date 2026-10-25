@@ -155,7 +155,7 @@ const char *make_GLSL_destarg_assign(Context *ctx, char *buf,
     // CENTROID only allowed in DCL opcodes, which shouldn't come through here.
     assert((arg->result_mod & MOD_CENTROID) == 0);
 
-    char operation[256];
+    char operation[512];
     va_list ap;
     va_start(ap, fmt);
     const int len = vsnprintf(operation, sizeof (operation), fmt, ap);
@@ -2221,7 +2221,7 @@ void emit_GLSL_TEXBEM(Context *ctx)
 {
     DestArgInfo *info = &ctx->dest_arg;
     char dst[64]; get_GLSL_destarg_varname(ctx, dst, sizeof (dst));
-    char src[64]; get_GLSL_srcarg_varname(ctx, 0, src, sizeof (src));
+    char src[128]; make_GLSL_srcarg_string_vec3(ctx, 0, src, sizeof (src));
     char sampler[64];
     char code[512];
 
@@ -2242,10 +2242,9 @@ void emit_GLSL_TEXBEM(Context *ctx)
 
 void emit_GLSL_TEXBEML(Context *ctx)
 {
-    // !!! FIXME: this code counts on the register not having swizzles, etc.
     DestArgInfo *info = &ctx->dest_arg;
     char dst[64]; get_GLSL_destarg_varname(ctx, dst, sizeof (dst));
-    char src[64]; get_GLSL_srcarg_varname(ctx, 0, src, sizeof (src));
+    char src[128]; make_GLSL_srcarg_string_vec3(ctx, 0, src, sizeof (src));
     char sampler[64];
     char code[512];
 
@@ -2255,7 +2254,7 @@ void emit_GLSL_TEXBEML(Context *ctx)
     make_GLSL_destarg_assign(ctx, code, sizeof (code),
         "(texture2D(%s, vec2(%s.x + (%s_texbem.x * %s.x) + (%s_texbem.z * %s.y),"
         " %s.y + (%s_texbem.y * %s.x) + (%s_texbem.w * %s.y)))) *"
-        " ((%s.z * %s_texbeml.x) + %s_texbem.y)",
+        " ((%s.z * %s_texbeml.x) + %s_texbeml.y)",
         sampler,
         dst, sampler, src, sampler, src,
         dst, sampler, src, sampler, src,
@@ -2710,7 +2709,22 @@ void emit_GLSL_CMP(Context *ctx)
     emit_GLSL_comparison_operations(ctx, ">= 0.0");
 } // emit_GLSL_CMP
 
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(BEM) // !!! FIXME
+void emit_GLSL_BEM(Context *ctx)
+{
+    const DestArgInfo *info = &ctx->dest_arg;
+    char src0[128]; make_GLSL_srcarg_string_vec2(ctx, 0, src0, sizeof (src0));
+    char src1[128]; make_GLSL_srcarg_string_vec2(ctx, 1, src1, sizeof (src1));
+    char sampler[64];
+    char code[512];
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_SAMPLER, info->regnum,
+                            sampler, sizeof (sampler));
+    make_GLSL_destarg_assign(ctx, code, sizeof (code),
+        "vec2(%s.x + (%s_texbem.x * %s.x) + (%s_texbem.z * %s.y),"
+        " %s.y + (%s_texbem.y * %s.x) + (%s_texbem.w * %s.y))",
+        src0, sampler, src1, sampler, src1,
+        src0, sampler, src1, sampler, src1);
+    output_line(ctx, "%s", code);
+} // emit_GLSL_BEM
 
 void emit_GLSL_DP2ADD(Context *ctx)
 {

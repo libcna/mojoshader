@@ -1608,26 +1608,26 @@ DECLSPEC void MOJOSHADER_glMapUniformBufferMemory(float **vsf, int **vsi, unsign
 DECLSPEC void MOJOSHADER_glUnmapUniformBufferMemory();
 
 /*
- * Set up the vector for the TEXBEM opcode. Most apps can ignore this API.
+ * Set up the vector for the TEXBEM, TEXBEML or BEM opcode. Most apps can ignore this API.
  *
  * Shader Model 1.1 through 1.3 had an instruction for "fake bump mapping"
  *  called TEXBEM. To use it, you had to set some sampler states,
  *  D3DTSS_BUMPENVMATxx, which would be referenced by the opcode.
  *
- * This functionality was removed from Shader Model 1.4 and later, because
- *  it was special-purpose and limited. The functionality could be built on
- *  more general opcodes, and the sampler state could be supplied in a more
- *  general uniform.
+ * Shader Model 1.4 replaced the special texture lookup with the BEM arithmetic
+ *  instruction, which consumes the same matrix state. The functionality was
+ *  removed from later shader models, where general opcodes and uniforms can
+ *  express the same calculation.
  *
- * However, to support this opcode, we supply a way to specify that sampler
+ * However, to support these opcodes, we supply a way to specify that sampler
  *  state, and the OpenGL glue code does the right thing to pass that
  *  information to the shader.
  *
  * This call maps to IDirect3DDevice::SetTextureStageState() with the
  *  D3DTSS_BUMPENVMAT00, D3DTSS_BUMPENVMAT01, D3DTSS_BUMPENVMAT10,
  *  D3DTSS_BUMPENVMAT11, D3DTSS_BUMPENVLSCALE, and D3DTSS_BUMPENVLOFFSET
- *  targets. This is only useful for Shader Model < 1.4 pixel shaders, if
- *  they use the TEXBEM or TEXBEML opcode. If you aren't sure, you don't need
+ *  targets. This is only useful for Shader Model 1 pixel shaders that use
+ *  TEXBEM, TEXBEML or BEM. If you aren't sure, you don't need
  *  this function.
  *
  * Like the rest of your uniforms, you must call MOJOSHADER_glProgramReady()
@@ -2412,6 +2412,15 @@ typedef enum MOJOSHADER_renderStateType
     MOJOSHADER_RS_SRCBLENDALPHA,
     MOJOSHADER_RS_DESTBLENDALPHA,
     MOJOSHADER_RS_BLENDOPALPHA,
+
+    /* Direct3D 9 Effect Framework texture-stage state assignments consumed by
+     * legacy TEXBEM, TEXBEML and BEM pixel instructions. */
+    MOJOSHADER_RS_BUMPENVMAT00 = 112,
+    MOJOSHADER_RS_BUMPENVMAT01 = 113,
+    MOJOSHADER_RS_BUMPENVMAT10 = 114,
+    MOJOSHADER_RS_BUMPENVMAT11 = 115,
+    MOJOSHADER_RS_BUMPENVLSCALE = 117,
+    MOJOSHADER_RS_BUMPENVLOFFSET = 118,
 
     /* These aren't really "states", but these numbers are
      * referred to by MOJOSHADER_effectStateType as such.

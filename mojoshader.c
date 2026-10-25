@@ -2091,6 +2091,26 @@ static void state_TEXLDL(Context *ctx)
     } // else
 } // state_TEXLDL
 
+static void state_BEM(Context *ctx)
+{
+    if (!shader_version_exactly(ctx, 1, 4))
+        fail(ctx, "BEM opcode only available in Shader Model 1.4");
+    if (ctx->phase_count != 0)
+        fail(ctx, "BEM opcode must appear in the first phase");
+    if (ctx->bem_count != 0)
+        fail(ctx, "BEM opcode may appear only once per shader");
+    if (ctx->coissue)
+        fail(ctx, "BEM opcode cannot be co-issued");
+    if ((ctx->dest_arg.regtype != REG_TYPE_TEMP) ||
+        (ctx->dest_arg.orig_writemask != 0x3))
+        fail(ctx, "BEM destination must be a temporary register with .rg mask");
+    if (!isfail(ctx))
+    {
+        add_sampler(ctx, ctx->dest_arg.regnum, TEXTURE_TYPE_2D, 2);
+        ctx->bem_count++;
+    } // if
+} // state_BEM
+
 static void state_DP2ADD(Context *ctx)
 {
     if (!replicate_swizzle(ctx->source_args[2].swizzle))
@@ -3010,15 +3030,19 @@ static int parse_end_token(Context *ctx)
 
 static int parse_phase_token(Context *ctx)
 {
-    // !!! FIXME: needs state; allow only one phase token per shader, I think?
     if (SWAP32(*(ctx->tokens)) != 0x0000FFFD) // phase token always 0x0000FFFD.
         return 0;  // not us, eat no tokens.
 
     if ( (!shader_is_pixel(ctx)) || (!shader_version_exactly(ctx, 1, 4)) )
         fail(ctx, "phase token only available in 1.4 pixel shaders");
+    else if (ctx->phase_count != 0)
+        fail(ctx, "phase token may appear only once per shader");
 
     if (!isfail(ctx))
+    {
+        ctx->phase_count++;
         ctx->profile->phase_emitter(ctx);
+    } // if
 
     return 1;
 } // parse_phase_token
@@ -3395,7 +3419,7 @@ static MOJOSHADER_sampler *build_samplers(Context *ctx)
             retval[i].type = cvtD3DToMojoSamplerType((TextureType) item->index);
             retval[i].index = item->regnum;
             retval[i].name = alloc_varname(ctx, item);
-            retval[i].texbem = (item->misc != 0) ? 1 : 0;
+            retval[i].texbem = item->misc;
             item = item->next;
         } // for
     } // if

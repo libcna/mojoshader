@@ -130,6 +130,8 @@ typedef struct Context
     int instruction_count;
     uint32 instruction_controls;
     uint32 previous_opcode;
+    int phase_count;
+    int bem_count;
     int coissue;
     int loops;
     int reps;

@@ -658,7 +658,11 @@ static int render_state_type_is_valid(const uint32 type)
 {
     return (type <= MOJOSHADER_RS_BLENDOPALPHA) || (type == MOJOSHADER_RS_VERTEXSHADER)
         || (type == MOJOSHADER_RS_PIXELSHADER) || (type == MOJOSHADER_RS_PIXELSHADERCONSTANT)
-        || (type == MOJOSHADER_RS_SETSAMPLER);
+        || (type == MOJOSHADER_RS_SETSAMPLER)
+        || ((type >= MOJOSHADER_RS_BUMPENVMAT00) &&
+            (type <= MOJOSHADER_RS_BUMPENVMAT11))
+        || (type == MOJOSHADER_RS_BUMPENVLSCALE)
+        || (type == MOJOSHADER_RS_BUMPENVLOFFSET);
 } // render_state_type_is_valid
 
 static int readstates(const uint32 numstates,
