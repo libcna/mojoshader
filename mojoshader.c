@@ -2315,6 +2315,40 @@ static void state_DCL(Context *ctx)
     set_defined_register(ctx, regtype, regnum);
 } // state_DCL
 
+static void validate_pixel14_texture_coordinate_selector(
+    Context *ctx, const SourceArgInfo *src)
+{
+    int selector_xyw;
+    if ((src->swizzle == 0xE4) || (src->swizzle == 0xA4))
+        selector_xyw = 0;
+    else if (src->swizzle == 0xF4)
+        selector_xyw = 1;
+    else
+    {
+        fail(ctx, "ps_1_4 texture coordinate source must select XYZ or XYW");
+        return;
+    } // else
+
+    if (isfail(ctx) || (src->regnum < 0) || (src->regnum >= 32))
+        return;
+
+    const uint32 bit = 1u << src->regnum;
+    if ((ctx->pixel14_texture_selector_seen & bit) != 0)
+    {
+        const int previous_xyw =
+            (ctx->pixel14_texture_selector_xyw & bit) != 0;
+        if (previous_xyw != selector_xyw)
+            failf(ctx, "Texture coordinate register t%d uses inconsistent selectors",
+                  src->regnum);
+    } // if
+    else
+    {
+        ctx->pixel14_texture_selector_seen |= bit;
+        if (selector_xyw)
+            ctx->pixel14_texture_selector_xyw |= bit;
+    } // else
+} // validate_pixel14_texture_coordinate_selector
+
 static void state_TEXCRD(Context *ctx)
 {
     if (shader_version_atleast(ctx, 2, 0))
@@ -2338,6 +2372,8 @@ static void state_TEXCRD(Context *ctx)
             fail(ctx, "ps_1_4 TEXCRD source modifier must be NONE or DW");
         else if (dst->orig_writemask != 0x7)
             fail(ctx, "ps_1_4 TEXCRD destination must use the XYZ mask");
+        if (src->regtype == REG_TYPE_TEXTURE)
+            validate_pixel14_texture_coordinate_selector(ctx, src);
     } // else if
 } // state_TEXCRD
 
@@ -3416,6 +3452,8 @@ static void state_TEXLD(Context *ctx)
         } // else if
         else if (src->src_mod != SRCMOD_NONE)
             fail(ctx, "ps_1_4 TEXLD source modifier must be NONE, DZ, or DW");
+        if (src->regtype == REG_TYPE_TEXTURE)
+            validate_pixel14_texture_coordinate_selector(ctx, src);
         add_sampler(ctx, dst->regnum, TEXTURE_TYPE_2D, 0);
     } // else if
 

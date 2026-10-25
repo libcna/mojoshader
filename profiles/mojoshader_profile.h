@@ -167,6 +167,8 @@ typedef struct Context
     int pixel14_texdepth_consumed;
     uint32 pixel14_texture_writes;
     uint32 pixel14_texture_value_writes;
+    uint32 pixel14_texture_selector_seen;
+    uint32 pixel14_texture_selector_xyw;
     uint32 pixel14_previous_phase_temp_xy;
     uint32 pixel14_previous_phase_temp_xyz;
     int bem_count;
