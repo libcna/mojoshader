@@ -372,13 +372,9 @@ const char *make_GLSL_srcarg_string(Context *ctx, const size_t idx,
             break;
 
         case SRCMOD_DZ:
-            fail(ctx, "SRCMOD_DZ unsupported"); return buf; // !!! FIXME
-            postmod_str = "_dz";
             break;
 
         case SRCMOD_DW:
-            fail(ctx, "SRCMOD_DW unsupported"); return buf; // !!! FIXME
-            postmod_str = "_dw";
             break;
 
         case SRCMOD_ABSNEGATE:
@@ -479,6 +475,34 @@ const char *make_GLSL_srcarg_string(Context *ctx, const size_t idx,
     if (regtype_str == NULL)
     {
         fail(ctx, "Unknown source register type.");
+        return buf;
+    } // if
+
+    if ((arg->src_mod == SRCMOD_DZ) || (arg->src_mod == SRCMOD_DW))
+    {
+        char source[128];
+        snprintf(source, sizeof (source), "%s%s%s%s%s%s%s",
+                 regtype_str, rel_lbracket, rel_offset, rel_regtype_str,
+                 rel_swizzle, rel_rbracket, swiz_str);
+
+        char divisor[128];
+        snprintf(divisor, sizeof (divisor), "%s%s%s%s%s%s.%c",
+                 regtype_str, rel_lbracket, rel_offset, rel_regtype_str,
+                 rel_swizzle, rel_rbracket,
+                 (arg->src_mod == SRCMOD_DZ) ? 'z' : 'w');
+
+        const int vecsize = vecsize_from_writemask(writemask);
+        if (vecsize == 1)
+        {
+            snprintf(buf, buflen, "((%s == 0.0) ? 1.0 : (%s / %s))",
+                     divisor, source, divisor);
+        } // if
+        else
+        {
+            snprintf(buf, buflen,
+                     "((%s == 0.0) ? vec%d(1.0) : (%s / %s))",
+                     divisor, vecsize, source, divisor);
+        } // else
         return buf;
     } // if
 
@@ -1957,7 +1981,7 @@ void emit_GLSL_DEFI(Context *ctx)
 
 void emit_GLSL_TEXCRD(Context *ctx)
 {
-    char source[64];
+    char source[256];
     if (shader_version_atleast(ctx, 1, 4))
     {
         make_GLSL_srcarg_string_masked(ctx, 0, source, sizeof (source));

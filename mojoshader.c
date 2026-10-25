@@ -3668,9 +3668,11 @@ static void process_definitions(Context *ctx)
                      * register or a pixel texture register. Shader Model 1
                      * pixel texture registers start with the corresponding
                      * interpolated TEXCOORD, even though that shader model has
-                     * no DCL instruction with which to declare the input. */
+                     * no DCL instruction with which to declare the input. In
+                     * ps_1_4 they are read-only inputs instead of the mutable
+                     * ps_1_1--1_3 register, but still need the attribute. */
                     if (shader_is_pixel(ctx) &&
-                        !shader_version_atleast(ctx, 1, 4))
+                        !shader_version_atleast(ctx, 2, 0))
                     {
                         add_attribute_register(ctx, REG_TYPE_TEXTURE, regnum,
                                                MOJOSHADER_USAGE_TEXCOORD,
