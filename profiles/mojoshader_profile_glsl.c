@@ -730,24 +730,33 @@ void emit_GLSL_global(Context *ctx, RegisterType regtype, int regnum)
                 output_line(ctx, "ivec4 %s;", varname);
             else if (shader_is_pixel(ctx))  // actually REG_TYPE_TEXTURE.
             {
-                // We have to map texture registers to temps for ps_1_1, since
-                //  they work like temps, initialize with tex coords, and the
-                //  ps_1_1 TEX opcode expects to overwrite it.
+                /* We have to map texture registers to temps for ps_1_1, since
+                 * they work like temps, initialize with tex coords, and the
+                 * ps_1_1 TEX opcode expects to overwrite it. Inputs cannot be
+                 * used in a global initializer in GLSL ES, so declare the
+                 * mutable register globally and copy its implicit input at
+                 * the start of main instead. */
                 if (!shader_version_atleast(ctx, 1, 4))
                 {
-                    // GLSL ES does not have gl_TexCoord!
-                    // Also, gl_TexCoord[4+] is unreliable!
+                    char source[64];
+                    output_line(ctx, "vec4 %s;", varname);
+
+                    /* GLSL ES does not have gl_TexCoord. gl_TexCoord[4+] is
+                     * unreliable in desktop compatibility profiles too. */
 #if SUPPORT_PROFILE_GLSLES
                     const int skipGLTexCoord = support_glsles(ctx) || (regnum >= 4);
 #else
                     const int skipGLTexCoord = (regnum >= 4);
 #endif
                     if (skipGLTexCoord)
-                        output_line(ctx, "vec4 %s = io_%i_%i;",
-                                    varname, MOJOSHADER_USAGE_TEXCOORD, regnum);
+                        snprintf(source, sizeof (source), "io_%i_%i",
+                                 MOJOSHADER_USAGE_TEXCOORD, regnum);
                     else
-                        output_line(ctx, "vec4 %s = gl_TexCoord[%d];",
-                                    varname, regnum);
+                        snprintf(source, sizeof (source), "gl_TexCoord[%d]", regnum);
+
+                    push_output(ctx, &ctx->mainline_intro);
+                    output_line(ctx, "%s = %s;", varname, source);
+                    pop_output(ctx);
                 } // if
             } // else if
             break;
@@ -1122,6 +1131,9 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
     else if (shader_is_pixel(ctx))
     {
+        const int mutable_texture_register =
+            (regtype == REG_TYPE_TEXTURE) &&
+            !shader_version_atleast(ctx, 1, 4);
         if (support_glsles3(ctx))
             qualifier_in = "in";
         else
@@ -1253,9 +1265,10 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             else
 #endif
             output_line(ctx, "varying vec4 io_%i_%i;", usage, index);
-            output_line(ctx, "#define %s io_%i_%i", var, usage, index);
+            if (!mutable_texture_register)
+                output_line(ctx, "#define %s io_%i_%i", var, usage, index);
         } // if
-        else
+        else if (!mutable_texture_register)
         {
             output_line(ctx, "#define %s %s%s%s%s", var, usage_str,
                         arrayleft, index_str, arrayright);

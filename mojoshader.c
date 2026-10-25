@@ -3664,6 +3664,19 @@ static void process_definitions(Context *ctx)
                     break;
 
                 case REG_TYPE_ADDRESS:
+                    /* The same D3D register number denotes a vertex address
+                     * register or a pixel texture register. Shader Model 1
+                     * pixel texture registers start with the corresponding
+                     * interpolated TEXCOORD, even though that shader model has
+                     * no DCL instruction with which to declare the input. */
+                    if (shader_is_pixel(ctx) &&
+                        !shader_version_atleast(ctx, 1, 4))
+                    {
+                        add_attribute_register(ctx, REG_TYPE_TEXTURE, regnum,
+                                               MOJOSHADER_USAGE_TEXCOORD,
+                                               regnum, 0xF, 0);
+                    } // if
+                    /* fall through */
                 case REG_TYPE_PREDICATE:
                 case REG_TYPE_TEMP:
                 case REG_TYPE_LOOP:
