@@ -2629,6 +2629,10 @@ static void check_label_register(Context *ctx, int arg, const char *opcode)
 
     if (regtype != REG_TYPE_LABEL)
         failf(ctx, "%s with a non-label register specified", opcode);
+    if (info->src_mod != SRCMOD_NONE)
+        failf(ctx, "%s label source must not have a modifier", opcode);
+    if (!no_swizzle(info->swizzle))
+        failf(ctx, "%s label source must not have a swizzle", opcode);
     if (!shader_version_atleast(ctx, 2, 0))
         failf(ctx, "%s not supported in Shader Model 1", opcode);
     if (shader_version_atleast(ctx, 3, 0))
