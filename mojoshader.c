@@ -1974,7 +1974,14 @@ static void state_TEXLD(Context *ctx)
 
     else if (shader_version_atleast(ctx, 1, 4))
     {
-        // !!! FIXME: checks for ps_1_4 version here...
+        const DestArgInfo *dst = &ctx->dest_arg;
+        const SourceArgInfo *src = &ctx->source_args[0];
+        if (dst->regtype != REG_TYPE_TEMP)
+            fail(ctx, "ps_1_4 TEXLD destination must be a temp register");
+        if ((src->regtype != REG_TYPE_TEXTURE) &&
+            (src->regtype != REG_TYPE_TEMP))
+            fail(ctx, "ps_1_4 TEXLD source must be a texture or temp register");
+        add_sampler(ctx, dst->regnum, TEXTURE_TYPE_2D, 0);
     } // else if
 
     else

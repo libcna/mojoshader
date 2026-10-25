@@ -2099,9 +2099,46 @@ void emit_GLSL_TEXLD(Context *ctx)
 
     else if (!shader_version_atleast(ctx, 2, 0))
     {
-        // ps_1_4 is different, too!
-        fail(ctx, "TEXLD == Shader Model 1.4 unimplemented.");  // !!! FIXME
-        return;
+        const DestArgInfo *info = &ctx->dest_arg;
+        RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER,
+                                          info->regnum);
+        if (sreg == NULL)
+        {
+            fail(ctx, "ps_1_4 TEXLD using undeclared sampler");
+            return;
+        } // if
+
+        char sampler[64];
+        get_GLSL_varname_in_buf(ctx, REG_TYPE_SAMPLER, info->regnum,
+                                sampler, sizeof (sampler));
+        char coordinates[256];
+        const char *funcname = NULL;
+        switch ((const TextureType) sreg->index)
+        {
+            case TEXTURE_TYPE_2D:
+                funcname = "texture2D";
+                make_GLSL_srcarg_string_vec2(ctx, 0, coordinates,
+                                             sizeof (coordinates));
+                break;
+            case TEXTURE_TYPE_CUBE:
+                funcname = "textureCube";
+                make_GLSL_srcarg_string_vec3(ctx, 0, coordinates,
+                                             sizeof (coordinates));
+                break;
+            case TEXTURE_TYPE_VOLUME:
+                funcname = "texture3D";
+                make_GLSL_srcarg_string_vec3(ctx, 0, coordinates,
+                                             sizeof (coordinates));
+                break;
+            default:
+                fail(ctx, "unknown ps_1_4 texture type");
+                return;
+        } // switch
+
+        char code[256];
+        make_GLSL_destarg_assign(ctx, code, sizeof (code), "%s(%s, %s)",
+                                 funcname, sampler, coordinates);
+        output_line(ctx, "%s", code);
     } // else if
 
     else
