@@ -2182,6 +2182,67 @@ static void count_static_flow_control(Context *ctx)
         ctx->static_flow_count++;
 } // count_static_flow_control
 
+static void add_call_graph_edge(Context *ctx, const int callee_label)
+{
+    if (get_defined_register(ctx, REG_TYPE_LABEL, callee_label))
+    {
+        fail(ctx, "Only forward CALL targets are legal");
+        return;
+    } // if
+
+    CallGraphEdge *edge = (CallGraphEdge *) Malloc(ctx, sizeof (CallGraphEdge));
+    if (edge == NULL)
+        return;
+    edge->caller_label_plus_one = ctx->current_label_register_plus_one;
+    edge->callee_label = callee_label;
+    edge->next = ctx->call_graph_edges;
+    ctx->call_graph_edges = edge;
+} // add_call_graph_edge
+
+static int call_depth_exceeds(const Context *ctx, const int caller_label_plus_one,
+                              const int remaining_depth)
+{
+    const CallGraphEdge *edge = ctx->call_graph_edges;
+    while (edge != NULL)
+    {
+        if (edge->caller_label_plus_one == caller_label_plus_one)
+        {
+            if (remaining_depth <= 0)
+                return 1;
+            if (call_depth_exceeds(ctx, edge->callee_label + 1,
+                                   remaining_depth - 1))
+            {
+                return 1;
+            } // if
+        } // if
+        edge = edge->next;
+    } // while
+    return 0;
+} // call_depth_exceeds
+
+static void validate_call_graph(Context *ctx)
+{
+    const int max_depth = shader_is_vertex(ctx) &&
+                          shader_version_exactly(ctx, 2, 0) ? 1 : 4;
+    if (call_depth_exceeds(ctx, 0, max_depth))
+    {
+        fail(ctx, "CALL nesting exceeds the Shader Model limit");
+        return;
+    } // if
+
+    const CallGraphEdge *edge = ctx->call_graph_edges;
+    while (edge != NULL)
+    {
+        if ((edge->caller_label_plus_one != 0) &&
+            call_depth_exceeds(ctx, edge->caller_label_plus_one, max_depth))
+        {
+            fail(ctx, "CALL nesting exceeds the Shader Model limit");
+            return;
+        } // if
+        edge = edge->next;
+    } // while
+} // validate_call_graph
+
 static void check_call_loop_wrappage(Context *ctx, const int regnum)
 {
     // msdn says subroutines inherit aL register if you're in a loop when
@@ -2210,7 +2271,10 @@ static void state_CALL(Context *ctx)
     check_label_register(ctx, 0, "CALL");
     check_call_loop_wrappage(ctx, ctx->source_args[0].regnum);
     if (!isfail(ctx))
+    {
+        add_call_graph_edge(ctx, ctx->source_args[0].regnum);
         count_static_flow_control(ctx);
+    } // if
 } // state_CALL
 
 static void state_CALLNZ(Context *ctx)
@@ -2223,8 +2287,12 @@ static void state_CALLNZ(Context *ctx)
         fail(ctx, "CALLNZ predicate argument requires Shader Model 2.x or later");
     check_label_register(ctx, 0, "CALLNZ");
     check_call_loop_wrappage(ctx, ctx->source_args[0].regnum);
-    if (!isfail(ctx) && (regtype == REG_TYPE_CONSTBOOL))
-        count_static_flow_control(ctx);
+    if (!isfail(ctx))
+    {
+        add_call_graph_edge(ctx, ctx->source_args[0].regnum);
+        if (regtype == REG_TYPE_CONSTBOOL)
+            count_static_flow_control(ctx);
+    } // if
 } // state_CALLNZ
 
 static void state_MOVA(Context *ctx)
@@ -4350,6 +4418,12 @@ static void destroy_context(Context *ctx)
         free_reglist(f, d, ctx->uniforms.next);
         free_reglist(f, d, ctx->attributes.next);
         free_reglist(f, d, ctx->samplers.next);
+        while (ctx->call_graph_edges != NULL)
+        {
+            CallGraphEdge *next = ctx->call_graph_edges->next;
+            f(ctx->call_graph_edges, d);
+            ctx->call_graph_edges = next;
+        } // while
         free_variable_list(f, d, ctx->variables);
         errorlist_destroy(ctx->errors);
         free_symbols(f, d, ctx->ctab.symbols, ctx->ctab.symbol_count);
@@ -5145,6 +5219,7 @@ const MOJOSHADER_parseData *MOJOSHADER_parse(const char *profile,
     {
         fail(ctx, "Static flow-control count exceeds the Shader Model 2 limit");
     } // if
+    validate_call_graph(ctx);
 
     // for ps_1_*, the output color is written to r0...throw an
     //  error if this register was never written. This isn't

@@ -91,6 +91,13 @@ typedef enum FlowControlBlock
 
 #define MAX_FLOW_CONTROL_BLOCKS 64
 
+typedef struct CallGraphEdge
+{
+    int caller_label_plus_one;
+    int callee_label;
+    struct CallGraphEdge *next;
+} CallGraphEdge;
+
 // Context...this is state that changes as we parse through a shader...
 typedef struct Context
 {
@@ -166,6 +173,7 @@ typedef struct Context
     int flow_control_stack_index;
     FlowControlBlock flow_control_stack[MAX_FLOW_CONTROL_BLOCKS];
     int current_label_register_plus_one;
+    CallGraphEdge *call_graph_edges;
     int max_reps;
     int cmps;
     int scratch_registers;
