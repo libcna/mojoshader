@@ -136,6 +136,8 @@ struct MOJOSHADER_glProgram
     int current_vface_flip;
     GLint vs_pixel_center_loc;
     float current_pixel_center[2];
+    GLint vs_sampler_lod_bias_loc;
+    float current_vs_sampler_lod_bias[4];
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     GLint vs_flip_loc;
     int current_flip;
@@ -1188,6 +1190,8 @@ static void impl_GLSL_FinalInitProgram(MOJOSHADER_glProgram *program)
     program->ps_vpos_flip_loc = glsl_uniform_loc(program, "vposFlip");
     program->ps_vface_flip_loc = glsl_uniform_loc(program, "cnaVFaceFlip");
     program->vs_pixel_center_loc = glsl_uniform_loc(program, "cnaPixelCenter");
+    program->vs_sampler_lod_bias_loc =
+        glsl_uniform_loc(program, "cnaVertexSamplerLodBias");
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     program->vs_flip_loc = glsl_uniform_loc(program, "vpFlip");
 #endif
@@ -2586,6 +2590,7 @@ MOJOSHADER_glProgram *MOJOSHADER_glLinkProgram(MOJOSHADER_glShader *vshader,
     memset(retval->vertex_attrib_loc, 0xFF, sizeof(retval->vertex_attrib_loc));
     retval->vs_pixel_center_loc = -1;
     retval->ps_vface_flip_loc = -1;
+    retval->vs_sampler_lod_bias_loc = -1;
 
     numregs = 0;
     if (vshader != NULL) numregs += vshader->parseData->uniform_count;
@@ -3358,6 +3363,21 @@ void MOJOSHADER_glProgramVFaceFlipInfo(int flip)
         program->current_vface_flip = flip;
     } // if
 } // MOJOSHADER_glProgramVFaceFlipInfo
+
+
+void MOJOSHADER_glProgramVertexSamplerLodBiasInfo(int sampler, float bias)
+{
+    MOJOSHADER_glProgram *program = ctx->bound_program;
+
+    if ((program == NULL) || (program->vs_sampler_lod_bias_loc == -1) ||
+        (sampler < 0) || (sampler >= 4) ||
+        (program->current_vs_sampler_lod_bias[sampler] == bias))
+        return;
+
+    program->current_vs_sampler_lod_bias[sampler] = bias;
+    ctx->glUniform4fv(program->vs_sampler_lod_bias_loc, 1,
+                      program->current_vs_sampler_lod_bias);
+} // MOJOSHADER_glProgramVertexSamplerLodBiasInfo
 
 
 void MOJOSHADER_glDeleteProgram(MOJOSHADER_glProgram *program)

@@ -678,6 +678,11 @@ void emit_GLSL_start(Context *ctx, const char *profilestr)
         // their fourth decimal place and the difference turns to noise (cna-cs CSX-136). -CNA
         output_line(ctx, "precision highp sampler2D;");
         output_line(ctx, "precision highp samplerCube;");
+        // OpenGL ES has no sampler LOD-bias state. Vertex TEXLDL already names an explicit
+        // level, so the OpenGL adapter supplies XNA's four per-sampler biases through this
+        // generated uniform and the instruction emitter adds the selected component. -CNA
+        if (shader_is_vertex(ctx))
+            output_line(ctx, "uniform vec4 cnaVertexSamplerLodBias;");
         pop_output(ctx);
     } // else if
     #endif
@@ -3165,6 +3170,8 @@ void emit_GLSL_TEXLDL(Context *ctx)
     const SourceArgInfo *samp_arg = &ctx->source_args[1];
     RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER,
                                           samp_arg->regnum);
+    const int add_sampler_bias = support_glsles3(ctx) && shader_is_vertex(ctx);
+    const char *bias_component = "";
     const char *pattern = NULL;
     char src0[64];
     char src1[64];
@@ -3177,19 +3184,29 @@ void emit_GLSL_TEXLDL(Context *ctx)
         return;
     } // if
 
+    if (add_sampler_bias)
+    {
+        if ((samp_arg->regnum < 0) || (samp_arg->regnum >= 4))
+        {
+            fail(ctx, "TEXLDL vertex sampler is outside XNA's four-slot range");
+            return;
+        } // if
+        bias_component = (const char *[]) { ".x", ".y", ".z", ".w" }[samp_arg->regnum];
+    } // if
+
     // HLSL tex2dlod accepts (sampler, uv.xyz, uv.w) where uv.w is the LOD
     // GLSL seems to want the dimensionality to match the sampler (.xy vs .xyz)
     //  so we vary the swizzle accordingly
     switch ((const TextureType) sreg->index)
     {
         case TEXTURE_TYPE_2D:
-            pattern = "texture2DLod(%s, %s.xy, %s.w)%s";
+            pattern = "texture2DLod(%s, %s.xy, %s.w%s%s)%s";
             break;
         case TEXTURE_TYPE_CUBE:
-            pattern = "textureCubeLod(%s, %s.xyz, %s.w)%s";
+            pattern = "textureCubeLod(%s, %s.xyz, %s.w%s%s)%s";
             break;
         case TEXTURE_TYPE_VOLUME:
-            pattern = "texture3DLod(%s, %s.xyz, %s.w)%s";
+            pattern = "texture3DLod(%s, %s.xyz, %s.w%s%s)%s";
             break;
         default:
             fail(ctx, "unknown texture type");
@@ -3203,7 +3220,8 @@ void emit_GLSL_TEXLDL(Context *ctx)
 
     char code[128];
     make_GLSL_destarg_assign(ctx, code, sizeof(code),
-        pattern, src1, src0, src0, swiz_str);
+        pattern, src1, src0, src0,
+        add_sampler_bias ? " + cnaVertexSamplerLodBias" : "", bias_component, swiz_str);
 
     prepend_glsl_texlod_extensions(ctx);
     output_line(ctx, "%s", code);

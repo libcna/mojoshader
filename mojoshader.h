@@ -1766,6 +1766,17 @@ DECLSPEC void MOJOSHADER_glProgramPixelCenterInfo(float x, float y);
  */
 DECLSPEC void MOJOSHADER_glProgramVFaceFlipInfo(int flip);
 
+/*
+ * Add one XNA vertex sampler's MipMapLevelOfDetailBias to explicit TEXLDL
+ * sampling on GLSL ES 3, whose sampler objects have no LOD-bias state.
+ * sampler must be in the XNA HiDef vertex range 0..3. Other GLSL profiles
+ * do not declare the generated uniform, so this is a harmless no-op there.
+ *
+ * This call is NOT thread safe and requires a current MOJOSHADER_glContext
+ * with a linked program bound.
+ */
+DECLSPEC void MOJOSHADER_glProgramVertexSamplerLodBiasInfo(int sampler, float bias);
+
 
 /*
  * Free the resources of a linked program. This will delete the GL object
