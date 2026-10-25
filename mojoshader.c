@@ -1509,10 +1509,23 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
         case SRCMOD_COMPLEMENT:
         case SRCMOD_X2NEGATE:
         case SRCMOD_X2:
+            if (shader_version_atleast(ctx, 2, 0))
+                fail(ctx, "illegal source mod for this Shader Model.");
+            break;
+
         case SRCMOD_DZ:
+            if (shader_version_atleast(ctx, 2, 0))
+                fail(ctx, "illegal source mod for this Shader Model.");
+            else if (ctx->current_opcode != OPCODE_TEXLD)
+                fail(ctx, "DZ source modifier requires TEXLD");
+            break;
+
         case SRCMOD_DW:
             if (shader_version_atleast(ctx, 2, 0))
                 fail(ctx, "illegal source mod for this Shader Model.");
+            else if ((ctx->current_opcode != OPCODE_TEXLD) &&
+                     (ctx->current_opcode != OPCODE_TEXCRD))
+                fail(ctx, "DW source modifier requires TEXLD or TEXCRD");
             break;
 
         case SRCMOD_NOT:  // !!! FIXME: I _think_ this is right...
@@ -2253,6 +2266,26 @@ static void state_TEXCRD(Context *ctx)
 {
     if (shader_version_atleast(ctx, 2, 0))
         fail(ctx, "TEXCRD in Shader Model >= 2.0");  // apparently removed.
+    else if (shader_version_atleast(ctx, 1, 4))
+    {
+        const DestArgInfo *dst = &ctx->dest_arg;
+        const SourceArgInfo *src = &ctx->source_args[0];
+        if (dst->regtype != REG_TYPE_TEMP)
+            fail(ctx, "ps_1_4 TEXCRD destination must be a temp register");
+        else if (src->regtype != REG_TYPE_TEXTURE)
+            fail(ctx, "ps_1_4 TEXCRD source must be a texture register");
+        else if (src->src_mod == SRCMOD_DW)
+        {
+            if (src->swizzle != 0xF4)
+                fail(ctx, "ps_1_4 TEXCRD DW source must use the XYW selector");
+            else if (dst->orig_writemask != 0x3)
+                fail(ctx, "ps_1_4 TEXCRD DW destination must use the XY mask");
+        } // else if
+        else if (src->src_mod != SRCMOD_NONE)
+            fail(ctx, "ps_1_4 TEXCRD source modifier must be NONE or DW");
+        else if (dst->orig_writemask != 0x7)
+            fail(ctx, "ps_1_4 TEXCRD destination must use the XYZ mask");
+    } // else if
 } // state_TEXCRD
 
 static void state_FRC(Context *ctx)
@@ -3293,9 +3326,27 @@ static void state_TEXLD(Context *ctx)
         const SourceArgInfo *src = &ctx->source_args[0];
         if (dst->regtype != REG_TYPE_TEMP)
             fail(ctx, "ps_1_4 TEXLD destination must be a temp register");
-        if ((src->regtype != REG_TYPE_TEXTURE) &&
-            (src->regtype != REG_TYPE_TEMP))
+        else if (dst->orig_writemask != 0xF)
+            fail(ctx, "ps_1_4 TEXLD destination must use a full write mask");
+        else if ((src->regtype != REG_TYPE_TEXTURE) &&
+                 (src->regtype != REG_TYPE_TEMP))
             fail(ctx, "ps_1_4 TEXLD source must be a texture or temp register");
+        else if (src->src_mod == SRCMOD_DZ)
+        {
+            if (src->regtype != REG_TYPE_TEMP)
+                fail(ctx, "ps_1_4 TEXLD DZ source must be a temp register");
+            else if (src->swizzle != 0xA4)
+                fail(ctx, "ps_1_4 TEXLD DZ source must use the XYZ selector");
+        } // else if
+        else if (src->src_mod == SRCMOD_DW)
+        {
+            if (src->regtype != REG_TYPE_TEXTURE)
+                fail(ctx, "ps_1_4 TEXLD DW source must be a texture register");
+            else if (src->swizzle != 0xF4)
+                fail(ctx, "ps_1_4 TEXLD DW source must use the XYW selector");
+        } // else if
+        else if (src->src_mod != SRCMOD_NONE)
+            fail(ctx, "ps_1_4 TEXLD source modifier must be NONE, DZ, or DW");
         add_sampler(ctx, dst->regnum, TEXTURE_TYPE_2D, 0);
     } // else if
 

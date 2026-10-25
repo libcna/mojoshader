@@ -456,6 +456,7 @@ void buffer_patch(Buffer *buffer, const size_t start,
 #define OPCODE_IFC 41
 #define OPCODE_BREAK 44
 #define OPCODE_BREAKC 45
+#define OPCODE_TEXCRD 64
 #define OPCODE_TEXLD 66
 #define OPCODE_TEXBEM 67
 #define OPCODE_TEXBEML 68
