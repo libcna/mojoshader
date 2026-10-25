@@ -1455,6 +1455,17 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     //   instructions: m3x2 - ps, m3x3 - ps, m3x4 - ps, m4x3 - ps, and
     //   m4x4 - ps."
 
+    if (!isfail(ctx) && shader_is_pixel(ctx) &&
+        !shader_version_atleast(ctx, 2, 0) &&
+        (info->regtype == REG_TYPE_TEXTURE) &&
+        (info->regnum >= 0) && (info->regnum < 32) &&
+        ((ctx->texbem_read_registers & (1u << info->regnum)) != 0) &&
+        (ctx->current_opcode != OPCODE_TEXBEM) &&
+        (ctx->current_opcode != OPCODE_TEXBEML))
+    {
+        failf(ctx, "Texture register t%d was consumed by TEXBEM/TEXBEML", info->regnum);
+    } // if
+
     if (!isfail(ctx))
     {
         RegisterList *reg;
@@ -2799,10 +2810,8 @@ static void state_texbem(Context *ctx, const char *opcode)
             failf(ctx, "%s forbids _bx2 on source reg before ps_1_2", opcode);
     } // if
 
-    // !!! FIXME: MSDN:
-    // !!! FIXME: Register data that has been read by a texbem
-    // !!! FIXME:  or texbeml instruction cannot be read later,
-    // !!! FIXME:  except by another texbem or texbeml.
+    if ((ctx->source_args[0].regnum >= 0) && (ctx->source_args[0].regnum < 32))
+        ctx->texbem_read_registers |= 1u << ctx->source_args[0].regnum;
 
     state_texops(ctx, opcode, 2, 1);
 } // state_texbem

@@ -163,6 +163,7 @@ typedef struct Context
     int previous_coissue;
     int phase_count;
     int bem_count;
+    uint32 texbem_read_registers;
     int coissue;
     int loops;
     int reps;
