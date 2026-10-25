@@ -2761,12 +2761,19 @@ static void state_CALL(Context *ctx)
 
 static void state_CALLNZ(Context *ctx)
 {
-    const RegisterType regtype = ctx->source_args[1].regtype;
+    const SourceArgInfo *condition = &ctx->source_args[1];
+    const RegisterType regtype = condition->regtype;
     if ((regtype != REG_TYPE_CONSTBOOL) && (regtype != REG_TYPE_PREDICATE))
         fail(ctx, "CALLNZ argument isn't constbool or predicate register");
     else if ((regtype == REG_TYPE_PREDICATE) &&
              !shader_version_atleast(ctx, 2, 1))
         fail(ctx, "CALLNZ predicate argument requires Shader Model 2.x or later");
+    else if ((condition->src_mod != SRCMOD_NONE) &&
+             (condition->src_mod != SRCMOD_NOT))
+        fail(ctx, "CALLNZ condition modifier must be NONE or NOT");
+    else if ((regtype == REG_TYPE_PREDICATE) &&
+             !replicate_swizzle(condition->swizzle))
+        fail(ctx, "CALLNZ predicate condition must have replicate swizzle");
     check_label_register(ctx, 0, "CALLNZ");
     check_call_loop_wrappage(ctx, ctx->source_args[0].regnum);
     if (!isfail(ctx))
@@ -2856,10 +2863,14 @@ static void state_ENDLOOP(Context *ctx)
 
 static void state_BREAKP(Context *ctx)
 {
-    const RegisterType regtype = ctx->source_args[0].regtype;
+    const SourceArgInfo *condition = &ctx->source_args[0];
+    const RegisterType regtype = condition->regtype;
     if (regtype != REG_TYPE_PREDICATE)
         fail(ctx, "BREAKP argument isn't predicate register");
-    else if (!replicate_swizzle(ctx->source_args[0].swizzle))
+    else if ((condition->src_mod != SRCMOD_NONE) &&
+             (condition->src_mod != SRCMOD_NOT))
+        fail(ctx, "BREAKP condition modifier must be NONE or NOT");
+    else if (!replicate_swizzle(condition->swizzle))
         fail(ctx, "BREAKP without replicate swizzle");
     else if ((ctx->loops == 0) && (ctx->reps == 0))
         fail(ctx, "BREAKP outside LOOP/ENDLOOP or REP/ENDREP");

@@ -1996,7 +1996,7 @@ void emit_GLSL_CALLNZ(Context *ctx)
     // !!! FIXME: if src1 is a constbool that's true, we can remove the
     // !!! FIXME:  if. If it's false, we can make this a no-op.
     char src0[64]; get_GLSL_srcarg_varname(ctx, 0, src0, sizeof (src0));
-    char src1[64]; make_GLSL_srcarg_string_masked(ctx, 1, src1, sizeof (src1));
+    char src1[64]; make_GLSL_srcarg_string_scalar(ctx, 1, src1, sizeof (src1));
 
     if (ctx->loops > 0)
         output_line(ctx, "if (%s) { %s(aL); }", src1, src0);
