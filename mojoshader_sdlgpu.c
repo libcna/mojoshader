@@ -70,7 +70,9 @@ static PFN_SDL_ShaderCross_CompileGraphicsShaderFromSPIRV SDL_ShaderCross_Compil
 
 /* The destination shader format to use */
 static SDL_GPUShaderFormat shader_format =
-#ifdef __APPLE__
+#if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+    SDL_GPU_SHADERFORMAT_SPIRV;
+#elif defined(__APPLE__)
     SDL_GPU_SHADERFORMAT_MSL;
 #else
     SDL_GPU_SHADERFORMAT_SPIRV;
@@ -117,6 +119,8 @@ struct MOJOSHADER_sdlContext
     MOJOSHADER_sdlShaderData *bound_pshader_data;
     MOJOSHADER_sdlProgram *bound_program;
     HashTable *linker_cache;
+    MOJOSHADER_sdlSpirvTransform spirv_transform;
+    void *spirv_transform_data;
 };
 
 struct MOJOSHADER_sdlShaderData
@@ -134,6 +138,7 @@ struct MOJOSHADER_sdlProgram
     SDL_GPUShader *pixelShader;
     MOJOSHADER_sdlShaderData *vertexShaderData;
     MOJOSHADER_sdlShaderData *pixelShaderData;
+    int pixelSpirvTransformApplied;
 };
 
 /* Error state... */
@@ -389,6 +394,18 @@ init_fail:
     return NULL;
 } // MOJOSHADER_sdlCreateContext
 
+int MOJOSHADER_sdlSetSpirvTransform(
+    MOJOSHADER_sdlContext *ctx,
+    MOJOSHADER_sdlSpirvTransform transform,
+    void *userdata
+) {
+    if (ctx == NULL || ctx->linker_cache != NULL)
+        return 0;
+    ctx->spirv_transform = transform;
+    ctx->spirv_transform_data = userdata;
+    return 1;
+} // MOJOSHADER_sdlSetSpirvTransform
+
 const char *MOJOSHADER_sdlGetError(
     MOJOSHADER_sdlContext *ctx
 ) {
@@ -534,12 +551,49 @@ static MOJOSHADER_sdlProgram *compile_program(
     char *pshaderSource = (char*) pshader->parseData->output;
     size_t vshaderCodeSize = vshader->parseData->output_len;
     size_t pshaderCodeSize = pshader->parseData->output_len;
+    int pixelUniformBufferCount = 1;
+    program->pixelSpirvTransformApplied = 0;
 
     // Last-minute fixups before we actually invoke the compiler
     if (shader_format == SDL_GPU_SHADERFORMAT_SPIRV)
     {
         vshaderCodeSize -= sizeof(SpirvPatchTable);
         pshaderCodeSize -= sizeof(SpirvPatchTable);
+
+        if (ctx->spirv_transform != NULL)
+        {
+            unsigned char *transformed = NULL;
+            unsigned int transformed_len = 0;
+            int added_uniform_buffer = 0;
+            const char *transform_error = ctx->spirv_transform(
+                (const unsigned char *) pshaderSource,
+                (unsigned int) pshaderCodeSize,
+                &transformed,
+                &transformed_len,
+                &added_uniform_buffer,
+                ctx->malloc_fn,
+                ctx->malloc_data,
+                ctx->spirv_transform_data
+            );
+            if (transform_error != NULL)
+            {
+                set_error(transform_error);
+                if (transformed != NULL)
+                    ctx->free_fn(transformed, ctx->malloc_data);
+                ctx->free_fn(program, ctx->malloc_data);
+                return NULL;
+            } // if
+            if (transformed != NULL)
+            {
+                pshaderSource = (char *) transformed;
+                pshaderCodeSize = transformed_len;
+            } // if
+            if ((transformed != NULL) && added_uniform_buffer)
+            {
+                pixelUniformBufferCount = 2;
+                program->pixelSpirvTransformApplied = 1;
+            } // if
+        } // if
     } // if
     else if (shader_format == SDL_GPU_SHADERFORMAT_MSL)
     {
@@ -677,6 +731,7 @@ static MOJOSHADER_sdlProgram *compile_program(
         createInfo.format = shader_format;
         createInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
         createInfo.num_samplers = pshader->samplerSlots;
+        createInfo.num_uniform_buffers = pixelUniformBufferCount;
 
         program->pixelShader = SDL_CreateGPUShader(
             ctx->device,
@@ -775,6 +830,13 @@ MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(
     ctx->bound_program = program;
     return program;
 } // MOJOSHADER_sdlLinkProgram
+
+int MOJOSHADER_sdlGetPixelSpirvTransformApplied(MOJOSHADER_sdlContext *ctx)
+{
+    if (ctx == NULL || ctx->bound_program == NULL)
+        return 0;
+    return ctx->bound_program->pixelSpirvTransformApplied;
+} // MOJOSHADER_sdlGetPixelSpirvTransformApplied
 
 void MOJOSHADER_sdlShaderAddRef(MOJOSHADER_sdlShaderData *shader)
 {

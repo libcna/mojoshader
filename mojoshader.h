@@ -2048,6 +2048,18 @@ typedef struct MOJOSHADER_sdlContext MOJOSHADER_sdlContext;
 typedef struct MOJOSHADER_sdlShaderData MOJOSHADER_sdlShaderData;
 typedef struct MOJOSHADER_sdlProgram MOJOSHADER_sdlProgram;
 
+/*
+ * Optional CNA integration hook for transforming linked fragment SPIR-V before SDL_gpu creates
+ * its native shader. Return NULL on success or a stable error string on failure. A successful
+ * rewrite allocates (*output) with (m); the adapter frees it with its paired allocator. A rewrite
+ * whose module reads a second fragment uniform buffer sets (*added_uniform_buffer) non-zero.
+ */
+typedef const char *(MOJOSHADERCALL *MOJOSHADER_sdlSpirvTransform)(
+    const unsigned char *input, unsigned int input_len,
+    unsigned char **output, unsigned int *output_len,
+    int *added_uniform_buffer,
+    MOJOSHADER_malloc m, void *malloc_d, void *userdata);
+
 #ifndef SDL_GPU_H
 typedef struct SDL_GPUDevice SDL_GPUDevice;
 typedef struct SDL_GPUShader SDL_GPUShader;
@@ -2086,6 +2098,11 @@ DECLSPEC MOJOSHADER_sdlContext *MOJOSHADER_sdlCreateContext(SDL_GPUDevice *devic
                                                             MOJOSHADER_malloc m,
                                                             MOJOSHADER_free f,
                                                             void *malloc_d);
+
+/* Install a fragment SPIR-V transform before the first program is linked. */
+DECLSPEC int MOJOSHADER_sdlSetSpirvTransform(MOJOSHADER_sdlContext *context,
+                                             MOJOSHADER_sdlSpirvTransform transform,
+                                             void *userdata);
 
 /* CNA test hook: force an available ShaderCross path on a SPIR-V-capable device. */
 DECLSPEC int MOJOSHADER_sdlSetShaderCrossTestMode(MOJOSHADER_sdlContext *context,
@@ -2194,6 +2211,9 @@ DECLSPEC const MOJOSHADER_parseData *MOJOSHADER_sdlGetShaderParseData(
 DECLSPEC MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(MOJOSHADER_sdlContext *context,
                                                           MOJOSHADER_vertexAttribute *vertexAttributes,
                                                           int vertexAttributeCount);
+
+/* Returns non-zero when the linked program's fragment module gained the second uniform buffer. */
+DECLSPEC int MOJOSHADER_sdlGetPixelSpirvTransformApplied(MOJOSHADER_sdlContext *context);
 
 /*
  * This binds the program to the active context, and does nothing particularly
