@@ -2259,7 +2259,12 @@ static int parse_ctab_typeinfo(Context *ctx, const uint8 *start,
     } // else
 
     unsigned int i;
-    const uint32 *member = (const uint32 *) (start + typeptr[6]);
+    // The member table's own offset is read from the constant table and was never bounded, so a
+    // struct in untrusted bytecode could point its member list anywhere. -CNA
+    const uint32 memberpos = (uint32) SWAP16(typeptr[6]);
+    if ((memberpos >= bytes) || ((bytes - memberpos) < (member_count * 8)))
+        return 0;  // corrupt CTAB.
+    const uint32 *member = (const uint32 *) (start + memberpos);
     for (i = 0; i < member_count; i++)
     {
         MOJOSHADER_symbolStructMember *mbr = &info->members[i];
@@ -2450,7 +2455,14 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
 #else
     uint32 i;
 
-    assert(ctx->have_preshader == 0);  // !!! FIXME: can you have more than one?
+    // How many preshaders a shader declares is content, and upstream's own question above is
+    // still open -- but a second one would overwrite the first and leak it, so refuse rather
+    // than assert on untrusted bytecode. -CNA
+    if (ctx->have_preshader)
+    {
+        fail(ctx, "Shader declares more than one preshader.");
+        return;
+    } // if
     ctx->have_preshader = 1;
 
     // !!! FIXME: I don't know what specific versions signify, but we need to
@@ -2625,20 +2637,23 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     // The FXLC block has the actual instructions...
     uint32 opcode_count = SWAP32(fxlc.tokens[1]);
 
+    fxlc.tokens += 2;
+    fxlc.tokcount -= 2;
+    // Bound the instruction count against the block that has to contain it *before* allocating
+    // for it. Upstream ran this same check after the allocation, so untrusted tokens chose the
+    // size of a buffer that was then zeroed.
+    if (opcode_count > (fxlc.tokcount / 2))
+    {
+        fail(ctx, "Bogus preshader FXLC block.");
+        return;
+    } // if
+
     const size_t len = sizeof (MOJOSHADER_preshaderInstruction) * opcode_count;
     preshader->instruction_count = (unsigned int) opcode_count;
     preshader->instructions = (MOJOSHADER_preshaderInstruction *) Malloc(ctx, len);
     if (preshader->instructions == NULL)
         return;
     memset(preshader->instructions, '\0', len);
-
-    fxlc.tokens += 2;
-    fxlc.tokcount -= 2;
-    if (opcode_count > (fxlc.tokcount / 2))
-    {
-        fail(ctx, "Bogus preshader FXLC block.");
-        return;
-    } // if
 
     MOJOSHADER_preshaderInstruction *inst = preshader->instructions;
     while (opcode_count--)
@@ -2686,6 +2701,14 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
 
         uint32 operand_count = SWAP32(fxlc.tokens[1]) + 1;  // +1 for dest.
 
+        // The operand array is a fixed four entries, so an operand count taken straight from
+        // untrusted tokens has to be rejected before it walks past the end of the instruction.
+        if (operand_count > STATICARRAYLEN(inst->operands))
+        {
+            fail(ctx, "Bogus preshader instruction operand count.");
+            return;
+        } // if
+
         inst->opcode = opcode;
         inst->element_count = (unsigned int) (opcodetok & 0xFF);
         inst->operand_count = (unsigned int) operand_count;
@@ -2726,7 +2749,13 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
                     {
                         const uint32 base = sym->register_index * 4;
                         const uint32 count = sym->register_count * 4;
-                        assert(sym->register_set==MOJOSHADER_SYMREGSET_FLOAT4);
+                        // A constant table is untrusted content, so a symbol in the wrong
+                        // register set is a parse error rather than a programming mistake.
+                        if (sym->register_set != MOJOSHADER_SYMREGSET_FLOAT4)
+                        {
+                            fail(ctx, "Bogus preshader input register set.");
+                            return;
+                        } // if
                         if ( (base <= item) && ((base + count) > item) )
                             break;
                     } // for
@@ -2738,13 +2767,25 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
                     operand->type = MOJOSHADER_PRESHADEROPERAND_INPUT;
                     if (numarrays > 0)
                     {
+                        // Upstream's own FIXME: the array count comes straight from untrusted
+                        // tokens, and each entry both reads a token four ahead and consumes two,
+                        // so it has to fit in what is left of the block before anything is
+                        // allocated for it.
+                        // Division rather than multiplication: numarrays is a 32-bit value from
+                        // the file, so (numarrays * 2) wraps and lets an absurd count through.
+                        if ((fxlc.tokcount < 5) || (numarrays > ((fxlc.tokcount - 5) / 2)))
+                        {
+                            fail(ctx, "Bogus preshader array register count.");
+                            return;
+                        } // if
                         // malloc the array symbol name array
                         const uint32 siz = numarrays * sizeof (uint32);
                         operand->array_register_count = numarrays;
                         operand->array_registers = (uint32 *) Malloc(ctx, siz);
+                        if (operand->array_registers == NULL)
+                            return;
                         memset(operand->array_registers, '\0', siz);
                         // Get each register base, indicating the arrays used.
-                        // !!! FIXME: fail if fxlc.tokcount*2 > numarrays ?
                         for (i = 0; i < numarrays; i++)
                         {
                             const uint32 jmp = SWAP32(fxlc.tokens[4]);
@@ -2782,14 +2823,26 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
                 case 7:
                 {
                     operand->type = MOJOSHADER_PRESHADEROPERAND_TEMP;
+                    // The temp count is grown from operand indices, and run_preshader alloca()s
+                    // one double per temp. A structural bound keeps a made-up index from asking
+                    // for a stack frame the process does not have: each instruction can introduce
+                    // at most one temp of four components. -CNA
+                    if (item >= ((preshader->instruction_count * 4) + 4))
+                    {
+                        fail(ctx, "Bogus preshader temp register.");
+                        return;
+                    } // if
                     if (item >= preshader->temp_count)
                         preshader->temp_count = item + 1;
                     break;
                 } // case
 
                 default:
-                    assert(0 && "Unhandled fxlc.tokens[1] in parse_preshader!");
-                    break;
+                    // Untrusted content reaches this, so it is a parse error rather than a
+                    // programming mistake: asserting kills a debug build and a release build
+                    // would carry on with an operand type that was never assigned.
+                    fail(ctx, "Unknown preshader operand type.");
+                    return;
             } // switch
 
             operand->index = item;

@@ -68,7 +68,14 @@ int set_output(Context *ctx, Buffer **section)
 
 void push_output(Context *ctx, Buffer **section)
 {
-    assert(ctx->output_stack_len < (int) (STATICARRAYLEN(ctx->output_stack)));
+    // How many times an emitter pushes depends on the shader it is translating, so untrusted
+    // bytecode can drive this past the fixed stack. Failing the context here stops emission; the
+    // asserts caught nothing in a release build. -CNA
+    if (ctx->output_stack_len >= (int) (STATICARRAYLEN(ctx->output_stack)))
+    {
+        fail(ctx, "Shader output nesting is too deep.");
+        return;
+    } // if
     ctx->output_stack[ctx->output_stack_len] = ctx->output;
     ctx->indent_stack[ctx->output_stack_len] = ctx->indent;
     ctx->output_stack_len++;
@@ -79,7 +86,11 @@ void push_output(Context *ctx, Buffer **section)
 
 void pop_output(Context *ctx)
 {
-    assert(ctx->output_stack_len > 0);
+    if (ctx->output_stack_len <= 0)
+    {
+        fail(ctx, "Shader output nesting is unbalanced.");
+        return;
+    } // if
     ctx->output_stack_len--;
     ctx->output = ctx->output_stack[ctx->output_stack_len];
     ctx->indent = ctx->indent_stack[ctx->output_stack_len];

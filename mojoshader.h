@@ -2400,7 +2400,13 @@ typedef enum MOJOSHADER_renderStateType
      * referred to by MOJOSHADER_effectStateType as such.
      */
     MOJOSHADER_RS_VERTEXSHADER = 146,
-    MOJOSHADER_RS_PIXELSHADER = 147
+    MOJOSHADER_RS_PIXELSHADER = 147,
+
+    /* XNA 4 Effect Framework payloads can retain these legacy assignment records. Giving them
+     * names keeps a C++ consumer from observing an out-of-range enum value. -CNA
+     */
+    MOJOSHADER_RS_PIXELSHADERCONSTANT = 160,
+    MOJOSHADER_RS_SETSAMPLER = 178
 } MOJOSHADER_renderStateType;
 
 typedef enum MOJOSHADER_zBufferType
@@ -2618,6 +2624,11 @@ typedef struct MOJOSHADER_effectValue
 typedef struct MOJOSHADER_effectState
 {
     MOJOSHADER_renderStateType type;
+    unsigned int index;
+    int referenced_parameter;
+    MOJOSHADER_preshader *preshader;
+    unsigned int preshader_param_count;
+    unsigned int *preshader_params;
     MOJOSHADER_effectValue value;
 } MOJOSHADER_effectState;
 
@@ -3150,4 +3161,3 @@ DECLSPEC void MOJOSHADER_mtlDeleteLibrary(void *library);
 #endif  /* include-once blocker. */
 
 /* end of mojoshader.h ... */
-

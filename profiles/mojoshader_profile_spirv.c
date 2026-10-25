@@ -274,6 +274,12 @@ static uint32 spv_output_location(Context *ctx, uint32 id, uint32 loc)
 static void spv_output_color_location(Context *ctx, uint32 id, uint32 index)
 {
     SpirvPatchTable* table = &ctx->spirv.patch_table;
+    // The register number comes from parsed bytecode and indexes a fixed table. -CNA
+    if (index >= STATICARRAYLEN(table->output_offsets))
+    {
+        fail(ctx, "Colour output register is out of range.");
+        return;
+    } // if
     push_output(ctx, &ctx->helpers);
     spv_emit(ctx, 4, SpvOpDecorate, id, SpvDecorationLocation, index);
     pop_output(ctx);
@@ -284,6 +290,13 @@ static void spv_output_attrib_location(Context *ctx, uint32 id,
                                        MOJOSHADER_usage usage, uint32 index)
 {
     SpirvPatchTable* table = &ctx->spirv.patch_table;
+    // Both the usage and the register number come from parsed bytecode. -CNA
+    if (((unsigned int) usage >= STATICARRAYLEN(table->attrib_offsets)) ||
+        (index >= STATICARRAYLEN(table->attrib_offsets[0])))
+    {
+        fail(ctx, "Vertex attribute usage or register is out of range.");
+        return;
+    } // if
     push_output(ctx, &ctx->helpers);
     spv_emit(ctx, 4, SpvOpDecorate, id, SpvDecorationLocation, 0xDEADBEEF);
     pop_output(ctx);
@@ -584,18 +597,35 @@ static uint32 spv_vectorbroadcast(Context *ctx, uint32 tid, uint32 value)
     return result;
 } // spv_vectorbroadcast
 
+/* The branch and loop stacks are driven by the shader's own control-flow instructions, so
+ * untrusted bytecode can overflow them with nesting or underflow them with an ELSE, ENDIF or
+ * ENDLOOP that never had a matching opener. Asserts caught neither in a release build. -CNA
+ */
 static void spv_branch_push(Context *ctx, uint32 id_merge, uint32 patch_offset)
 {
-    assert(((size_t)ctx->branch_labels_stack_index) < STATICARRAYLEN(ctx->branch_labels_stack));
-    int pos = ctx->branch_labels_stack_index++;
+    int pos;
+    if (((size_t) ctx->branch_labels_stack_index) >=
+        STATICARRAYLEN(ctx->branch_labels_stack))
+    {
+        fail(ctx, "Shader branch nesting is too deep.");
+        return;
+    } // if
+    pos = ctx->branch_labels_stack_index++;
     ctx->branch_labels_stack[pos] = id_merge;
     ctx->branch_labels_patch_stack[pos] = patch_offset;
 } // spv_branch_push
 
 static void spv_branch_get(Context *ctx, uint32* out_id_merge, uint32* out_patch_offset)
 {
-    assert(ctx->branch_labels_stack_index > 0);
-    int pos = ctx->branch_labels_stack_index - 1;
+    int pos;
+    *out_id_merge = 0;
+    *out_patch_offset = 0;
+    if (ctx->branch_labels_stack_index <= 0)
+    {
+        fail(ctx, "Shader closes a branch that was never opened.");
+        return;
+    } // if
+    pos = ctx->branch_labels_stack_index - 1;
     *out_id_merge = ctx->branch_labels_stack[pos];
     *out_patch_offset = ctx->branch_labels_patch_stack[pos];
 } // spv_branch_get
@@ -603,27 +633,40 @@ static void spv_branch_get(Context *ctx, uint32* out_id_merge, uint32* out_patch
 static void spv_branch_pop(Context *ctx, uint32* out_id_merge, uint32* out_patch_offset)
 {
     spv_branch_get(ctx, out_id_merge, out_patch_offset);
-    ctx->branch_labels_stack_index--;
+    if (ctx->branch_labels_stack_index > 0)
+        ctx->branch_labels_stack_index--;
 } // spv_branch_pop
 
 static void spv_loop_push(Context *ctx, const SpirvLoopInfo *loop)
 {
-    assert(((size_t)ctx->spirv.loop_stack_idx) < STATICARRAYLEN(ctx->spirv.loop_stack));
-    int pos = ctx->spirv.loop_stack_idx++;
+    int pos;
+    if (((size_t) ctx->spirv.loop_stack_idx) >= STATICARRAYLEN(ctx->spirv.loop_stack))
+    {
+        fail(ctx, "Shader loop nesting is too deep.");
+        return;
+    } // if
+    pos = ctx->spirv.loop_stack_idx++;
     ctx->spirv.loop_stack[pos] = *loop;
 } // spv_loop_push
 
 static void spv_loop_get(Context *ctx, SpirvLoopInfo *loop)
 {
-    assert(ctx->spirv.loop_stack_idx > 0);
-    int pos = ctx->spirv.loop_stack_idx - 1;
+    int pos;
+    if (ctx->spirv.loop_stack_idx <= 0)
+    {
+        memset(loop, '\0', sizeof (*loop));
+        fail(ctx, "Shader closes a loop that was never opened.");
+        return;
+    } // if
+    pos = ctx->spirv.loop_stack_idx - 1;
     *loop = ctx->spirv.loop_stack[pos];
 } // spv_loop_get
 
 static void spv_loop_pop(Context *ctx, SpirvLoopInfo *loop)
 {
     spv_loop_get(ctx, loop);
-    ctx->spirv.loop_stack_idx--;
+    if (ctx->spirv.loop_stack_idx > 0)
+        ctx->spirv.loop_stack_idx--;
 } // spv_loop_pop
 
 static uint32 spv_loop_get_aL(Context *ctx)
@@ -668,8 +711,14 @@ static void spv_check_read_reg_id(Context *ctx, RegisterList *r)
 {
     if (r->spirv.iddecl == 0)
     {
-        assert(r->regtype != REG_TYPE_SAMPLER || (shader_is_pixel(ctx) && !shader_version_atleast(ctx, 1, 4)));
-        assert(r->regtype != REG_TYPE_TEXTURE || (shader_is_pixel(ctx) && !shader_version_atleast(ctx, 1, 4)));
+        // Register types come from parsed shader bytecode, so a sampler or texture register in a
+        // shader model that cannot declare one is a parse error, not a programming mistake. -CNA
+        if (((r->regtype == REG_TYPE_SAMPLER) || (r->regtype == REG_TYPE_TEXTURE)) &&
+            !(shader_is_pixel(ctx) && !shader_version_atleast(ctx, 1, 4)))
+        {
+            fail(ctx, "Register type is not declarable in this shader model.");
+            return;
+        } // if
         switch (r->regtype)
         {
             case REG_TYPE_SAMPLER: // s# (only ps_1_1)
@@ -790,7 +839,11 @@ static void spv_add_attrib_fixup(Context *ctx, RegisterList *r, unsigned int typ
     uint32* next_types;
     uint32* next_opcodes;
 
-    assert(r != NULL);
+    if (r == NULL)
+    {
+        fail(ctx, "Shader attribute fixup has no matching attribute register.");
+        return;
+    } // if
     #define TYPE_LOAD_OFFSET ctx->spirv.patch_table.attrib_type_load_offsets[r->usage][r->index]
 
     next_types = (uint32*) Malloc(ctx, sizeof(uint32) * (TYPE_LOAD_OFFSET.num_loads + 1));
@@ -821,9 +874,17 @@ static SpirvResult spv_loadreg(Context *ctx, RegisterList *r)
 
     uint32 id_src = r->spirv.iddecl;
     SpirvResult result;
+    result.tid = 0;
+    result.id = 0;
     if (regtype == REG_TYPE_SAMPLER)
     {
+        // Untrusted bytecode can read a sampler register the shader never declared. -CNA
         RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER, r->regnum);
+        if (sreg == NULL)
+        {
+            fail(ctx, "Shader reads an undeclared sampler register.");
+            return result;
+        } // if
         result.tid = spv_image_from_texturetype(ctx, (TextureType)sreg->index);
     } // if
     else if (regtype == REG_TYPE_CONSTBOOL)
@@ -862,7 +923,13 @@ static SpirvResult spv_loadreg(Context *ctx, RegisterList *r)
         return result;
     } // if
 
-    assert(id_src);
+    if (id_src == 0)
+    {
+        // No declaration id means the register was never declared, or its declaration was
+        // already refused; either way there is nothing to load from. -CNA
+        fail(ctx, "Shader reads a register that was never declared.");
+        return result;
+    } // if
     result.id = spv_bumpid(ctx);
 
     push_output(ctx, &ctx->mainline);
@@ -928,12 +995,18 @@ SpirvResult spv_swizzle(Context *ctx, SpirvResult arg, const int swizzle, const 
     if (no_swizzle(swizzle) && writemask_xyzw(writemask))
         return arg;
 
-    assert(arg.tid != 0);
-    assert(writemask == 1
-        || writemask == 3
-        || writemask == 7
-        || writemask == 15
-    );
+    // Every one of these came from parsed shader bytecode: a load that was already refused
+    // leaves tid zero, and a write mask is whatever the destination token said. -CNA
+    if (arg.tid == 0)
+    {
+        fail(ctx, "Swizzle of a value that could not be loaded.");
+        return arg;
+    } // if
+    if ((writemask != 1) && (writemask != 3) && (writemask != 7) && (writemask != 15))
+    {
+        fail(ctx, "Unsupported write mask in swizzle.");
+        return arg;
+    } // if
 
     SpirvTypeIdx sti_arg = STI_VOID;
     for (i = STI_CORE_START_; i < STI_CORE_END_; i++)
@@ -944,7 +1017,11 @@ SpirvResult spv_swizzle(Context *ctx, SpirvResult arg, const int swizzle, const 
             break;
         } // if
     } // for
-    assert(sti_arg != STI_VOID);
+    if (sti_arg == STI_VOID)
+    {
+        fail(ctx, "Swizzle of a value with an unknown type.");
+        return arg;
+    } // if
 
     // We should not leave any value undefined, as it may end up used (eg. dot
     // product), which will make everything relying on it's result undefined.
@@ -969,9 +1046,8 @@ SpirvResult spv_swizzle(Context *ctx, SpirvResult arg, const int swizzle, const 
             break;
 
         default:
-            failf(ctx, "Unexpected write mask in swizzle: 0x%X");
-            assert(0);
-            break;
+            failf(ctx, "Unexpected write mask in swizzle: 0x%X", writemask);
+            return arg;
     } // switch
 
     SpirvTypeIdx sti_result = spv_change_base_type_vec_dim(sti_arg, resdim);
@@ -1875,9 +1951,13 @@ static void spv_texbem(Context* ctx, int luminanceCorrection)
 
         SpirvResult l_x = spv_swizzle(ctx, l, 0x0, 0x1);
         SpirvResult l_y = spv_swizzle(ctx, l, 0x1, 0x1);
-        assert(tid_float == l_x.tid);
-        assert(tid_float == l_y.tid);
-        assert(tid_float == src0_z.tid);
+        // A source whose load was refused comes back with a zero type. -CNA
+        if ((tid_float != l_x.tid) || (tid_float != l_y.tid) ||
+            (tid_float != src0_z.tid))
+        {
+            fail(ctx, "Operand types do not match for this instruction.");
+            return;
+        } // if
 
         uint32 id_e = spv_bumpid(ctx);
         uint32 id_f = spv_bumpid(ctx);
@@ -2178,7 +2258,21 @@ void emit_SPIRV_sampler(Context *ctx, int stage, TextureType ttype, int texbem)
     else
         sampler_reg = spv_getreg(ctx, REG_TYPE_SAMPLER, stage);
 
-    uint32 result = sampler_reg->spirv.iddecl;
+    uint32 result;
+    // The stage comes from the shader's own sampler declaration, and a sampler used without being
+    // declared has no register at all. -CNA
+    if (sampler_reg == NULL)
+    {
+        fail(ctx, "Shader uses a sampler stage it never declared.");
+        return;
+    } // if
+    if ((stage < 0) ||
+        (((size_t) stage) >= STATICARRAYLEN(ctx->spirv.sampler_extras)))
+    {
+        fail(ctx, "Sampler stage is out of range.");
+        return;
+    } // if
+    result = sampler_reg->spirv.iddecl;
 
     push_output(ctx, &ctx->mainline_intro);
     spv_emit(ctx, 4, SpvOpVariable, type, result, SpvStorageClassUniformConstant);
@@ -2215,6 +2309,14 @@ void emit_SPIRV_attribute(Context *ctx, RegisterType regtype, int regnum,
 {
     uint32 tid;
     RegisterList *r = spv_getreg(ctx, regtype, regnum);
+
+    // The register this attribute declares can be one the shader never actually used, in which
+    // case there is no register list entry to name. -CNA
+    if (r == NULL)
+    {
+        fail(ctx, "Shader declares an attribute for a register it never used.");
+        return;
+    } // if
 
     ctx->spirv.inoutcount += 1;
 
@@ -2867,7 +2969,13 @@ static void emit_SPIRV_dotproduct(Context *ctx, SpirvResult src0, SpirvResult sr
 {
     SpirvResult result;
 
-    assert(src0.tid == src1.tid);
+    // Operand types come from parsed bytecode, and either source may already have been refused,
+    // which leaves its type id zero. -CNA
+    if ((src0.tid == 0) || (src0.tid != src1.tid))
+    {
+        fail(ctx, "Dot product operands do not share a type.");
+        return;
+    } // if
 
     result.tid = spv_get_type(ctx, STI_FLOAT);
     result.id = spv_bumpid(ctx);
@@ -3141,8 +3249,11 @@ void emit_SPIRV_MAD(Context *ctx)
     SpirvResult src0 = spv_load_srcarg_full(ctx, 0);
     SpirvResult src1 = spv_load_srcarg_full(ctx, 1);
     SpirvResult src2 = spv_load_srcarg_full(ctx, 2);
-    assert(src0.tid == src1.tid);
-    assert(src0.tid == src2.tid);
+    if ((src0.tid == 0) || (src0.tid != src1.tid) || (src0.tid != src2.tid))
+    {
+        fail(ctx, "MAD operand types do not match.");
+        return;
+    } // if
     uint32 mul_result = spv_bumpid(ctx);
     SpirvResult result;
     result.tid = src0.tid;
@@ -3424,7 +3535,11 @@ void emit_SPIRV_SINCOS(Context *ctx)
 void emit_SPIRV_MOVA(Context *ctx)
 {
     SpirvResult src = spv_load_srcarg_full(ctx, 0);
-    assert(src.tid == spv_get_type(ctx, STI_VEC4));
+    if (src.tid != spv_get_type(ctx, STI_VEC4))
+    {
+        fail(ctx, "MOVA source is not a four-component vector.");
+        return;
+    } // if
 
     uint32 id_rounded = spv_bumpid(ctx);
 
@@ -3510,7 +3625,11 @@ void emit_SPIRV_LRP(Context *ctx)
     SpirvResult a = spv_load_srcarg_full(ctx, 0); // 'scale'
     SpirvResult y = spv_load_srcarg_full(ctx, 1); // 'end'
     SpirvResult x = spv_load_srcarg_full(ctx, 2); // 'start'
-    assert(x.tid == y.tid);
+    if ((x.tid == 0) || (x.tid != y.tid))
+    {
+        fail(ctx, "LRP operand types do not match.");
+        return;
+    } // if
     SpirvResult result;
     result.id = spv_bumpid(ctx);
     result.tid = x.tid;
@@ -3526,8 +3645,12 @@ static void spv_emit_vecXmatrix(Context *ctx, int rows, int writemask)
 {
     int i;
 
-    assert(rows <= 4);
-    assert(writemask == 0x7 || writemask == 0xF);
+    // Both come from the instruction's own destination token. -CNA
+    if ((rows > 4) || ((writemask != 0x7) && (writemask != 0xF)))
+    {
+        fail(ctx, "Unsupported matrix instruction shape.");
+        return;
+    } // if
 
     uint32 src0 = spv_load_srcarg(ctx, 0, writemask).id;
     uint32 tid_float = spv_get_type(ctx, STI_FLOAT);
