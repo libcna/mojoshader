@@ -346,6 +346,31 @@ static void validate_vertex_instruction_slot_count(Context *ctx)
     } // if
 } // validate_vertex_instruction_slot_count
 
+static void validate_pixel_shader_model_two_zero_instruction_slot_count(
+    Context *ctx, const uint32 opcode, const int slots)
+{
+    if (!shader_is_pixel(ctx) || !shader_version_exactly(ctx, 2, 0))
+        return;
+
+    if ((opcode == 65) || (opcode == 66))  // TEXKILL or TEXLD.
+    {
+        // Both instructions occupy one texture slot in ps_2_0. The generic
+        // instruction table's TEXKILL cost includes an implementation detail
+        // which is not part of the D3D9 profile budget.
+        ctx->pixel_texture_instruction_count++;
+        if (ctx->pixel_texture_instruction_count > 32)
+            failf(ctx, "pixel shader texture instruction count %d exceeds the ps_2_0 limit of 32 slots",
+                  ctx->pixel_texture_instruction_count);
+    } // if
+    else
+    {
+        ctx->pixel_arithmetic_instruction_count += slots;
+        if (ctx->pixel_arithmetic_instruction_count > 64)
+            failf(ctx, "pixel shader arithmetic instruction count %d exceeds the ps_2_0 limit of 64 slots",
+                  ctx->pixel_arithmetic_instruction_count);
+    } // else
+} // validate_pixel_shader_model_two_zero_instruction_slot_count
+
 static int temporary_register_count(const Context *ctx)
 {
     if (shader_is_vertex(ctx))
@@ -2680,6 +2705,8 @@ static int parse_instruction_token(Context *ctx)
 
     ctx->instruction_count += instruction->slots;
     validate_vertex_instruction_slot_count(ctx);
+    validate_pixel_shader_model_two_zero_instruction_slot_count(
+        ctx, opcode, instruction->slots);
 
     if (!isfail(ctx))
         emitter(ctx);  // call the profile's emitter.

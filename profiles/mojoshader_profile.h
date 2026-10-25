@@ -132,6 +132,8 @@ typedef struct Context
     uint32 dwords[4];
     uint32 version_token;
     int instruction_count;
+    int pixel_arithmetic_instruction_count;
+    int pixel_texture_instruction_count;
     uint32 instruction_controls;
     uint32 previous_opcode;
     int phase_count;
