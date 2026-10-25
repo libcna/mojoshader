@@ -452,7 +452,9 @@ void buffer_patch(Buffer *buffer, const size_t start,
 #define OPCODE_BREAK 44
 #define OPCODE_BREAKC 45
 #define OPCODE_TEXLD 66
+#define OPCODE_TEXLDD 93
 #define OPCODE_SETP 94
+#define OPCODE_TEXLDL 95
 
 // TEXLD becomes a different instruction with these instruction controls.
 #define CONTROL_TEXLD  0

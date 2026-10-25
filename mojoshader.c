@@ -704,6 +704,24 @@ static void validate_address_register_source(Context *ctx,
     } // if
 } // validate_address_register_source
 
+static void validate_sampler_register_source(Context *ctx,
+                                             const RegisterType regtype,
+                                             const int source_index)
+{
+    if (regtype != REG_TYPE_SAMPLER)
+        return;
+
+    if (((ctx->current_opcode == OPCODE_TEXLD) ||
+         (ctx->current_opcode == OPCODE_TEXLDL)) &&
+        (source_index == 1))
+        return;
+
+    if ((ctx->current_opcode == OPCODE_TEXLDD) && (source_index == 3))
+        return;
+
+    fail(ctx, "sampler pseudo-register cannot be read directly");
+} // validate_sampler_register_source
+
 static void validate_constant_control_register(Context *ctx,
                                                const RegisterType regtype,
                                                const int regnum)
@@ -1048,6 +1066,7 @@ static int adjust_swizzle(const Context *ctx, const RegisterType regtype,
 static int parse_source_token(Context *ctx, SourceArgInfo *info)
 {
     int retval = 1;
+    const int source_index = ctx->current_source_arg++;
 
     if (ctx->tokencount == 0)
     {
@@ -1088,6 +1107,7 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     validate_input_register(ctx, info->regtype, info->regnum);
     validate_output_register_source(ctx, info->regtype);
     validate_address_register_source(ctx, info->regtype);
+    validate_sampler_register_source(ctx, info->regtype, source_index);
     validate_constant_control_register(ctx, info->regtype, info->regnum);
 
     info->swizzle = adjust_swizzle(ctx, info->regtype, info->regnum, swizzle);
@@ -2923,6 +2943,8 @@ static int parse_instruction_token(Context *ctx)
     memset(ctx->dwords, '\0', sizeof (ctx->dwords));
     ctx->instruction_controls = controls;
     ctx->predicated = predicated;
+    ctx->current_opcode = opcode;
+    ctx->current_source_arg = 0;
     ctx->have_dest_arg = 0;
 
     // Update the context with instruction's arguments.
