@@ -668,6 +668,10 @@ void emit_GLSL_start(Context *ctx, const char *profilestr)
         // anywhere. GLSL ES 3.00 requires highp in fragment shaders, so ask for it. -CNA
         output_line(ctx, "precision highp float;");
         output_line(ctx, "precision mediump int;");
+        // GLSL ES 3.00 gives sampler2D and samplerCube a default precision but not sampler3D,
+        // so a shader declaring a volume sampler without one fails to compile ("No precision
+        // specified in this scope for type `sampler3D'"). -CNA
+        output_line(ctx, "precision highp sampler3D;");
         pop_output(ctx);
     } // else if
     #endif
