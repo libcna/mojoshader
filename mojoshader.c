@@ -744,6 +744,38 @@ static void validate_typed_control_register_source(Context *ctx,
     } // else if
 } // validate_typed_control_register_source
 
+static void validate_special_control_register_source(Context *ctx,
+                                                     const RegisterType regtype,
+                                                     const int source_index)
+{
+    if (regtype == REG_TYPE_PREDICATE)
+    {
+        if (ctx->parsing_predicate_token ||
+            ((ctx->current_opcode == OPCODE_IF) && (source_index == 0)) ||
+            ((ctx->current_opcode == OPCODE_CALLNZ) && (source_index == 1)) ||
+            ((ctx->current_opcode == OPCODE_BREAKP) && (source_index == 0)))
+            return;
+
+        fail(ctx, "predicate register requires predication or flow control");
+    } // if
+    else if (regtype == REG_TYPE_LABEL)
+    {
+        if (((ctx->current_opcode == OPCODE_CALL) && (source_index == 0)) ||
+            ((ctx->current_opcode == OPCODE_CALLNZ) && (source_index == 0)) ||
+            ((ctx->current_opcode == OPCODE_LABEL) && (source_index == 0)))
+            return;
+
+        fail(ctx, "label register requires CALL, CALLNZ, or LABEL");
+    } // else if
+    else if (regtype == REG_TYPE_LOOP)
+    {
+        if ((ctx->current_opcode == OPCODE_LOOP) && (source_index == 0))
+            return;
+
+        fail(ctx, "loop counter register requires LOOP or relative addressing");
+    } // else if
+} // validate_special_control_register_source
+
 static void validate_constant_control_register(Context *ctx,
                                                const RegisterType regtype,
                                                const int regnum)
@@ -1132,6 +1164,8 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     validate_sampler_register_source(ctx, info->regtype, source_index);
     validate_typed_control_register_source(ctx, info->regtype,
                                            source_index);
+    validate_special_control_register_source(ctx, info->regtype,
+                                             source_index);
     validate_constant_control_register(ctx, info->regtype, info->regnum);
 
     info->swizzle = adjust_swizzle(ctx, info->regtype, info->regnum, swizzle);
@@ -2969,6 +3003,7 @@ static int parse_instruction_token(Context *ctx)
     ctx->predicated = predicated;
     ctx->current_opcode = opcode;
     ctx->current_source_arg = 0;
+    ctx->parsing_predicate_token = 0;
     ctx->have_dest_arg = 0;
 
     // Update the context with instruction's arguments.
@@ -2976,7 +3011,11 @@ static int parse_instruction_token(Context *ctx)
     retval = instruction->parse_args(ctx);
 
     if (predicated)
+    {
+        ctx->parsing_predicate_token = 1;
         retval += parse_predicated_token(ctx);
+        ctx->parsing_predicate_token = 0;
+    } // if
 
     // parse_args() moves these forward for convenience...reset them.
     ctx->tokens = start_tokens;

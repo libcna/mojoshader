@@ -137,6 +137,7 @@ typedef struct Context
     uint32 instruction_controls;
     uint32 current_opcode;
     int current_source_arg;
+    int parsing_predicate_token;
     uint32 previous_opcode;
     int previous_had_dest_arg;
     int previous_writemask;
