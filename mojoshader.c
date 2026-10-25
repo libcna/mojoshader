@@ -2999,11 +2999,6 @@ static void state_TEXLD(Context *ctx)
         const SourceArgInfo *src0 = &ctx->source_args[0];
         const SourceArgInfo *src1 = &ctx->source_args[1];
 
-        // !!! FIXME: verify texldp restrictions:
-        //http://msdn.microsoft.com/en-us/library/bb206221(VS.85).aspx
-        // !!! FIXME: ...and texldb, too.
-        //http://msdn.microsoft.com/en-us/library/bb206217(VS.85).aspx
-
         if (ctx->dest_arg.result_mod & MOD_SATURATE)
             fail(ctx, "TEXLD destination must not saturate");
 

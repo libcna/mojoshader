@@ -1731,8 +1731,6 @@ void emit_HLSL_TEXLD(Context *ctx)
                     make_HLSL_srcarg_string_vec2(ctx, 0, src0, sizeof (src0));
                 break;
             case TEXTURE_TYPE_CUBE:
-                if (ctx->instruction_controls == CONTROL_TEXLDP)
-                    fail(ctx, "TEXLDP on a cubemap");  // !!! FIXME: is this legal?
                 make_HLSL_srcarg_string_vec3(ctx, 0, src0, sizeof (src0));
                 break;
             case TEXTURE_TYPE_VOLUME:
