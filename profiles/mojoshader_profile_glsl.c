@@ -793,12 +793,34 @@ void emit_GLSL_finalize(Context *ctx)
     output_blank_line(ctx);
     pop_output(ctx);
 
-    // If we had a relative addressing of REG_TYPE_INPUT, we need to build
-    //  an array for it at the start of main(). GLSL doesn't let you specify
-    //  arrays of attributes.
-    //vec4 blah_array[BIGGEST_ARRAY];
-    if (ctx->have_relative_input_registers) // !!! FIXME
-        fail(ctx, "Relative addressing of input registers not supported.");
+    // GLSL cannot dynamically index independent attribute/varying variables.
+    // Mirror D3D9's fixed input bank in a local-addressable array instead.
+    if (ctx->have_relative_input_registers)
+    {
+        const int input_count = shader_is_pixel(ctx) ? 10 : 16;
+        char array_name[64];
+        get_GLSL_input_array_varname(ctx, array_name, sizeof (array_name));
+        push_output(ctx, &ctx->globals);
+        output_line(ctx, "vec4 %s[%d];", array_name, input_count);
+        pop_output(ctx);
+
+        push_output(ctx, &ctx->mainline_intro);
+        const RegisterList *item = ctx->attributes.next;
+        while (item != NULL)
+        {
+            if ((item->regtype == REG_TYPE_INPUT) &&
+                (item->regnum >= 0) && (item->regnum < input_count))
+            {
+                char input_name[64];
+                get_GLSL_varname_in_buf(ctx, REG_TYPE_INPUT, item->regnum,
+                                        input_name, sizeof (input_name));
+                output_line(ctx, "%s[%d] = %s;", array_name,
+                            item->regnum, input_name);
+            } // if
+            item = item->next;
+        } // while
+        pop_output(ctx);
+    } // if
 
     push_output(ctx, &ctx->preflight);
     output_GLSL_uniform_array(ctx, REG_TYPE_CONST, ctx->uniform_float4_count);

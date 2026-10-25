@@ -147,6 +147,7 @@ typedef struct Context
     int coissue;
     int loops;
     int reps;
+    int current_label_register_plus_one;
     int max_reps;
     int cmps;
     int scratch_registers;

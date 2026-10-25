@@ -1117,6 +1117,18 @@ static int adjust_swizzle(const Context *ctx, const RegisterType regtype,
 } // adjust_swizzle
 
 
+static int current_scope_inherits_loop(Context *ctx)
+{
+    if (ctx->loops > 0)
+        return 1;
+    if (ctx->current_label_register_plus_one == 0)
+        return 0;
+    const RegisterList *reg = reglist_find(&ctx->used_registers, REG_TYPE_LABEL,
+                              ctx->current_label_register_plus_one - 1);
+    return (reg != NULL) && (reg->misc == 1);
+} // current_scope_inherits_loop
+
+
 static int parse_source_token(Context *ctx, SourceArgInfo *info)
 {
     int retval = 1;
@@ -1239,17 +1251,31 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
 
             info->relative_component = (relswiz & 0x3);
 
+            if ((info->relative_regtype == REG_TYPE_LOOP) &&
+                !current_scope_inherits_loop(ctx))
+            {
+                fail(ctx, "relative aL addressing requires LOOP/ENDLOOP scope");
+            } // if
+
             retval++;
         } // else
 
         if (info->regtype == REG_TYPE_INPUT)
         {
-            if ( (shader_is_pixel(ctx)) || (!shader_version_atleast(ctx, 3, 0)) )
+            if (!shader_version_atleast(ctx, 3, 0))
                 fail(ctx, "relative addressing of input registers not supported in this shader model");
+            else if (shader_is_pixel(ctx) &&
+                     (info->relative_regtype != REG_TYPE_LOOP))
+                fail(ctx, "pixel input relative addressing requires aL");
             ctx->have_relative_input_registers = 1;
+            set_used_register(ctx, info->relative_regtype,
+                              info->relative_regnum, 0);
         } // if
         else if (info->regtype == REG_TYPE_CONST)
         {
+            if (shader_is_pixel(ctx))
+                fail(ctx, "relative addressing of pixel constants is not supported");
+
             // figure out what array we're in...
             if (!ctx->ignores_ctab)
             {
@@ -2023,6 +2049,7 @@ static void state_RET(Context *ctx)
         fail(ctx, "LOOP without ENDLOOP");
     if (ctx->reps > 0)
         fail(ctx, "REP without ENDREP");
+    ctx->current_label_register_plus_one = 0;
 } // state_RET
 
 static void check_label_register(Context *ctx, int arg, const char *opcode)
@@ -2047,6 +2074,8 @@ static void state_LABEL(Context *ctx)
         fail(ctx, "LABEL not followed by a RET");
     check_label_register(ctx, 0, "LABEL");
     set_defined_register(ctx, REG_TYPE_LABEL, ctx->source_args[0].regnum);
+    ctx->current_label_register_plus_one =
+        ctx->source_args[0].regnum + 1;
 } // state_LABEL
 
 static void check_call_loop_wrappage(Context *ctx, const int regnum)
@@ -2056,7 +2085,7 @@ static void check_call_loop_wrappage(Context *ctx, const int regnum)
     //  it must always be called in a loop_. So we'll just pass our loop
     //  variable as a function parameter in those cases.
 
-    const int current_usage = (ctx->loops > 0) ? 1 : -1;
+    const int current_usage = current_scope_inherits_loop(ctx) ? 1 : -1;
     RegisterList *reg = reglist_find(&ctx->used_registers, REG_TYPE_LABEL, regnum);
 
     if (reg == NULL)
