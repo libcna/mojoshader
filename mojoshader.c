@@ -1709,6 +1709,12 @@ static void state_POW(Context *ctx)
         fail(ctx, "POW src1 must have replicate swizzle");
 } // state_POW
 
+static void state_EXP(Context *ctx)
+{
+    if (!replicate_swizzle(ctx->source_args[0].swizzle))
+        fail(ctx, "EXP src0 must have replicate swizzle");
+} // state_EXP
+
 static void state_LOG(Context *ctx)
 {
     if (!replicate_swizzle(ctx->source_args[0].swizzle))
