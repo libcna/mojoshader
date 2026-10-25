@@ -1715,6 +1715,12 @@ static void state_LOG(Context *ctx)
         fail(ctx, "LOG src0 must have replicate swizzle");
 } // state_LOG
 
+static void state_EXPP(Context *ctx)
+{
+    if (!replicate_swizzle(ctx->source_args[0].swizzle))
+        fail(ctx, "EXPP src0 must have replicate swizzle");
+} // state_EXPP
+
 static void state_LOGP(Context *ctx)
 {
     if (!replicate_swizzle(ctx->source_args[0].swizzle))
