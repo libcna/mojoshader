@@ -3422,6 +3422,31 @@ static void state_TEXLD(Context *ctx)
                 fail(ctx, "TEXLD src1 must not swizzle");
         } // if
 
+        if (shader_version_exactly(ctx, 2, 0) &&
+            (src0->regtype == REG_TYPE_TEMP))
+        {
+            const RegisterList *coordinate =
+                reglist_find(&ctx->used_registers, REG_TYPE_TEMP, src0->regnum);
+            const RegisterList *sampler =
+                reglist_find(&ctx->samplers, REG_TYPE_SAMPLER, src1->regnum);
+            if ((coordinate != NULL) && (sampler != NULL))
+            {
+                const TextureType texture_type = (TextureType) sampler->index;
+                int required_writemask =
+                    texture_type == TEXTURE_TYPE_2D ? 0x3 : 0x7;
+                if (ctx->instruction_controls != CONTROL_TEXLD)
+                    required_writemask |= 0x8;
+                const int same_destination =
+                    (ctx->dest_arg.regtype == REG_TYPE_TEMP) &&
+                    (ctx->dest_arg.regnum == src0->regnum);
+                const int prior_writemask = same_destination
+                    ? ctx->dest_arg_prior_writemask : coordinate->written;
+                if ((prior_writemask & required_writemask) != required_writemask)
+                    failf(ctx, "TEXLD reads uninitialized coordinate component(s) of r%d",
+                          src0->regnum);
+            } // if
+        } // if
+
         if ( ((TextureType) ctx->source_args[1].regnum) == TEXTURE_TYPE_CUBE )
             ctx->instruction_count += 3;
     } // if
