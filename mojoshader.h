@@ -2215,6 +2215,9 @@ DECLSPEC MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(MOJOSHADER_sdlContext 
 /* Returns non-zero when the linked program's fragment module gained the second uniform buffer. */
 DECLSPEC int MOJOSHADER_sdlGetPixelSpirvTransformApplied(MOJOSHADER_sdlContext *context);
 
+/* Returns a non-zero context-lifetime identity for the currently linked program. */
+DECLSPEC unsigned long long MOJOSHADER_sdlGetProgramIdentity(MOJOSHADER_sdlContext *context);
+
 /*
  * This binds the program to the active context, and does nothing particularly
  * special until you start working with uniform buffers or shader modules.

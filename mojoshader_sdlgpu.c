@@ -119,6 +119,7 @@ struct MOJOSHADER_sdlContext
     MOJOSHADER_sdlShaderData *bound_pshader_data;
     MOJOSHADER_sdlProgram *bound_program;
     HashTable *linker_cache;
+    unsigned long long next_program_identity;
     MOJOSHADER_sdlSpirvTransform spirv_transform;
     void *spirv_transform_data;
 };
@@ -138,6 +139,7 @@ struct MOJOSHADER_sdlProgram
     SDL_GPUShader *pixelShader;
     MOJOSHADER_sdlShaderData *vertexShaderData;
     MOJOSHADER_sdlShaderData *pixelShaderData;
+    unsigned long long identity;
     int pixelSpirvTransformApplied;
 };
 
@@ -809,6 +811,13 @@ MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(
 
     program->vertexShaderData = vshader;
     program->pixelShaderData = pshader;
+    if (ctx->next_program_identity == ~0ULL)
+    {
+        MOJOSHADER_sdlDeleteProgram(ctx, program);
+        set_error("SDL_gpu linked-program identity space exhausted");
+        return NULL;
+    } // if
+    program->identity = ++ctx->next_program_identity;
 
     LinkedShaderData *item = (LinkedShaderData *) ctx->malloc_fn(sizeof (LinkedShaderData),
                                                          ctx->malloc_data);
@@ -837,6 +846,13 @@ int MOJOSHADER_sdlGetPixelSpirvTransformApplied(MOJOSHADER_sdlContext *ctx)
         return 0;
     return ctx->bound_program->pixelSpirvTransformApplied;
 } // MOJOSHADER_sdlGetPixelSpirvTransformApplied
+
+unsigned long long MOJOSHADER_sdlGetProgramIdentity(MOJOSHADER_sdlContext *ctx)
+{
+    if (ctx == NULL || ctx->bound_program == NULL)
+        return 0;
+    return ctx->bound_program->identity;
+} // MOJOSHADER_sdlGetProgramIdentity
 
 void MOJOSHADER_sdlShaderAddRef(MOJOSHADER_sdlShaderData *shader)
 {
