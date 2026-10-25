@@ -465,6 +465,51 @@ static void validate_pixel_shader_model_one_coissue_opcode(
     } // else if
 } // validate_pixel_shader_model_one_coissue_opcode
 
+static int pixel_shader_model_one_coissue_eligible(
+    Context *ctx, const uint32 opcode)
+{
+    return !pixel_shader_model_one_texture_opcode(opcode) &&
+           (opcode != 9) &&  // DP4 occupies both pipelines even in 1.4.
+           (pixel_shader_model_one_arithmetic_slots(ctx, opcode) == 1);
+} // pixel_shader_model_one_coissue_eligible
+
+static void validate_pixel_shader_model_one_coissue_pair(
+    Context *ctx, const uint32 opcode)
+{
+    if (!shader_is_pixel(ctx) || (ctx->major_ver != 1) || !ctx->coissue)
+        return;
+
+    if (!pixel_shader_model_one_coissue_eligible(ctx, opcode))
+    {
+        fail(ctx, "pixel Shader Model 1.x co-issued instruction must use one arithmetic pipeline");
+    } // if
+    else if (!ctx->previous_had_dest_arg || ctx->previous_coissue)
+    {
+        fail(ctx, "pixel Shader Model 1.x co-issued instruction needs one preceding instruction");
+    } // else if
+    else if (!pixel_shader_model_one_coissue_eligible(ctx, ctx->previous_opcode))
+    {
+        fail(ctx, "pixel Shader Model 1.x co-issued pair needs two eligible arithmetic instructions");
+    } // else if
+    else if (ctx->minor_ver < 4)
+    {
+        const int previous_mask = ctx->previous_writemask;
+        const int current_mask = ctx->dest_arg.orig_writemask;
+        const int previous_color = previous_mask & 0x7;
+        const int previous_alpha = previous_mask & 0x8;
+        const int current_color = current_mask & 0x7;
+        const int current_alpha = current_mask & 0x8;
+        const int color_then_alpha = previous_color && !previous_alpha &&
+                                     !current_color && current_alpha;
+        const int alpha_then_color = !previous_color && previous_alpha &&
+                                     current_color && !current_alpha;
+        if (!color_then_alpha && !alpha_then_color)
+        {
+            fail(ctx, "pixel Shader Model 1.1 through 1.3 co-issued pair must use opposite RGB and alpha pipelines");
+        } // if
+    } // else if
+} // validate_pixel_shader_model_one_coissue_pair
+
 static int temporary_register_count(const Context *ctx)
 {
     if (shader_is_vertex(ctx))
@@ -2798,6 +2843,7 @@ static int parse_instruction_token(Context *ctx)
         instruction->state(ctx);
     validate_pixel_shader_model_one_destination_mask(ctx, opcode);
     validate_pixel_shader_model_one_coissue_opcode(ctx, opcode);
+    validate_pixel_shader_model_one_coissue_pair(ctx, opcode);
 
     ctx->instruction_count += instruction->slots;
     validate_vertex_instruction_slot_count(ctx);
@@ -2820,6 +2866,9 @@ static int parse_instruction_token(Context *ctx)
     } // if
 
     ctx->previous_opcode = opcode;
+    ctx->previous_had_dest_arg = ctx->have_dest_arg;
+    ctx->previous_writemask = ctx->have_dest_arg ? ctx->dest_arg.orig_writemask : 0;
+    ctx->previous_coissue = coissue;
     ctx->scratch_registers = 0;  // reset after every instruction.
 
     if (!shader_version_atleast(ctx, 2, 0))
@@ -3634,6 +3683,8 @@ static int parse_phase_token(Context *ctx)
     if (!isfail(ctx))
     {
         ctx->phase_count++;
+        ctx->previous_had_dest_arg = 0;
+        ctx->previous_coissue = 0;
         ctx->pixel_arithmetic_instruction_count = 0;
         ctx->pixel_texture_instruction_count = 0;
         ctx->profile->phase_emitter(ctx);

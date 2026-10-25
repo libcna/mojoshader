@@ -136,6 +136,9 @@ typedef struct Context
     int pixel_texture_instruction_count;
     uint32 instruction_controls;
     uint32 previous_opcode;
+    int previous_had_dest_arg;
+    int previous_writemask;
+    int previous_coissue;
     int phase_count;
     int bem_count;
     int coissue;
