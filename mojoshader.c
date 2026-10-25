@@ -784,7 +784,7 @@ static void validate_sampler_register_source(Context *ctx,
         (source_index == 1))
         return;
 
-    if ((ctx->current_opcode == OPCODE_TEXLDD) && (source_index == 3))
+    if ((ctx->current_opcode == OPCODE_TEXLDD) && (source_index == 1))
         return;
 
     fail(ctx, "sampler pseudo-register cannot be read directly");
