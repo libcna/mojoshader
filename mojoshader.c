@@ -3047,7 +3047,8 @@ static void state_SINCOS(Context *ctx)
 
 static void state_IF(Context *ctx)
 {
-    const RegisterType regtype = ctx->source_args[0].regtype;
+    const SourceArgInfo *src = &ctx->source_args[0];
+    const RegisterType regtype = src->regtype;
     if ((regtype != REG_TYPE_PREDICATE) && (regtype != REG_TYPE_CONSTBOOL))
     {
         fail(ctx, "IF src0 must be CONSTBOOL or PREDICATE");
@@ -3057,6 +3058,18 @@ static void state_IF(Context *ctx)
              !shader_version_atleast(ctx, 2, 1))
     {
         fail(ctx, "IF predicate argument requires Shader Model 2.x or later");
+        return;
+    } // else if
+    else if ((src->src_mod != SRCMOD_NONE) &&
+             (src->src_mod != SRCMOD_NOT))
+    {
+        fail(ctx, "IF source modifier must be NONE or NOT");
+        return;
+    } // else if
+    else if ((regtype == REG_TYPE_PREDICATE) &&
+             !replicate_swizzle(src->swizzle))
+    {
+        fail(ctx, "IF predicate source must have replicate swizzle");
         return;
     } // else if
 
