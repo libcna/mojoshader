@@ -118,6 +118,7 @@ const char *get_GLSL_srcarg_varname(Context *ctx, const size_t idx,
 
 const char *make_GLSL_destarg_assign(Context *, char *, const size_t,
                                      const char *, ...) ISPRINTF(4,5);
+char *make_GLSL_swizzle_string(char *, const size_t, const int, const int);
 
 const char *make_GLSL_destarg_assign(Context *ctx, char *buf,
                                      const size_t buflen,
@@ -153,13 +154,6 @@ const char *make_GLSL_destarg_assign(Context *ctx, char *buf,
 
     // CENTROID only allowed in DCL opcodes, which shouldn't come through here.
     assert((arg->result_mod & MOD_CENTROID) == 0);
-
-    if (ctx->predicated)
-    {
-        fail(ctx, "predicated destinations unsupported");  // !!! FIXME
-        *buf = '\0';
-        return buf;
-    } // if
 
     char operation[256];
     va_list ap;
@@ -205,6 +199,83 @@ const char *make_GLSL_destarg_assign(Context *ctx, char *buf,
 
     const char *leftparen = (need_parens) ? "(" : "";
     const char *rightparen = (need_parens) ? ")" : "";
+
+    if (ctx->predicated)
+    {
+        const int vecsize = vecsize_from_writemask(arg->writemask);
+        const SourceArgInfo *predicate = &ctx->predicate_arg;
+        char predicate_var[64];
+        char predicate_swizzle[6] = { '\0' };
+        get_GLSL_varname_in_buf(ctx, predicate->regtype, predicate->regnum,
+                                predicate_var, sizeof (predicate_var));
+        make_GLSL_swizzle_string(predicate_swizzle, sizeof (predicate_swizzle),
+                                 predicate->swizzle, 0xF);
+
+        const char *scalar_type = "float";
+        const char *vector_type = "vec";
+        if (arg->regtype == REG_TYPE_PREDICATE)
+        {
+            scalar_type = "bool";
+            vector_type = "bvec";
+        } // if
+        else if (arg->regtype == REG_TYPE_ADDRESS)
+        {
+            scalar_type = "int";
+            vector_type = "ivec";
+        } // else if
+
+        output_line(ctx, "{");
+        ctx->indent++;
+        output_line(ctx, "bvec4 cna_predicate = %s%s%s%s;",
+                    (predicate->src_mod == SRCMOD_NOT) ? "not(" : "",
+                    predicate_var, predicate_swizzle,
+                    (predicate->src_mod == SRCMOD_NOT) ? ")" : "");
+        if (vecsize == 1)
+        {
+            output_line(ctx, "%s cna_predicated_result = %s%s%s%s%s%s;",
+                        scalar_type, clampleft, leftparen, operation, rightparen,
+                        result_shift_str, clampright);
+        } // if
+        else
+        {
+            output_line(ctx, "%s%d cna_predicated_result = %s%s%s%s%s%s;",
+                        vector_type, vecsize, clampleft, leftparen, operation, rightparen,
+                        result_shift_str, clampright);
+        } // else
+
+        static const char channels[] = "xyzw";
+        int result_component = 0;
+        for (int component = 0; component < 4; ++component)
+        {
+            if ((arg->writemask & (1 << component)) == 0)
+                continue;
+            if (scalar)
+            {
+                output_line(ctx, "if (cna_predicate.%c) %s_%s%s = cna_predicated_result;",
+                            channels[component], ctx->shader_type_str, regtype_str, regnum_str);
+                break;
+            } // if
+            if (vecsize == 1)
+            {
+                output_line(ctx, "if (cna_predicate.%c) %s_%s%s.%c = "
+                                 "cna_predicated_result;",
+                            channels[component], ctx->shader_type_str, regtype_str, regnum_str,
+                            channels[component]);
+            } // if
+            else
+            {
+                output_line(ctx, "if (cna_predicate.%c) %s_%s%s.%c = "
+                                 "cna_predicated_result.%c;",
+                            channels[component], ctx->shader_type_str, regtype_str, regnum_str,
+                            channels[component], channels[result_component]);
+            } // else
+            result_component++;
+        } // for
+        ctx->indent--;
+        output_line(ctx, "}");
+        *buf = '\0';
+        return buf;
+    } // if
 
     snprintf(buf, buflen, "%s_%s%s%s = %s%s%s%s%s%s;",
              ctx->shader_type_str, regtype_str, regnum_str, writemask_str,

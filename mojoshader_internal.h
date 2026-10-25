@@ -587,7 +587,7 @@ static inline int scalar_register(const MOJOSHADER_shaderType shader_type,
             return 0;
 
         case REG_TYPE_PREDICATE:
-            return (shader_type == MOJOSHADER_TYPE_PIXEL) ? 1 : 0;
+            return 0;
 
         default: break;
     } // switch
