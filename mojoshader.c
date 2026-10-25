@@ -554,6 +554,42 @@ static void validate_pixel_shader_model_one_destination_mask(
     } // else if
 } // validate_pixel_shader_model_one_destination_mask
 
+static void validate_pixel_shader_model_one_texture_instruction(
+    Context *ctx, const uint32 opcode)
+{
+    if (!shader_is_pixel(ctx) || (ctx->major_ver != 1) ||
+        (ctx->minor_ver >= 4) || !pixel_shader_model_one_texture_opcode(opcode) ||
+        !ctx->have_dest_arg)
+    {
+        return;
+    } // if
+
+    if (ctx->dest_arg.result_mod != 0)
+        fail(ctx, "ps_1_1 through ps_1_3 texture instructions forbid result modifiers");
+    if (ctx->dest_arg.result_shift != 0)
+        fail(ctx, "ps_1_1 through ps_1_3 texture instructions forbid result shifts");
+
+    if ((ctx->dest_arg.regtype == REG_TYPE_TEXTURE) &&
+        (ctx->dest_arg.regnum >= 0) && (ctx->dest_arg.regnum < 32))
+    {
+        const uint32 destination_bit = 1u << ctx->dest_arg.regnum;
+        if ((ctx->pixel1_texture_stages & destination_bit) != 0)
+        {
+            failf(ctx, "pixel texture register t%d is used by more than one texture instruction",
+                  ctx->dest_arg.regnum);
+        } // if
+        else if ((ctx->pixel1_texture_stages &
+                  ~((destination_bit - 1u) | destination_bit)) != 0)
+        {
+            fail(ctx, "ps_1_1 through ps_1_3 texture stages must appear in ascending order");
+        } // else if
+        else
+        {
+            ctx->pixel1_texture_stages |= destination_bit;
+        } // else
+    } // if
+} // validate_pixel_shader_model_one_texture_instruction
+
 static void validate_pixel_shader_model_one_coissue_opcode(
     Context *ctx, const uint32 opcode)
 {
@@ -4010,6 +4046,7 @@ static int parse_instruction_token(Context *ctx)
     if (instruction->state != NULL)
         instruction->state(ctx);
     validate_pixel_shader_model_one_destination_mask(ctx, opcode);
+    validate_pixel_shader_model_one_texture_instruction(ctx, opcode);
     validate_input_register_destination(ctx, opcode);
     validate_restricted_destination_register(ctx, opcode);
     validate_pixel_shader_model_one_coissue_opcode(ctx, opcode);
