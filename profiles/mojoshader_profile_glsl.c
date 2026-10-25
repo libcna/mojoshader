@@ -2876,8 +2876,20 @@ void emit_GLSL_DEF(Context *ctx)
     char val3[32]; floatstr(ctx, val3, sizeof (val3), val[3], 1);
 
     push_output(ctx, &ctx->globals);
-    output_line(ctx, "const vec4 %s = vec4(%s, %s, %s, %s);",
-                varname, val0, val1, val2, val3);
+    if (shader_is_vertex(ctx))
+    {
+        // Microsoft accepts repeated vertex DEF declarations and the last value
+        // wins. A macro can be replaced while retaining compile-time constant
+        // semantics for every later instruction and subroutine. -CNA
+        output_line(ctx, "#undef %s", varname);
+        output_line(ctx, "#define %s vec4(%s, %s, %s, %s)",
+                    varname, val0, val1, val2, val3);
+    } // if
+    else
+    {
+        output_line(ctx, "const vec4 %s = vec4(%s, %s, %s, %s);",
+                    varname, val0, val1, val2, val3);
+    } // else
     pop_output(ctx);
 } // emit_GLSL_DEF
 
