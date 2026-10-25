@@ -453,7 +453,12 @@ static int parse_destination_token(Context *ctx, DestArgInfo *info)
         fail(ctx, "Register type is out of range");
 
     if (!isfail(ctx))
+    {
+        ctx->have_dest_arg = 1;
+        ctx->dest_arg_was_written =
+            register_was_written(ctx, info->regtype, info->regnum);
         set_used_register(ctx, info->regtype, info->regnum, 1);
+    } // if
 
     return 1;
 } // parse_destination_token
@@ -833,12 +838,12 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     {
         RegisterList *reg;
         reg = set_used_register(ctx, info->regtype, info->regnum, 0);
-        // !!! FIXME: this test passes if you write to the register
-        // !!! FIXME:  in this same instruction, because we parse the
-        // !!! FIXME:  destination token first.
-        // !!! FIXME: Microsoft's shader validation explicitly checks temp
-        // !!! FIXME:  registers for this...do they check other writable ones?
-        if ((info->regtype == REG_TYPE_TEMP) && (reg) && (!reg->written))
+        const int uninitialized_destination_self_read =
+            ctx->have_dest_arg && (ctx->dest_arg.regtype == REG_TYPE_TEMP) &&
+            (ctx->dest_arg.regnum == info->regnum) &&
+            !ctx->dest_arg_was_written;
+        if ((info->regtype == REG_TYPE_TEMP) && (reg) &&
+            ((!reg->written) || uninitialized_destination_self_read))
             failf(ctx, "Temp register r%d used uninitialized", info->regnum);
     } // if
 
@@ -2194,6 +2199,7 @@ static int parse_instruction_token(Context *ctx)
     memset(ctx->dwords, '\0', sizeof (ctx->dwords));
     ctx->instruction_controls = controls;
     ctx->predicated = predicated;
+    ctx->have_dest_arg = 0;
 
     // Update the context with instruction's arguments.
     adjust_token_position(ctx, 1);

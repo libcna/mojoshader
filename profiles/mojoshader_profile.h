@@ -123,6 +123,8 @@ typedef struct Context
     uint8 major_ver;
     uint8 minor_ver;
     DestArgInfo dest_arg;
+    int have_dest_arg;
+    int dest_arg_was_written;
     SourceArgInfo source_args[5];
     SourceArgInfo predicate_arg;  // for predicated instructions.
     uint32 dwords[4];
