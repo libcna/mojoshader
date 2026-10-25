@@ -1854,6 +1854,38 @@ static void state_TEXREG2GB(Context *ctx)
     state_texreg2(ctx, "TEXREG2GB", 2);
 } // state_TEXREG2GB
 
+static void state_legacy_dependent_texture(Context *ctx, const char *opcode,
+                                           const int sampler_dims)
+{
+    const SourceMod modifier = ctx->source_args[0].src_mod;
+    if (!shader_version_atleast(ctx, 1, 2) || shader_version_atleast(ctx, 1, 4))
+        failf(ctx, "%s opcode only available in Shader Model 1.2/1.3", opcode);
+    if ((modifier != SRCMOD_NONE) && (modifier != SRCMOD_SIGN) &&
+        (modifier != SRCMOD_SIGNNEGATE))
+        failf(ctx, "%s source only permits the _bx2 modifier", opcode);
+    state_texops(ctx, opcode, sampler_dims, 0);
+}
+
+static void state_TEXREG2RGB(Context *ctx)
+{
+    state_legacy_dependent_texture(ctx, "TEXREG2RGB", 2);
+} // state_TEXREG2RGB
+
+static void state_TEXDP3TEX(Context *ctx)
+{
+    state_legacy_dependent_texture(ctx, "TEXDP3TEX", 2);
+    RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER,
+                                      ctx->dest_arg.regnum);
+    const TextureType ttype = (TextureType) (sreg ? sreg->index : 0);
+    if (ttype != TEXTURE_TYPE_2D)
+        fail(ctx, "TEXDP3TEX needs a 2D sampler");
+} // state_TEXDP3TEX
+
+static void state_TEXDP3(Context *ctx)
+{
+    state_legacy_dependent_texture(ctx, "TEXDP3", 0);
+} // state_TEXDP3
+
 static void state_TEXM3X2PAD(Context *ctx)
 {
     if (shader_version_atleast(ctx, 1, 4))

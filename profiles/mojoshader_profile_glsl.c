@@ -2595,8 +2595,43 @@ void emit_GLSL_DEF(Context *ctx)
     pop_output(ctx);
 } // emit_GLSL_DEF
 
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2RGB) // !!! FIXME
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3TEX) // !!! FIXME
+void emit_GLSL_TEXREG2RGB(Context *ctx)
+{
+    const DestArgInfo *info = &ctx->dest_arg;
+    char sampler[64];
+    char src[128];
+    char code[512];
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_SAMPLER, info->regnum,
+                            sampler, sizeof (sampler));
+    make_GLSL_srcarg_string_full(ctx, 0, src, sizeof (src));
+    RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER,
+                                      info->regnum);
+    const TextureType ttype = (TextureType) (sreg ? sreg->index : 0);
+    const char *ttypestr = (ttype == TEXTURE_TYPE_CUBE) ? "Cube" :
+                           (ttype == TEXTURE_TYPE_VOLUME) ? "3D" : "2D";
+    const char *components = (ttype == TEXTURE_TYPE_2D) ? "xy" : "xyz";
+    make_GLSL_destarg_assign(ctx, code, sizeof (code),
+        "texture%s(%s, (%s).%s)", ttypestr, sampler, src, components);
+    output_line(ctx, "%s", code);
+} // emit_GLSL_TEXREG2RGB
+
+void emit_GLSL_TEXDP3TEX(Context *ctx)
+{
+    const DestArgInfo *info = &ctx->dest_arg;
+    char dst[64];
+    char sampler[64];
+    char src[128];
+    char code[512];
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_TEXTURE, info->regnum,
+                            dst, sizeof (dst));
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_SAMPLER, info->regnum,
+                            sampler, sizeof (sampler));
+    make_GLSL_srcarg_string_full(ctx, 0, src, sizeof (src));
+    make_GLSL_destarg_assign(ctx, code, sizeof (code),
+        "texture2D(%s, vec2(dot(%s.xyz, (%s).xyz), 0.0))",
+        sampler, dst, src);
+    output_line(ctx, "%s", code);
+} // emit_GLSL_TEXDP3TEX
 void emit_GLSL_TEXM3X2DEPTH(Context *ctx)
 {
     if (ctx->texm3x2pad_src0 == -1)
@@ -2615,7 +2650,19 @@ void emit_GLSL_TEXM3X2DEPTH(Context *ctx)
         "(dot(%s.xyz, %s.xyz) / dot(%s.xyz, %s.xyz));",
         denominatorRow, vector, numeratorRow, vector, denominatorRow, vector);
 } // emit_GLSL_TEXM3X2DEPTH
-EMIT_GLSL_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3) // !!! FIXME
+void emit_GLSL_TEXDP3(Context *ctx)
+{
+    const DestArgInfo *info = &ctx->dest_arg;
+    char dst[64];
+    char src[128];
+    char code[512];
+    get_GLSL_varname_in_buf(ctx, REG_TYPE_TEXTURE, info->regnum,
+                            dst, sizeof (dst));
+    make_GLSL_srcarg_string_full(ctx, 0, src, sizeof (src));
+    make_GLSL_destarg_assign(ctx, code, sizeof (code),
+        "vec4(dot(%s.xyz, (%s).xyz))", dst, src);
+    output_line(ctx, "%s", code);
+} // emit_GLSL_TEXDP3
 
 void emit_GLSL_TEXM3X3(Context *ctx)
 {
