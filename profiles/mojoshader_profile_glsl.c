@@ -1988,7 +1988,31 @@ void emit_GLSL_TEXCRD(Context *ctx)
 void emit_GLSL_TEXKILL(Context *ctx)
 {
     char dst[64]; get_GLSL_destarg_varname(ctx, dst, sizeof (dst));
-    output_line(ctx, "if (any(lessThan(%s.xyz, vec3(0.0)))) discard;", dst);
+    if (ctx->predicated)
+    {
+        const SourceArgInfo *predicate = &ctx->predicate_arg;
+        char predicate_var[64];
+        char predicate_swizzle[6] = { '\0' };
+        get_GLSL_varname_in_buf(ctx, predicate->regtype, predicate->regnum,
+                                predicate_var, sizeof (predicate_var));
+        make_GLSL_swizzle_string(predicate_swizzle, sizeof (predicate_swizzle),
+                                 predicate->swizzle, 0xF);
+
+        output_line(ctx, "{");
+        ctx->indent++;
+        output_line(ctx, "bvec4 cna_predicate = %s%s%s%s;",
+                    (predicate->src_mod == SRCMOD_NOT) ? "not(" : "",
+                    predicate_var, predicate_swizzle,
+                    (predicate->src_mod == SRCMOD_NOT) ? ")" : "");
+        output_line(ctx, "if ((cna_predicate.x && (%s.x < 0.0)) || "
+                         "(cna_predicate.y && (%s.y < 0.0)) || "
+                         "(cna_predicate.z && (%s.z < 0.0))) discard;",
+                    dst, dst, dst);
+        ctx->indent--;
+        output_line(ctx, "}");
+    } // if
+    else
+        output_line(ctx, "if (any(lessThan(%s.xyz, vec3(0.0)))) discard;", dst);
 } // emit_GLSL_TEXKILL
 
 void emit_GLSL_TEXLD(Context *ctx)
