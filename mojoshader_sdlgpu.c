@@ -122,6 +122,7 @@ struct MOJOSHADER_sdlContext
     unsigned long long next_program_identity;
     MOJOSHADER_sdlSpirvTransform spirv_transform;
     void *spirv_transform_data;
+    unsigned int color_target_count;
 };
 
 struct MOJOSHADER_sdlShaderData
@@ -165,6 +166,7 @@ typedef struct LinkedShaderData
     MOJOSHADER_sdlShaderData *fragment;
     MOJOSHADER_vertexAttribute vertexAttributes[16];
     uint32_t vertexAttributeCount;
+    uint32_t colorTargetCount;
 } LinkedShaderData;
 
 static uint32_t hash_shaders(const void *sym, void *data)
@@ -181,6 +183,7 @@ static uint32_t hash_shaders(const void *sym, void *data)
     }
     hash = hash * HASH_FACTOR + s->vertex->tag;
     hash = hash * HASH_FACTOR + s->fragment->tag;
+    hash = hash * HASH_FACTOR + s->colorTargetCount;
     return hash;
 } // hash_shaders
 
@@ -201,6 +204,9 @@ static int match_shaders(const void *_a, const void *_b, void *data)
         return 0;
 
     if (a->vertexAttributeCount != b->vertexAttributeCount)
+        return 0;
+
+    if (a->colorTargetCount != b->colorTargetCount)
         return 0;
 
     for (uint32_t i = 0; i < a->vertexAttributeCount; i += 1)
@@ -408,6 +414,12 @@ int MOJOSHADER_sdlSetSpirvTransform(
     return 1;
 } // MOJOSHADER_sdlSetSpirvTransform
 
+void MOJOSHADER_sdlSetColorTargetCount(MOJOSHADER_sdlContext *ctx, unsigned int count)
+{
+    if (ctx != NULL)
+        ctx->color_target_count = count;
+} // MOJOSHADER_sdlSetColorTargetCount
+
 const char *MOJOSHADER_sdlGetError(
     MOJOSHADER_sdlContext *ctx
 ) {
@@ -573,6 +585,7 @@ static MOJOSHADER_sdlProgram *compile_program(
                 &transformed,
                 &transformed_len,
                 &added_uniform_buffer,
+                ctx->color_target_count,
                 ctx->malloc_fn,
                 ctx->malloc_data,
                 ctx->spirv_transform_data
@@ -788,6 +801,7 @@ MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(
     shaders.fragment = pshader;
     memset(shaders.vertexAttributes, 0, sizeof(MOJOSHADER_vertexAttribute) * 16);
     shaders.vertexAttributeCount = vertexAttributeCount;
+    shaders.colorTargetCount = ctx->color_target_count;
     for (int i = 0; i < vertexAttributeCount; i += 1)
     {
         shaders.vertexAttributes[i] = vertexAttributes[i];

@@ -2068,7 +2068,7 @@ typedef struct MOJOSHADER_sdlProgram MOJOSHADER_sdlProgram;
 typedef const char *(MOJOSHADERCALL *MOJOSHADER_sdlSpirvTransform)(
     const unsigned char *input, unsigned int input_len,
     unsigned char **output, unsigned int *output_len,
-    int *added_uniform_buffer,
+    int *added_uniform_buffer, unsigned int color_target_count,
     MOJOSHADER_malloc m, void *malloc_d, void *userdata);
 
 #ifndef SDL_GPU_H
@@ -2114,6 +2114,13 @@ DECLSPEC MOJOSHADER_sdlContext *MOJOSHADER_sdlCreateContext(SDL_GPUDevice *devic
 DECLSPEC int MOJOSHADER_sdlSetSpirvTransform(MOJOSHADER_sdlContext *context,
                                              MOJOSHADER_sdlSpirvTransform transform,
                                              void *userdata);
+
+/*
+ * Number of color targets the next linked program draws into, passed to the SPIR-V transform as
+ * (color_target_count) and part of the linked program's identity. 0, the default, means unknown.
+ */
+DECLSPEC void MOJOSHADER_sdlSetColorTargetCount(MOJOSHADER_sdlContext *context,
+                                                unsigned int count);
 
 /* CNA test hook: force an available ShaderCross path on a SPIR-V-capable device. */
 DECLSPEC int MOJOSHADER_sdlSetShaderCrossTestMode(MOJOSHADER_sdlContext *context,
