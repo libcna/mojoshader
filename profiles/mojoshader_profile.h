@@ -172,6 +172,7 @@ typedef struct Context
     int uses_pointsize;
     int uses_fog;
     int need_max_float;
+    int constant_float_abs_mode;
 
     // !!! FIXME: move these into SUPPORT_PROFILE sections.
     int glsl_generated_lit_helper;

@@ -833,14 +833,21 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
             fail(ctx, "Unknown source modifier");
     } // switch
 
+    if (!isfail(ctx) && shader_version_atleast(ctx, 3, 0) &&
+        (info->regtype == REG_TYPE_CONST))
+    {
+        const int abs_mode =
+            (info->src_mod == SRCMOD_ABS || info->src_mod == SRCMOD_ABSNEGATE) ? 2 : 1;
+        if (ctx->constant_float_abs_mode == 0)
+            ctx->constant_float_abs_mode = abs_mode;
+        else if (ctx->constant_float_abs_mode != abs_mode)
+            fail(ctx, "Shader Model 3 float constant reads must use abs consistently");
+    } // if
+
     // !!! FIXME: docs say this for sm3 ... check these!
     //  "The negate modifier cannot be used on second source register of these
     //   instructions: m3x2 - ps, m3x3 - ps, m3x4 - ps, m4x3 - ps, and
     //   m4x4 - ps."
-    //  "If any version 3 shader reads from one or more constant float
-    //   registers (c#), one of the following must be true.
-    //    All of the constant floating-point registers must use the abs modifier.
-    //    None of the constant floating-point registers can use the abs modifier.
 
     if (!isfail(ctx))
     {
