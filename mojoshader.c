@@ -3004,6 +3004,9 @@ static void state_TEXLD(Context *ctx)
         // !!! FIXME: ...and texldb, too.
         //http://msdn.microsoft.com/en-us/library/bb206217(VS.85).aspx
 
+        if (ctx->dest_arg.result_mod & MOD_SATURATE)
+            fail(ctx, "TEXLD destination must not saturate");
+
         if (!shader_version_atleast(ctx, 3, 0))
         {
             const RegisterType rt0 = src0->regtype;
@@ -3011,8 +3014,6 @@ static void state_TEXLD(Context *ctx)
                 fail(ctx, "Shader Model 2 TEXLD dest must be a temp register");
             else if (ctx->dest_arg.orig_writemask != 0xF)
                 fail(ctx, "Shader Model 2 TEXLD dest must use a full write mask");
-            else if (ctx->dest_arg.result_mod & MOD_SATURATE)
-                fail(ctx, "Shader Model 2 TEXLD dest must not saturate");
             else if ((rt0 != REG_TYPE_TEXTURE) && (rt0 != REG_TYPE_TEMP))
                 fail(ctx, "Shader Model 2 TEXLD src0 must be texture or temp register");
         } // if
