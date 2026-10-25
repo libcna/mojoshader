@@ -303,7 +303,7 @@ RegisterList *set_used_register(Context *ctx,
 
     reg = reglist_insert(ctx, &ctx->used_registers, regtype, regnum);
     if (reg && written)
-        reg->written = 1;
+        reg->written = 0xF;
     return reg;
 } // set_used_register
 

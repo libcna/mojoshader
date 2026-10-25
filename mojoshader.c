@@ -454,10 +454,14 @@ static int parse_destination_token(Context *ctx, DestArgInfo *info)
 
     if (!isfail(ctx))
     {
+        RegisterList *reg =
+            set_used_register(ctx, info->regtype, info->regnum, 0);
         ctx->have_dest_arg = 1;
         ctx->dest_arg_was_written =
             register_was_written(ctx, info->regtype, info->regnum);
-        set_used_register(ctx, info->regtype, info->regnum, 1);
+        ctx->dest_arg_prior_writemask = reg ? reg->written : 0;
+        if (reg)
+            reg->written |= info->writemask;
     } // if
 
     return 1;
@@ -1759,8 +1763,15 @@ static void state_TEXKILL(Context *ctx)
         fail(ctx, "TEXKILL writemask must be .xyzw");
     else if ((regtype != REG_TYPE_TEMP) && (regtype != REG_TYPE_TEXTURE))
         fail(ctx, "TEXKILL must use a temp or texture register");
+    else if ((regtype == REG_TYPE_TEMP) &&
+             (ctx->dest_arg_prior_writemask != 0xF))
+        fail(ctx, "TEXKILL temporary register components are uninitialized");
 
-    // !!! FIXME: "If a temporary register is used, all components must have been previously written."
+    RegisterList *reg =
+        reglist_find(&ctx->used_registers, info->regtype, info->regnum);
+    if (reg)
+        reg->written = ctx->dest_arg_prior_writemask;
+
     // !!! FIXME: "If a texture register is used, all components that are read must have been declared."
     // !!! FIXME: there are further limitations in ps_1_3 and earlier.
 } // state_TEXKILL

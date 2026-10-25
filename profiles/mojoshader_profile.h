@@ -125,6 +125,7 @@ typedef struct Context
     DestArgInfo dest_arg;
     int have_dest_arg;
     int dest_arg_was_written;
+    int dest_arg_prior_writemask;
     SourceArgInfo source_args[5];
     SourceArgInfo predicate_arg;  // for predicated instructions.
     uint32 dwords[4];
