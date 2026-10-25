@@ -797,10 +797,14 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     switch (info->src_mod)
     {
         case SRCMOD_NONE:
-        case SRCMOD_ABSNEGATE:
-        case SRCMOD_ABS:
         case SRCMOD_NEGATE:
             break; // okay in any shader model.
+
+        case SRCMOD_ABSNEGATE:
+        case SRCMOD_ABS:
+            if (!shader_version_atleast(ctx, 3, 0))
+                fail(ctx, "absolute source modifier requires Shader Model 3.0");
+            break;
 
         // apparently these are only legal in Shader Model 1.x ...
         case SRCMOD_BIASNEGATE:
