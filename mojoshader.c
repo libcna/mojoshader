@@ -846,7 +846,8 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
             ctx->have_dest_arg && (ctx->dest_arg.regtype == REG_TYPE_TEMP) &&
             (ctx->dest_arg.regnum == info->regnum) &&
             !ctx->dest_arg_was_written;
-        if ((info->regtype == REG_TYPE_TEMP) && (reg) &&
+        if (!ctx->ignore_temp_read_validation &&
+            (info->regtype == REG_TYPE_TEMP) && (reg) &&
             ((!reg->written) || uninitialized_destination_self_read))
             failf(ctx, "Temp register r%d used uninitialized", info->regnum);
     } // if
@@ -1196,6 +1197,19 @@ static int parse_args_DSSS(Context *ctx)
 } // parse_args_DSSS
 
 
+static int parse_args_DSSS_SGN(Context *ctx)
+{
+    int retval = 1;
+    retval += parse_destination_token(ctx, &ctx->dest_arg);
+    retval += parse_source_token(ctx, &ctx->source_args[0]);
+    ctx->ignore_temp_read_validation = 1;
+    retval += parse_source_token(ctx, &ctx->source_args[1]);
+    retval += parse_source_token(ctx, &ctx->source_args[2]);
+    ctx->ignore_temp_read_validation = 0;
+    return retval;
+} // parse_args_DSSS_SGN
+
+
 static int parse_args_DSSSS(Context *ctx)
 {
     int retval = 1;
@@ -1390,6 +1404,18 @@ static void state_FRC(Context *ctx)
             fail(ctx, "FRC writemask must be .y or .xy for shader model 1.x");
     } // else if
 } // state_FRC
+
+
+static void state_SGN(Context *ctx)
+{
+    const SourceArgInfo *scratch0 = &ctx->source_args[1];
+    const SourceArgInfo *scratch1 = &ctx->source_args[2];
+    if ((scratch0->regtype != REG_TYPE_TEMP) ||
+        (scratch1->regtype != REG_TYPE_TEMP))
+        fail(ctx, "SGN scratch operands must be temporary registers");
+    else if (scratch0->regnum == scratch1->regnum)
+        fail(ctx, "SGN scratch operands must use different registers");
+} // state_SGN
 
 
 // replicate the matrix registers to source args. The D3D profile will
