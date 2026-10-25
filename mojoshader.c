@@ -2199,6 +2199,60 @@ static const Instruction instructions[] =
     #include "mojoshader_internal.h"
 };
 
+static int pixel_shader_model_one_opcode_allowed(const uint32 opcode,
+                                                   const int minor)
+{
+    switch (opcode)
+    {
+        case 0:  // NOP
+        case 1:  // MOV
+        case 2:  // ADD
+        case 3:  // SUB
+        case 4:  // MAD
+        case 5:  // MUL
+        case 8:  // DP3
+        case 18: // LRP
+        case 64: // TEXCOORD/TEXCRD
+        case 65: // TEXKILL
+        case 66: // TEX/TEXLD
+        case 80: // CND
+        case 81: // DEF
+            return 1;
+
+        case 9:  // DP4
+        case 88: // CMP
+            return minor >= 2;
+
+        case 67: // TEXBEM
+        case 68: // TEXBEML
+        case 69: // TEXREG2AR
+        case 70: // TEXREG2GB
+        case 71: // TEXM3X2PAD
+        case 72: // TEXM3X2TEX
+        case 73: // TEXM3X3PAD
+        case 74: // TEXM3X3TEX
+        case 76: // TEXM3X3SPEC
+        case 77: // TEXM3X3VSPEC
+            return minor <= 3;
+
+        case 82: // TEXREG2RGB
+        case 83: // TEXDP3TEX
+        case 85: // TEXDP3
+        case 86: // TEXM3X3
+            return (minor >= 2) && (minor <= 3);
+
+        case 84: // TEXM3X2DEPTH
+            return minor == 3;
+
+        case 87: // TEXDEPTH
+        case 89: // BEM
+            return minor == 4;
+
+        default:
+            return 0;
+    } // switch
+} // pixel_shader_model_one_opcode_allowed
+
 
 // parse various token types...
 
@@ -2243,6 +2297,13 @@ static int parse_instruction_token(Context *ctx)
     {
         failf(ctx, "opcode '%s' not available in this shader type.",
                 instruction->opcode_string);
+    } // if
+
+    if (shader_is_pixel(ctx) && (ctx->major_ver == 1) &&
+        !pixel_shader_model_one_opcode_allowed(opcode, ctx->minor_ver))
+    {
+        failf(ctx, "opcode '%s' not available in pixel Shader Model 1.%d.",
+              instruction->opcode_string, ctx->minor_ver);
     } // if
 
     memset(ctx->dwords, '\0', sizeof (ctx->dwords));
