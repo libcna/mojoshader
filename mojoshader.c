@@ -326,6 +326,38 @@ static const Profile profiles[] =
 #endif
 };
 
+static int temporary_register_count(const Context *ctx)
+{
+    if (shader_is_vertex(ctx))
+    {
+        if (shader_version_atleast(ctx, 3, 0))
+            return 32;
+        if ((ctx->major_ver == 2) && (ctx->minor_ver != 0))
+            return 32;
+        return 12;
+    } // if
+
+    if (shader_is_pixel(ctx))
+    {
+        if (ctx->major_ver == 1)
+            return (ctx->minor_ver >= 4) ? 6 : 2;
+        if (shader_version_atleast(ctx, 3, 0))
+            return 32;
+        if ((ctx->major_ver == 2) && (ctx->minor_ver != 0))
+            return 32;
+        return 12;
+    } // if
+
+    return 0;
+} // temporary_register_count
+
+static void validate_temporary_register(Context *ctx, const RegisterType regtype,
+                                        const int regnum)
+{
+    if ((regtype == REG_TYPE_TEMP) && (regnum >= temporary_register_count(ctx)))
+        failf(ctx, "temporary register r%d is out of range for this shader profile", regnum);
+} // validate_temporary_register
+
 #undef DEFINE_PROFILE
 
 // This is for profiles that extend other profiles...
@@ -397,6 +429,8 @@ static int parse_destination_token(Context *ctx, DestArgInfo *info)
         info->regtype = REG_TYPE_CONST;
         info->regnum += 6144;
     } // else if
+
+    validate_temporary_register(ctx, info->regtype, info->regnum);
 
     // swallow token for now, for multiple calls in a row.
     adjust_token_position(ctx, 1);
@@ -676,6 +710,8 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
         info->regtype = REG_TYPE_CONST;
         info->regnum += 6144;
     } // else if
+
+    validate_temporary_register(ctx, info->regtype, info->regnum);
 
     info->swizzle = adjust_swizzle(ctx, info->regtype, info->regnum, swizzle);
     info->swizzle_x = ((info->swizzle >> 0) & 0x3);
