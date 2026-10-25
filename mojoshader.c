@@ -2292,6 +2292,49 @@ static int vertex_shader_model_one_opcode_allowed(const uint32 opcode)
     } // switch
 } // vertex_shader_model_one_opcode_allowed
 
+static int pixel_shader_model_two_zero_opcode_allowed(const uint32 opcode)
+{
+    switch (opcode)
+    {
+        case 0:  // NOP
+        case 1:  // MOV
+        case 2:  // ADD
+        case 3:  // SUB
+        case 4:  // MAD
+        case 5:  // MUL
+        case 6:  // RCP
+        case 7:  // RSQ
+        case 8:  // DP3
+        case 9:  // DP4
+        case 10: // MIN
+        case 11: // MAX
+        case 14: // EXP
+        case 15: // LOG
+        case 18: // LRP
+        case 19: // FRC
+        case 20: // M4X4
+        case 21: // M4X3
+        case 22: // M3X4
+        case 23: // M3X3
+        case 24: // M3X2
+        case 31: // DCL
+        case 32: // POW
+        case 33: // CRS
+        case 35: // ABS
+        case 36: // NRM
+        case 37: // SINCOS
+        case 65: // TEXKILL
+        case 66: // TEXLD/TEXLDB/TEXLDP
+        case 81: // DEF
+        case 88: // CMP
+        case 90: // DP2ADD
+            return 1;
+
+        default:
+            return 0;
+    } // switch
+} // pixel_shader_model_two_zero_opcode_allowed
+
 
 // parse various token types...
 
@@ -2349,6 +2392,13 @@ static int parse_instruction_token(Context *ctx)
         !vertex_shader_model_one_opcode_allowed(opcode))
     {
         failf(ctx, "opcode '%s' not available in vertex Shader Model 1.1.",
+              instruction->opcode_string);
+    } // if
+
+    if (shader_is_pixel(ctx) && shader_version_exactly(ctx, 2, 0) &&
+        !pixel_shader_model_two_zero_opcode_allowed(opcode))
+    {
+        failf(ctx, "opcode '%s' not available in pixel Shader Model 2.0.",
               instruction->opcode_string);
     } // if
 
