@@ -1424,6 +1424,16 @@ static void state_SGN(Context *ctx)
 static void srcarg_matrix_replicate(Context *ctx, const int idx,
                                        const int rows)
 {
+    const SourceArgInfo *vector = &ctx->source_args[0];
+    const SourceArgInfo *matrix = &ctx->source_args[idx];
+    const DestArgInfo *dest = &ctx->dest_arg;
+    if (matrix->src_mod != SRCMOD_NONE)
+        fail(ctx, "matrix source cannot use a source modifier");
+    if (!no_swizzle(matrix->swizzle))
+        fail(ctx, "matrix source cannot use a swizzle");
+    if ((dest->regtype == vector->regtype) && (dest->regnum == vector->regnum))
+        fail(ctx, "matrix destination cannot match the vector source");
+
     int i;
     SourceArgInfo *src = &ctx->source_args[idx];
     SourceArgInfo *dst = &ctx->source_args[idx+1];
