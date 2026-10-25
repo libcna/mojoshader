@@ -754,6 +754,18 @@ static int get_GLSL_semantic_varname(Context *ctx, const int vertex_output,
     return 1;
 } // get_GLSL_semantic_varname
 
+static void get_GLSL_centroid_varname(const MOJOSHADER_usage usage, const int index,
+                                      char *buf, const size_t len)
+{
+    snprintf(buf, len, "cna_centroid_%i_%i", usage, index);
+} // get_GLSL_centroid_varname
+
+static void get_GLSL_centroid_macro(const MOJOSHADER_usage usage, const int index,
+                                    char *buf, const size_t len)
+{
+    snprintf(buf, len, "CNA_CENTROID_%i_%i", usage, index);
+} // get_GLSL_centroid_macro
+
 static void emit_GLSL_vertex_epilogue(Context *ctx)
 {
     if (shader_version_atleast(ctx, 3, 0))
@@ -778,6 +790,24 @@ static void emit_GLSL_vertex_epilogue(Context *ctx)
                                 semantic, mask, reg, mask);
                 else
                     output_line(ctx, "%s%s = %s%s;", semantic, mask, reg, mask);
+
+                if ((item->usage != MOJOSHADER_USAGE_POSITION) &&
+                    (item->usage != MOJOSHADER_USAGE_POINTSIZE))
+                {
+                    char centroid[64];
+                    char centroid_macro[64];
+                    get_GLSL_centroid_varname(
+                        item->usage, item->index, centroid, sizeof (centroid));
+                    get_GLSL_centroid_macro(
+                        item->usage, item->index, centroid_macro, sizeof (centroid_macro));
+                    output_line(ctx, "#ifdef %s", centroid_macro);
+                    if (item->usage == MOJOSHADER_USAGE_COLOR)
+                        output_line(ctx, "%s%s = clamp(%s%s, 0.0, 1.0);",
+                                    centroid, mask, reg, mask);
+                    else
+                        output_line(ctx, "%s%s = %s%s;", centroid, mask, reg, mask);
+                    output_line(ctx, "#endif");
+                } // if
             } // if
             item = item->next;
         } // while
@@ -1143,12 +1173,6 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
     get_GLSL_varname_in_buf(ctx, regtype, regnum, var, sizeof (var));
 
-    if (shader_is_pixel(ctx) && (flags & MOD_CENTROID))
-    {
-        failf(ctx, "centroid unsupported in %s profile", ctx->profile->name);
-        return;
-    } // if
-
     if (shader_version_atleast(ctx, 3, 0) &&
         ((shader_is_vertex(ctx) && (regtype == REG_TYPE_OUTPUT)) ||
          (shader_is_pixel(ctx) && (regtype == REG_TYPE_INPUT))))
@@ -1163,18 +1187,30 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             (first->writemask == wmask);
         char semantic[64];
         char mask[6];
-        const int builtin = get_GLSL_semantic_varname(
+        const int centroid = shader_is_pixel(ctx) &&
+            (((flags & MOD_CENTROID) != 0) || (usage == MOJOSHADER_USAGE_COLOR));
+        int builtin = get_GLSL_semantic_varname(
             ctx, vertex_output, usage, index, semantic, sizeof (semantic));
+        if (centroid)
+        {
+            get_GLSL_centroid_varname(usage, index, semantic, sizeof (semantic));
+            builtin = 0;
+        } // if
         get_GLSL_writemask_suffix(wmask, mask, sizeof (mask));
 
         if (support_glsles3(ctx))
         {
-            qualifier_in = "in";
+            qualifier_in = centroid ? "centroid in" : "in";
             qualifier_out = "out";
         } // if
         else
         {
-            qualifier_in = "varying";
+#if SUPPORT_PROFILE_GLSLES
+            if (support_glsles(ctx))
+                qualifier_in = "varying";
+            else
+#endif
+                qualifier_in = centroid ? "centroid varying" : "varying";
             qualifier_out = "varying";
         } // else
 
@@ -1191,6 +1227,27 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 #endif
                 output_line(ctx, "%s vec4 %s;",
                             vertex_output ? qualifier_out : qualifier_in, semantic);
+        } // if
+        if (vertex_output &&
+            (usage != MOJOSHADER_USAGE_POSITION) &&
+            (usage != MOJOSHADER_USAGE_POINTSIZE))
+        {
+            char centroid_name[64];
+            char centroid_macro[64];
+            get_GLSL_centroid_varname(
+                usage, index, centroid_name, sizeof (centroid_name));
+            get_GLSL_centroid_macro(
+                usage, index, centroid_macro, sizeof (centroid_macro));
+            output_line(ctx, "#ifdef %s", centroid_macro);
+#if SUPPORT_PROFILE_GLSLES
+            if (support_glsles(ctx))
+                output_line(ctx, "%s highp vec4 %s;",
+                            support_glsles3(ctx) ? "centroid out" : "varying",
+                            centroid_name);
+            else
+#endif
+                output_line(ctx, "centroid varying vec4 %s;", centroid_name);
+            output_line(ctx, "#endif");
         } // if
         pop_output(ctx);
 

@@ -848,6 +848,66 @@ static int glsl_input_is_unmatched(const MOJOSHADER_parseData *vpd,
 } // glsl_input_is_unmatched
 
 
+static int glsl_attribute_uses_centroid(const MOJOSHADER_attribute *attribute)
+{
+    return ((attribute->flags & 0x4) != 0) ||
+           (attribute->usage == MOJOSHADER_USAGE_COLOR);
+} // glsl_attribute_uses_centroid
+
+
+static char *glsl_source_with_centroid_outputs(const MOJOSHADER_parseData *vpd,
+                                               const MOJOSHADER_parseData *ppd)
+{
+    int i;
+    int count = 0;
+    const char *first_newline;
+    char *retval;
+    char *dst;
+
+    if ((vpd == NULL) || (ppd == NULL) || (vpd->output == NULL) ||
+        (vpd->output_len <= 0) || (ppd->attribute_count <= 0) ||
+        (ppd->attributes == NULL))
+        return NULL;
+
+    for (i = 0; i < ppd->attribute_count; i++)
+    {
+        if (glsl_attribute_uses_centroid(&ppd->attributes[i]) &&
+            !glsl_input_is_unmatched(vpd, &ppd->attributes[i]))
+            count++;
+    } // for
+    if (count == 0)
+        return NULL;
+
+    retval = (char *) Malloc(((size_t) vpd->output_len) +
+                             (((size_t) count) * 64) + 1);
+    if (retval == NULL)
+        return NULL;
+
+    first_newline = strchr(vpd->output, '\n');
+    if (first_newline == NULL)
+        first_newline = vpd->output;
+    else
+        first_newline++;
+    dst = retval;
+    memcpy(dst, vpd->output, (size_t) (first_newline - vpd->output));
+    dst += first_newline - vpd->output;
+    for (i = 0; i < ppd->attribute_count; i++)
+    {
+        const MOJOSHADER_attribute *attribute = &ppd->attributes[i];
+        if (!glsl_attribute_uses_centroid(attribute) ||
+            glsl_input_is_unmatched(vpd, attribute))
+            continue;
+        dst += snprintf(dst, 64, "#define CNA_CENTROID_%i_%i 1\n",
+                        (int) attribute->usage, attribute->index);
+    } // for
+    memcpy(dst, first_newline,
+           (size_t) ((vpd->output + vpd->output_len) - first_newline));
+    dst += (vpd->output + vpd->output_len) - first_newline;
+    *dst = '\0';
+    return retval;
+} // glsl_source_with_centroid_outputs
+
+
 static char *glsl_source_without_unmatched_inputs(const MOJOSHADER_parseData *vpd,
                                                   const MOJOSHADER_parseData *ppd)
 {
@@ -1001,7 +1061,34 @@ static GLuint impl_GLSL_LinkProgram(MOJOSHADER_glShader *vshader,
     {
         const GLuint program = ctx->glCreateProgram();
         GLuint patched_fragment = 0;
+        GLuint centroid_vertex = 0;
         char *patched_source = NULL;
+        char *centroid_source = NULL;
+
+        if ((vshader != NULL) && (pshader != NULL))
+            centroid_source = glsl_source_with_centroid_outputs(vshader->parseData,
+                                                                pshader->parseData);
+        if (centroid_source != NULL)
+        {
+            GLint compiled = 0;
+            const GLint centroid_len = (GLint) strlen(centroid_source);
+            centroid_vertex = ctx->glCreateShader(GL_VERTEX_SHADER);
+            ctx->glShaderSource(centroid_vertex, 1,
+                                (const GLchar **) &centroid_source, &centroid_len);
+            ctx->glCompileShader(centroid_vertex);
+            ctx->glGetShaderiv(centroid_vertex, GL_COMPILE_STATUS, &compiled);
+            if (!compiled)
+            {
+                GLsizei len = 0;
+                ctx->glGetShaderInfoLog(centroid_vertex, sizeof (error_buffer),
+                                       &len, (GLchar *) error_buffer);
+                ctx->glDeleteShader(centroid_vertex);
+                ctx->glDeleteProgram(program);
+                Free(centroid_source);
+                return 0;
+            } // if
+            Free(centroid_source);
+        } // if
 
         /* -CNA: see glsl_source_without_unmatched_inputs. */
         if ((vshader != NULL) && (pshader != NULL))
@@ -1025,7 +1112,11 @@ static GLuint impl_GLSL_LinkProgram(MOJOSHADER_glShader *vshader,
             Free(patched_source);
         } // if
 
-        if (vshader != NULL) ctx->glAttachShader(program, vshader->handle);
+        if (vshader != NULL)
+        {
+            ctx->glAttachShader(program,
+                                (centroid_vertex != 0) ? centroid_vertex : vshader->handle);
+        } // if
         if (pshader != NULL)
         {
             ctx->glAttachShader(program,
@@ -1038,6 +1129,8 @@ static GLuint impl_GLSL_LinkProgram(MOJOSHADER_glShader *vshader,
          * object is not needed past this point. -CNA */
         if (patched_fragment != 0)
             ctx->glDeleteShader(patched_fragment);
+        if (centroid_vertex != 0)
+            ctx->glDeleteShader(centroid_vertex);
 
         ctx->glGetProgramiv(program, GL_LINK_STATUS, &ok);
         if (!ok)

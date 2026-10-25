@@ -4433,6 +4433,7 @@ static MOJOSHADER_attribute *build_attributes(Context *ctx, int *_count)
                 wptr->usage = item->usage;
                 wptr->index = item->index;
                 wptr->name = alloc_varname(ctx, item);
+                wptr->flags = item->misc;
                 wptr++;
                 count++;
             } // if
@@ -4484,6 +4485,7 @@ static MOJOSHADER_attribute *build_outputs(Context *ctx, int *_count)
                     wptr->usage = item->usage;
                     wptr->index = item->index;
                     wptr->name = alloc_varname(ctx, item);
+                    wptr->flags = item->misc;
                     wptr++;
                     count++;
                     break;

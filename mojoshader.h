@@ -273,6 +273,7 @@ typedef struct MOJOSHADER_attribute
     MOJOSHADER_usage usage;
     int index;
     const char *name;
+    int flags;  /* destination modifiers from the declaration token. */
 } MOJOSHADER_attribute;
 
 /*
