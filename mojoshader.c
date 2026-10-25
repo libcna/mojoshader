@@ -2432,6 +2432,10 @@ static void srcarg_matrix_replicate(Context *ctx, const int idx,
         fail(ctx, "matrix source cannot use a swizzle");
     if ((dest->regtype == vector->regtype) && (dest->regnum == vector->regnum))
         fail(ctx, "matrix destination cannot match the vector source");
+    if ((dest->regtype == matrix->regtype) &&
+        (dest->regnum > matrix->regnum) &&
+        (dest->regnum < matrix->regnum + rows))
+        fail(ctx, "matrix destination cannot match an implied matrix source");
 
     int i;
     SourceArgInfo *src = &ctx->source_args[idx];
