@@ -614,6 +614,14 @@ static void validate_restricted_destination_register(Context *ctx,
     {
         fail(ctx, "Boolean constant destination requires DEFB");
     } // else if
+    else if (shader_is_vertex(ctx) && (regtype == REG_TYPE_ADDRESS) &&
+             (((ctx->major_ver == 1) && (opcode != 1)) ||
+              ((ctx->major_ver >= 2) && (opcode != 46))))
+    {
+        fail(ctx, ctx->major_ver == 1
+                      ? "Shader Model 1.1 address destination requires MOV"
+                      : "Shader Model 2+ address destination requires MOVA");
+    } // else if
     else if (regtype == REG_TYPE_SAMPLER)
     {
         fail(ctx, "sampler pseudo-register cannot be an instruction destination");
@@ -686,6 +694,15 @@ static void validate_output_register_source(Context *ctx,
         fail(ctx, "pixel output register cannot be an instruction source");
     } // else if
 } // validate_output_register_source
+
+static void validate_address_register_source(Context *ctx,
+                                             const RegisterType regtype)
+{
+    if (shader_is_vertex(ctx) && (regtype == REG_TYPE_ADDRESS))
+    {
+        fail(ctx, "address register cannot be an ordinary instruction source");
+    } // if
+} // validate_address_register_source
 
 static void validate_constant_control_register(Context *ctx,
                                                const RegisterType regtype,
@@ -1070,6 +1087,7 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
     validate_temporary_register(ctx, info->regtype, info->regnum);
     validate_input_register(ctx, info->regtype, info->regnum);
     validate_output_register_source(ctx, info->regtype);
+    validate_address_register_source(ctx, info->regtype);
     validate_constant_control_register(ctx, info->regtype, info->regnum);
 
     info->swizzle = adjust_swizzle(ctx, info->regtype, info->regnum, swizzle);

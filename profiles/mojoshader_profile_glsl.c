@@ -1391,7 +1391,13 @@ void emit_GLSL_MOV(Context *ctx)
 {
     char src0[64]; make_GLSL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
     char code[128];
-    make_GLSL_destarg_assign(ctx, code, sizeof (code), "%s", src0);
+    if (ctx->dest_arg.regtype == REG_TYPE_ADDRESS)
+    {
+        make_GLSL_destarg_assign(ctx, code, sizeof (code),
+                                 "int(floor(abs(%s) + 0.5) * sign(%s))", src0, src0);
+    } // if
+    else
+        make_GLSL_destarg_assign(ctx, code, sizeof (code), "%s", src0);
     output_line(ctx, "%s", code);
 } // emit_GLSL_MOV
 
