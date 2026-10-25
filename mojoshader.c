@@ -2960,6 +2960,16 @@ static void state_SINCOS(Context *ctx)
                 failf(ctx, "SINCOS src%d must be constfloat", i);
                 return;
             } // if
+            else if (ctx->source_args[i].src_mod != SRCMOD_NONE)
+            {
+                failf(ctx, "SINCOS src%d must have no modifiers", i);
+                return;
+            } // else if
+            else if (!no_swizzle(ctx->source_args[i].swizzle))
+            {
+                failf(ctx, "SINCOS src%d must not swizzle", i);
+                return;
+            } // else if
         } // for
 
         if (ctx->source_args[1].regnum == ctx->source_args[2].regnum)
