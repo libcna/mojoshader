@@ -3472,6 +3472,10 @@ static void state_TEXDEPTH(Context *ctx)
         fail(ctx, "TEXDEPTH opcode only available in Shader Model 1.4");
     if ((ctx->dest_arg.regtype != REG_TYPE_TEMP) || (ctx->dest_arg.regnum != 5))
         fail(ctx, "TEXDEPTH destination must be r5");
+    if (ctx->dest_arg.result_mod != 0)
+        fail(ctx, "TEXDEPTH destination must not use result modifiers");
+    if (ctx->dest_arg.result_shift != 0)
+        fail(ctx, "TEXDEPTH destination must not use result shifts");
     if (ctx->phase_count == 0)
         fail(ctx, "TEXDEPTH requires a preceding phase marker");
     if ((ctx->pixel14_previous_phase_temp_xy & (1u << 5)) == 0)
