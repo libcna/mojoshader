@@ -246,31 +246,46 @@ static void test_uniform_zero_state(void)
     check_zero_state("vs_2_0 c0", uniform_vs2, sizeof (uniform_vs2), 0);
 } // test_uniform_zero_state
 
-/* A shader whose CreateBuffer() failed has no buffer but a staging copy, which deleting the
- * shader must free too. */
-static void test_refused_buffer_frees_staging(void)
+/*
+ * R5-04 (2026-10-26 remediation review, round 2): CreateBuffer()'s HRESULT was ignored, so a
+ * shader whose constant buffer could not be created came back as if compiled, without the
+ * buffer -- every uniform update then returned early, and the shader drew without its
+ * constants. Such a compile must fail, say why, and release everything it made, the staging
+ * copy included.
+ */
+static void check_refused_buffer(const char *what, const uint32_t *tokens, size_t bytes)
 {
     MOJOSHADER_d3d11Context *ctx;
     MOJOSHADER_d3d11Shader *shader;
+    char label[128];
 
     cna_alloc_reset(0);
     ctx = make_context();
-    maps = 0;
+    set_error("");
     refuse_buffers = 1;
-    shader = (ctx != NULL) ? compile(ctx, uniform_vs2, sizeof (uniform_vs2)) : NULL;
+    shader = (ctx != NULL) ? MOJOSHADER_d3d11CompileShader(ctx, "main",
+                 (const unsigned char *) tokens, (unsigned int) bytes, NULL, 0, NULL, 0) : NULL;
     refuse_buffers = 0;
-    CNA_CHECK((shader != NULL) && (shader->ubo == NULL), "the shader compiles without a buffer");
+    snprintf(label, sizeof (label), "%s: no shader comes back without its constant buffer", what);
+    CNA_CHECK(shader == NULL, label);
     if (shader != NULL)
-    {
-        update(ctx, shader);  /* no buffer: nothing to map */
-        CNA_CHECK(maps == 0, "nothing is mapped");
         MOJOSHADER_d3d11DeleteShader(ctx, shader);
-    } // if
+    snprintf(label, sizeof (label), "%s: the error names CreateBuffer", what);
+    if (strstr(MOJOSHADER_d3d11GetError(ctx), "CreateBuffer") == NULL)
+        fprintf(stderr, "  %s (error: '%s')\n", label, MOJOSHADER_d3d11GetError(ctx));
+    CNA_CHECK(strstr(MOJOSHADER_d3d11GetError(ctx), "CreateBuffer") != NULL, label);
+    snprintf(label, sizeof (label), "%s: everything is released", what);
     if (cna_alloc_live() != 0)
-        fprintf(stderr, "  %d allocation(s) outlive the shader\n", cna_alloc_live());
-    CNA_CHECK((buffers_live == 0) && (cna_alloc_live() == 0), "everything is released");
+        fprintf(stderr, "  %s (%d allocation(s) live)\n", label, cna_alloc_live());
+    CNA_CHECK((buffers_live == 0) && (cna_alloc_live() == 0), label);
     free(ctx);
-} // test_refused_buffer_frees_staging
+} // check_refused_buffer
+
+static void test_refused_buffer_fails_compile(void)
+{
+    check_refused_buffer("vs_2_0 c0", uniform_vs2, sizeof (uniform_vs2));
+    check_refused_buffer("ps_1_1 TEXBEM", texbem_ps11, sizeof (texbem_ps11));
+} // test_refused_buffer_fails_compile
 
 /*
  * R5-03 (2026-10-26 remediation review, round 2): MOJOSHADER_d3d11CompileShader() with each of
@@ -394,7 +409,7 @@ int main(void)
 {
     cna_test_run("texbem_zero_state", test_texbem_zero_state);
     cna_test_run("uniform_zero_state", test_uniform_zero_state);
-    cna_test_run("refused_buffer_frees_staging", test_refused_buffer_frees_staging);
+    cna_test_run("refused_buffer_fails_compile", test_refused_buffer_fails_compile);
     cna_test_run("compile_allocation_failures", test_compile_allocation_failures);
     cna_test_run("fog_pair_rewrite", test_fog_pair_rewrite);
     return cna_test_finish();

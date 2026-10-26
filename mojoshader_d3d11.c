@@ -834,8 +834,20 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
         initial.pSysMem = retval->constantData;
         initial.SysMemPitch = 0;
         initial.SysMemSlicePitch = 0;
-        ID3D11Device_CreateBuffer((ID3D11Device*) ctx->device, &bdesc, &initial,
-                                  (ID3D11Buffer**) &retval->ubo);
+        // Without its buffer the shader would draw with none of its constants, every uniform
+        //  update returning early: fail the compile instead. -CNA
+        const HRESULT result = ID3D11Device_CreateBuffer((ID3D11Device*) ctx->device, &bdesc,
+                                                         &initial, (ID3D11Buffer**) &retval->ubo);
+        if ((result < 0) || (retval->ubo == NULL))
+        {
+            char message[96];
+            snprintf(message, sizeof (message),
+                     "ID3D11Device::CreateBuffer failed for the constant buffer (HRESULT 0x%08X)",
+                     (unsigned int) result);
+            set_error(message);
+            retval->ubo = NULL;  // a failed call made no buffer to release
+            goto compile_shader_fail;
+        } // if
     } // if
 
     return retval;
@@ -843,6 +855,8 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
 compile_shader_fail:
     if (retval != NULL)
     {
+        if (retval->constantData != NULL)
+            f(retval->constantData, d);
         if (retval->shaderMaps != NULL)
             f(retval->shaderMaps, d);
         f(retval, d);
