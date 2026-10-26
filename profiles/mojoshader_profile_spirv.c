@@ -4122,9 +4122,46 @@ void emit_SPIRV_TEXLD(Context *ctx)
 
     else if (!shader_version_atleast(ctx, 2, 0))
     {
-        // ps_1_4 is different, too!
-        fail(ctx, "TEXLD == Shader Model 1.4 unimplemented.");  // !!! FIXME
-        return;
+        /* ps_1_4: `texld r#, src` samples the stage the destination register numbers, at a
+         * texture coordinate t# or -- in the second phase -- a temporary the first phase wrote.
+         * As in the GLSL profile, a 2D stage reads src.xy and a cube or volume stage src.xyz,
+         * after any _dz/_dw division spv_load_srcarg() applies. The stage was never DCL'd, so
+         * like ps_1_1 it is the samplers list's entry that carries the id. -CNA */
+        const DestArgInfo *info = &ctx->dest_arg;
+        RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER, info->regnum);
+        int coordinate_mask;
+        if (sreg == NULL)
+        {
+            fail(ctx, "ps_1_4 TEXLD using undeclared sampler");
+            return;
+        } // if
+
+        switch ((TextureType) sreg->index)
+        {
+            case TEXTURE_TYPE_2D:
+                coordinate_mask = 0x3;
+                break;
+            case TEXTURE_TYPE_CUBE:
+            case TEXTURE_TYPE_VOLUME:
+                coordinate_mask = 0x7;
+                break;
+            default:
+                fail(ctx, "unknown ps_1_4 texture type");
+                return;
+        } // switch
+
+        SpirvResult sampler = spv_loadreg(ctx, sreg);
+        SpirvResult texcoord = spv_load_srcarg(ctx, 0, coordinate_mask);
+
+        SpirvResult result;
+        result.tid = spv_get_type(ctx, STI_VEC4);
+        result.id = spv_bumpid(ctx);
+        push_output(ctx, &ctx->mainline);
+        spv_emit(ctx, 5, SpvOpImageSampleImplicitLod, result.tid, result.id,
+                 sampler.id, texcoord.id);
+        pop_output(ctx);
+
+        spv_assign_destarg(ctx, result);
     } // else if
 
     else

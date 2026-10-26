@@ -46,6 +46,38 @@ static const uint32_t ps14_texcrd_t5[] = {
     CNA_END
 };
 
+/* `texld r0, t0` and `texld r1, t3`: stages 0 and 1 at two texture coordinates. */
+static const uint32_t ps14_texld_t[] = {
+    CNA_PS(1, 4),
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEXTURE, 0),
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 1, 15), CNA_SRC(CNA_TEXTURE, 3),
+    CNA_OP(CNA_MUL, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEMP, 0), CNA_SRC(CNA_TEMP, 1),
+    CNA_END
+};
+
+/*
+ * Dependent reads. Phase 1: `texcrd r1.xyz, t1`, `texld r2, t4`. Phase 2: `texld r0, r1` (a
+ * coordinate the first phase computed) and `texld r2, r2` (a sampled value as a coordinate, at
+ * the stage the first phase already sampled).
+ */
+static const uint32_t ps14_texld_phase2[] = {
+    CNA_PS(1, 4),
+    CNA_OP(CNA_TEXCRD, 0), CNA_DST(CNA_TEMP, 1, 7), CNA_SRC(CNA_TEXTURE, 1),
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 2, 15), CNA_SRC(CNA_TEXTURE, 4),
+    PS14_PHASE,
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEMP, 1),
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 2, 15), CNA_SRC(CNA_TEMP, 2),
+    CNA_OP(CNA_MUL, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEMP, 0), CNA_SRC(CNA_TEMP, 2),
+    CNA_END
+};
+
+/* `texld r0, t2` at a stage the caller's sampler map makes a cube map: XYZ coordinates. */
+static const uint32_t ps14_texld_cube[] = {
+    CNA_PS(1, 4),
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEXTURE, 2),
+    CNA_END
+};
+
 /* `texkill t1`: the other instruction that reads a ps_1_4 texture coordinate. */
 static const uint32_t ps14_texkill[] = {
     CNA_PS(1, 4),
@@ -73,6 +105,13 @@ static const Ps14Case cases[] = {
       { "#define ps_t0 gl_TexCoord[0]", "ps_r0.xyz = ps_t0.xyz;", "ps_r0.w = ps_c0.w;" } },
     { "ps14_texcrd_t5", ps14_texcrd_t5, sizeof (ps14_texcrd_t5), 0x20, -1, 0, 0,
       { "#define ps_t5 io_5_5", "ps_r0.xyz = ps_t5.xyz;", NULL } },
+    { "ps14_texld_t", ps14_texld_t, sizeof (ps14_texld_t), 0x09, -1, 2, 0,
+      { "ps_r0 = texture2D(ps_s0, ps_t0.xy);", "ps_r1 = texture2D(ps_s1, ps_t3.xy);", NULL } },
+    { "ps14_texld_phase2", ps14_texld_phase2, sizeof (ps14_texld_phase2), 0x12, -1, 3, 0,
+      { "ps_r2 = texture2D(ps_s2, ps_t4.xy);", "ps_r0 = texture2D(ps_s0, ps_r1.xy);",
+        "ps_r2 = texture2D(ps_s2, ps_r2.xy);" } },
+    { "ps14_texld_cube", ps14_texld_cube, sizeof (ps14_texld_cube), 0x04, 0, 1, 0,
+      { "ps_r0 = textureCube(ps_s0, ps_t2.xyz);", NULL, NULL } },
     { "ps14_texkill", ps14_texkill, sizeof (ps14_texkill), 0x02, -1, 0, 0,
       { "if (any(lessThan(ps_t1.xyz, vec3(0.0)))) discard;", NULL, NULL } },
 };
