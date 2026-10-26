@@ -187,33 +187,67 @@ static void test_preshader_empty_buffer(void)
     free(copy);
 } // test_preshader_empty_buffer
 
-/* A-05: a one-word CLIT block has no literal-count word to read. */
+/* A valid two-word CLIT block that declares no literals (identifier and a zero count). */
+static void push_empty_clit(CnaWords *w)
+{
+    cna_words_push(w, CNA_COMMENT(2));
+    cna_words_push(w, CNA_CLIT_ID);
+    cna_words_push(w, 0);
+} // push_empty_clit
+
+/* A valid two-word FXLC block that declares no instructions (identifier and a zero count). */
+static void push_empty_fxlc(CnaWords *w)
+{
+    cna_words_push(w, CNA_COMMENT(2));
+    cna_words_push(w, CNA_FXLC_ID);
+    cna_words_push(w, 0);
+} // push_empty_fxlc
+
+/* A-05 / R2-08: a one-word CLIT block has no literal-count word, so reading its second word
+ * takes the word that follows the block. The other required blocks are present and the CLIT
+ * block is followed by one (so the section scanner accepts the stream and the literal read is
+ * actually reached): without the fix the scanner's next comment token is read as a literal count
+ * of hundreds of thousands and the literals are memcpy'd from past the one-word block; with the
+ * fix the short block is refused. The earlier version of this case omitted the CTAB block, so
+ * parse_preshader rejected it for "No CTAB" before ever reading the CLIT count -- it passed with
+ * the fix removed. */
 static void test_preshader_short_clit_block(void)
 {
-    CnaWords w;
+    CnaWords w, ctab;
     const MOJOSHADER_preshader *pre;
     memset(&w, '\0', sizeof (w));
     cna_words_push(&w, CNA_PRESHADER_VERSION);
-    cna_words_push(&w, CNA_COMMENT(3));
-    cna_words_push(&w, CNA_FXLC_ID); cna_words_push(&w, 0); cna_words_push(&w, 0);
-    cna_words_push(&w, CNA_COMMENT(1));   /* CLIT: identifier only */
+    cna_words_push(&w, CNA_COMMENT(1));   /* CLIT: identifier only, not last in the stream */
     cna_words_push(&w, CNA_CLIT_ID);
+    memset(&ctab, '\0', sizeof (ctab));
+    cna_push_ctab(&ctab, CNA_PRESHADER_VERSION, "Scale");
+    cna_words_push(&w, CNA_COMMENT(ctab.count));
+    cna_words_append(&w, &ctab); cna_words_free(&ctab);
+    push_empty_fxlc(&w);
     pre = parse_preshader_exact(&w);
     CNA_CHECK(pre == NULL, "a one-word CLIT block is refused");
     MOJOSHADER_freePreshader(pre);
     cna_words_free(&w);
 } // test_preshader_short_clit_block
 
-/* A-05: a one-word FXLC block has no instruction-count word to read. */
+/* A-05 / R2-08: the same for a one-word FXLC block -- the required CLIT and CTAB blocks are
+ * present and valid, so the instruction read is reached, and the FXLC block is the stream's
+ * last, so reading its absent second word runs past the buffer: without the fix that is a
+ * heap-buffer-overflow under AddressSanitizer; with the fix the short block is refused. The
+ * earlier version of this case omitted the CTAB block, so parse_preshader rejected it for "No
+ * CTAB" before reaching the FXLC read -- it passed with the fix removed. */
 static void test_preshader_short_fxlc_block(void)
 {
-    CnaWords w;
+    CnaWords w, ctab;
     const MOJOSHADER_preshader *pre;
     memset(&w, '\0', sizeof (w));
     cna_words_push(&w, CNA_PRESHADER_VERSION);
-    cna_words_push(&w, CNA_COMMENT(4));
-    cna_words_push(&w, CNA_CLIT_ID); cna_words_push(&w, 0); cna_words_push(&w, 0); cna_words_push(&w, 0);
-    cna_words_push(&w, CNA_COMMENT(1));   /* FXLC: identifier only */
+    push_empty_clit(&w);
+    memset(&ctab, '\0', sizeof (ctab));
+    cna_push_ctab(&ctab, CNA_PRESHADER_VERSION, "Scale");
+    cna_words_push(&w, CNA_COMMENT(ctab.count));
+    cna_words_append(&w, &ctab); cna_words_free(&ctab);
+    cna_words_push(&w, CNA_COMMENT(1));   /* FXLC: identifier only, last in the stream */
     cna_words_push(&w, CNA_FXLC_ID);
     pre = parse_preshader_exact(&w);
     CNA_CHECK(pre == NULL, "a one-word FXLC block is refused");
