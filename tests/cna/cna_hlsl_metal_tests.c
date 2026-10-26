@@ -362,31 +362,79 @@ static const uint32_t packed_fog_vs3[] = {
     CNA_END
 };
 
+/* The same with FOG declared first. */
+static const uint32_t packed_fog_first_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_FOG, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* vs_3_0: FOG in o1.w, declared first, and TEXCOORD0 in o1.xyz; one write to all four. */
+static const uint32_t packed_fog_w_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_FOG, 0), CNA_DST(CNA_OUTPUT, 1, 0x8),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 1, 0x7),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/*
+ * FOG and TEXCOORD0 in one output, in either declaration order (R2-03, 2026-10-26 remediation
+ * review): FOG declared first used to be refused with a false "writemasks overlap", and FOG
+ * first in .w narrowed TEXCOORD0's DCL and every write to .x without a word.
+ */
 static void test_packed_fog_output(void)
 {
-    size_t i;
+    static const struct { const char *name; const uint32_t *tokens; size_t bytes; } orders[] = {
+        { "packed_fog", packed_fog_vs3, sizeof (packed_fog_vs3) },
+        { "packed_fog_first", packed_fog_first_vs3, sizeof (packed_fog_first_vs3) },
+    };
+    size_t i, j;
     for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
     {
         const char *profile = cna_profiles[i];
         const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
-        const MOJOSHADER_parseData *pd = cna_translate(profile, packed_fog_vs3,
-            sizeof (packed_fog_vs3), "packed_fog");
+        const MOJOSHADER_parseData *pd;
+        for (j = 0; j < sizeof (orders) / sizeof (orders[0]); j++)
+        {
+            pd = cna_translate(profile, orders[j].tokens, orders[j].bytes, orders[j].name);
+            CNA_CHECK(pd->output != NULL, "there is source");
+            CNA_CHECK(cna_output_contains(pd, "o1.yzw = v0.yzw;"), "the TEXCOORD0 lanes keep their mask");
+            CNA_CHECK(cna_output_contains(pd, "o1.x = v0.w;"), "the FOG lane keeps its mask");
+            if (metal)
+            {
+                CNA_CHECK(cna_output_contains(pd, "float4 o1_fog [[user(fog)]];"), "FOG has its own member");
+                CNA_CHECK(cna_output_contains(pd, "output.o1_fog.x = o1.x;"), "FOG's lane is copied");
+                CNA_CHECK(cna_output_contains(pd, "output.o1_texcoord0.yzw = o1.yzw;"), "TEXCOORD0's lanes are copied");
+            } // if
+            else
+            {
+                CNA_CHECK(cna_output_contains(pd, "float m_o1_fog : FOG;"), "FOG stays a scalar member");
+                CNA_CHECK(cna_output_contains(pd, "output.m_o1_fog = o1.x;"), "FOG's lane is copied");
+                CNA_CHECK(cna_output_contains(pd, "output.m_o1_texcoord0.yzw = o1.yzw;"), "TEXCOORD0's lanes are copied");
+            } // else
+            cna_check_hlsl_compiles(pd, profile, orders[j].name);
+            MOJOSHADER_freeParseData(pd);
+        } // for
+
+        pd = cna_translate(profile, packed_fog_w_vs3, sizeof (packed_fog_w_vs3), "packed_fog_w");
         CNA_CHECK(pd->output != NULL, "there is source");
-        CNA_CHECK(cna_output_contains(pd, "o1.yzw = v0.yzw;"), "the TEXCOORD0 lanes keep their mask");
-        CNA_CHECK(cna_output_contains(pd, "o1.x = v0.w;"), "the FOG lane keeps its mask");
-        if (metal)
-        {
-            CNA_CHECK(cna_output_contains(pd, "float4 o1_fog [[user(fog)]];"), "FOG has its own member");
-            CNA_CHECK(cna_output_contains(pd, "output.o1_fog.x = o1.x;"), "FOG's lane is copied");
-            CNA_CHECK(cna_output_contains(pd, "output.o1_texcoord0.yzw = o1.yzw;"), "TEXCOORD0's lanes are copied");
-        } // if
-        else
-        {
-            CNA_CHECK(cna_output_contains(pd, "float m_o1_fog : FOG;"), "FOG stays a scalar member");
-            CNA_CHECK(cna_output_contains(pd, "output.m_o1_fog = o1.x;"), "FOG's lane is copied");
-            CNA_CHECK(cna_output_contains(pd, "output.m_o1_texcoord0.yzw = o1.yzw;"), "TEXCOORD0's lanes are copied");
-        } // else
-        cna_check_hlsl_compiles(pd, profile, "packed_fog");
+        CNA_CHECK(cna_output_contains(pd, "o1 = v0;"), "the write keeps all four lanes");
+        CNA_CHECK(cna_output_contains(pd, metal ? "output.o1_texcoord0.xyz = o1.xyz;"
+                                                : "output.m_o1_texcoord0.xyz = o1.xyz;"),
+                  "TEXCOORD0's lanes are copied");
+        CNA_CHECK(cna_output_contains(pd, metal ? "output.o1_fog.w = o1.w;" : "output.m_o1_fog = o1.w;"),
+                  "FOG is copied from its own lane");
+        cna_check_hlsl_compiles(pd, profile, "packed_fog_w");
         MOJOSHADER_freeParseData(pd);
     } // for
 } // test_packed_fog_output

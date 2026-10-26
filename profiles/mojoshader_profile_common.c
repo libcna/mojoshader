@@ -417,10 +417,21 @@ int isscalar(Context *ctx, const MOJOSHADER_shaderType shader_type,
     const int uses_fog = ctx->uses_fog;
     if ( (rtype == REG_TYPE_OUTPUT) && ((uses_psize) || (uses_fog)) )
     {
+        // A vs_3_0 output is scalar only when FOG or PSIZE is its one semantic. A DCL declares
+        //  its own lanes, whatever was declared before it, and since every DCL precedes the
+        //  first instruction, an instruction sees all of the register's semantics. Judged by
+        //  its first semantic alone, a register packing TEXCOORD after FOG had that DCL and
+        //  every write narrowed to .x. -CNA
+        if (ctx->current_opcode == OPCODE_DCL)
+            return 0;
         const RegisterList *reg = reglist_find(&ctx->attributes, rtype, rnum);
         if (reg != NULL)
         {
             const MOJOSHADER_usage usage = reg->usage;
+            // add_attribute_register() keeps the semantics of one register together.
+            if ((reg->next != NULL) && (reg->next->regtype == rtype) &&
+                (reg->next->regnum == rnum))
+                return 0;
             return ( (uses_psize && (usage == MOJOSHADER_USAGE_POINTSIZE)) ||
                      (uses_fog && (usage == MOJOSHADER_USAGE_FOG)) );
         } // if

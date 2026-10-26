@@ -362,6 +362,84 @@ static void test_shader_with_preshader_allocation_failures(void)
     cna_words_free(&w);
 } // test_shader_with_preshader_allocation_failures
 
+/* vs_3_0: FOG in o1.x declared before TEXCOORD0 in o1.yzw, each lane written alone. */
+static const uint32_t fog_first_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* The same, TEXCOORD0 declared first. */
+static const uint32_t fog_last_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* vs_3_0: PSIZE (which takes a full mask) and TEXCOORD0 in o1.y, in the given order. */
+#define CNA_PSIZE_TEXCOORD_VS3(first_usage, first_mask, second_usage, second_mask) { \
+    CNA_VS(3, 0), \
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15), \
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15), \
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(first_usage, 0), CNA_DST(CNA_OUTPUT, 1, first_mask), \
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(second_usage, 0), CNA_DST(CNA_OUTPUT, 1, second_mask), \
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0), \
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 15), CNA_SRC(CNA_INPUT, 0), \
+    CNA_END }
+static const uint32_t psize_first_vs3[] = CNA_PSIZE_TEXCOORD_VS3(4, 0xF, 5, 0x2);
+static const uint32_t psize_last_vs3[] = CNA_PSIZE_TEXCOORD_VS3(5, 0x2, 4, 0xF);
+
+/*
+ * R2-03 (2026-10-26 remediation review): a vs_3_0 output is scalar only when FOG or PSIZE is
+ * its one semantic. Judged by its first semantic, FOG declared first narrowed the next DCL and
+ * every write to the register to .x. The disassembly shows the parser's view: both DCLs and
+ * both writes keep their masks. PSIZE, which needs a full mask, shares no register, and is
+ * refused the same way in either order; so is any packed register by the ARB1 profile, which
+ * binds a register to one result and bound a packed one twice.
+ */
+static void test_packed_fog_dcl_masks(void)
+{
+    const MOJOSHADER_parseData *pd = cna_parse("d3d", fog_first_vs3, sizeof (fog_first_vs3));
+    const MOJOSHADER_parseData *first, *last;
+    CNA_CHECK(cna_report_errors("fog first", pd) == 0, "FOG declared first, then TEXCOORD0, parses");
+    CNA_CHECK(cna_output_contains(pd, "dcl_fog o1.x\n"), "FOG's DCL keeps its mask");
+    CNA_CHECK(cna_output_contains(pd, "dcl_texcoord o1.yzw\n"), "TEXCOORD0's DCL keeps its mask");
+    CNA_CHECK(cna_output_contains(pd, "mov o1.yzw, v0\n"), "the TEXCOORD0 write keeps its mask");
+    CNA_CHECK(cna_output_contains(pd, "mov o1.x, v0.w\n"), "the FOG write keeps its mask");
+    MOJOSHADER_freeParseData(pd);
+
+    first = cna_parse("d3d", psize_first_vs3, sizeof (psize_first_vs3));
+    last = cna_parse("d3d", psize_last_vs3, sizeof (psize_last_vs3));
+    CNA_CHECK((first->error_count == 1) && (last->error_count == 1), "PSIZE shares no register");
+    CNA_CHECK((first->error_count == 1) && (last->error_count == 1) &&
+              (strcmp(first->errors[0].error, last->errors[0].error) == 0) &&
+              (first->errors[0].error_position == last->errors[0].error_position),
+              "... refused the same way in either order");
+    MOJOSHADER_freeParseData(first);
+    MOJOSHADER_freeParseData(last);
+
+    first = cna_parse("arb1", fog_first_vs3, sizeof (fog_first_vs3));
+    last = cna_parse("arb1", fog_last_vs3, sizeof (fog_last_vs3));
+    CNA_CHECK((first->error_count == 1) && (last->error_count == 1) &&
+              (strcmp(first->errors[0].error, last->errors[0].error) == 0) &&
+              (strstr(first->errors[0].error, "packed Shader Model 3 semantics") != NULL),
+              "ARB1 refuses a packed register once, the same way in either order");
+    MOJOSHADER_freeParseData(first);
+    MOJOSHADER_freeParseData(last);
+} // test_packed_fog_dcl_masks
+
 int main(void)
 {
     cna_test_run("ctab_struct_members_beyond_64k", test_ctab_struct_members_beyond_64k);
@@ -375,5 +453,6 @@ int main(void)
     cna_test_run("preshader_comment_block_exceeds_stream", test_preshader_comment_block_exceeds_stream);
     cna_test_run("preshader_fxlc_instruction_truncated", test_preshader_fxlc_instruction_truncated);
     cna_test_run("shader_ctab_span_truncated", test_shader_ctab_span_truncated);
+    cna_test_run("packed_fog_dcl_masks", test_packed_fog_dcl_masks);
     return cna_test_finish();
 } // main

@@ -93,11 +93,131 @@ static void test_epilogue_stays_inline_without_subroutines(void)
     } // for
 } // test_epilogue_stays_inline_without_subroutines
 
+/* vs_3_0: FOG in o1.x and TEXCOORD0 in o1.yzw, FOG declared first; each lane written alone. */
+static const uint32_t fog_first_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* The same, TEXCOORD0 declared first. */
+static const uint32_t fog_last_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* vs_3_0: TEXCOORD0 in o1.xyz and FOG in o1.w, FOG declared first; one write to all four. */
+static const uint32_t fog_w_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x8),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0x7),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/* vs_3_0: FOG alone in o1.x. */
+static const uint32_t fog_alone_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* ps_3_0: FOG in v0.x and TEXCOORD0 in v0.yzw, FOG declared first, read whole. */
+static const uint32_t fog_first_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_INPUT, 0, 0x1),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_INPUT, 0, 0xE),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/* Translates `tokens` with `profile` and checks that every `expected` line is in the source. */
+static void check_glsl(const char *what, const char *profile, const uint32_t *tokens,
+                       size_t bytes, const char *const *expected, size_t count)
+{
+    const MOJOSHADER_parseData *pd = cna_parse(profile, tokens, bytes);
+    char label[160];
+    size_t i;
+    snprintf(label, sizeof (label), "%s (%s): translates", what, profile);
+    CNA_CHECK(cna_report_errors(label, pd) == 0, label);
+    for (i = 0; (pd->error_count == 0) && (i < count); i++)
+    {
+        snprintf(label, sizeof (label), "%s (%s): %s", what, profile, expected[i]);
+        CNA_CHECK(cna_output_contains(pd, expected[i]), label);
+    } // for
+    /* gl_FogFragCoord is a float, and GLSL before 4.20 has no swizzle on a scalar. */
+    snprintf(label, sizeof (label), "%s (%s): gl_FogFragCoord takes no swizzle", what, profile);
+    CNA_CHECK(!cna_output_contains(pd, "gl_FogFragCoord."), label);
+    MOJOSHADER_freeParseData(pd);
+} // check_glsl
+
+/*
+ * R2-03 (2026-10-26 remediation review): FOG packed with TEXCOORD0 in one vs_3_0 output, in
+ * either declaration order. The writes keep their masks and each semantic is copied from its
+ * own lanes; gl_FogFragCoord, a float, takes FOG's one lane and fills a pixel shader's FOG
+ * lanes. Before, FOG declared first was refused ("writemasks overlap") or, in .w, silently
+ * narrowed TEXCOORD0 and every write to .x, and gl_FogFragCoord was swizzled or assigned a
+ * vec4, which no GLSL before 4.20 compiles.
+ */
+static void test_packed_fog(void)
+{
+    static const char *const desktop[] = { "glsl", "glsl120" };
+    static const char *const es[] = { "glsles", "glsles3" };
+    static const char *const packed_desktop[] = {
+        "vs_o1.yzw = vs_v0.yzw;", "vs_o1.x = vs_v0.w;",
+        "gl_TexCoord[0].yzw = vs_o1.yzw;", "gl_FogFragCoord = vs_o1.x;" };
+    static const char *const packed_es[] = {
+        "vs_o1.yzw = vs_v0.yzw;", "vs_o1.x = vs_v0.w;",
+        "io_5_0.yzw = vs_o1.yzw;", "io_11_0.x = vs_o1.x;" };
+    static const char *const fog_w_desktop[] = {
+        "vs_o1 = vs_v0;", "gl_TexCoord[0].xyz = vs_o1.xyz;", "gl_FogFragCoord = vs_o1.w;" };
+    static const char *const fog_w_es[] = {
+        "vs_o1 = vs_v0;", "io_5_0.xyz = vs_o1.xyz;", "io_11_0.w = vs_o1.w;" };
+    static const char *const alone_desktop[] = { "gl_FogFragCoord = vs_o1.x;" };
+    static const char *const ps_desktop[] = {
+        "ps_v0.x = gl_FogFragCoord;", "ps_v0.yzw = gl_TexCoord[0].yzw;" };
+    static const char *const ps_es[] = { "ps_v0.x = io_11_0.x;", "ps_v0.yzw = io_5_0.yzw;" };
+    size_t i;
+    for (i = 0; i < 2; i++)
+    {
+        check_glsl("FOG first", desktop[i], fog_first_vs3, sizeof (fog_first_vs3), packed_desktop, 4);
+        check_glsl("FOG last", desktop[i], fog_last_vs3, sizeof (fog_last_vs3), packed_desktop, 4);
+        check_glsl("FOG in .w", desktop[i], fog_w_vs3, sizeof (fog_w_vs3), fog_w_desktop, 3);
+        check_glsl("FOG alone", desktop[i], fog_alone_vs3, sizeof (fog_alone_vs3), alone_desktop, 1);
+        check_glsl("pixel FOG", desktop[i], fog_first_ps3, sizeof (fog_first_ps3), ps_desktop, 2);
+        check_glsl("FOG first", es[i], fog_first_vs3, sizeof (fog_first_vs3), packed_es, 4);
+        check_glsl("FOG last", es[i], fog_last_vs3, sizeof (fog_last_vs3), packed_es, 4);
+        check_glsl("FOG in .w", es[i], fog_w_vs3, sizeof (fog_w_vs3), fog_w_es, 3);
+        check_glsl("pixel FOG", es[i], fog_first_ps3, sizeof (fog_first_ps3), ps_es, 2);
+    } // for
+} // test_packed_fog
+
 int main(void)
 {
     cna_test_run("color_written_in_subroutine_is_clamped",
                  test_color_written_in_subroutine_is_clamped);
     cna_test_run("epilogue_stays_inline_without_subroutines",
                  test_epilogue_stays_inline_without_subroutines);
+    cna_test_run("packed_fog", test_packed_fog);
     return cna_test_finish();
 } // main

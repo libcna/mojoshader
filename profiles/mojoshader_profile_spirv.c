@@ -1790,6 +1790,15 @@ static void spv_emit_packed_vs_outputs(Context *ctx)
         uint32 id_value = spv_bumpid(ctx);
         push_output(ctx, &ctx->mainline);
         spv_emit(ctx, 4, SpvOpLoad, tid_vec4, id_value, r->spirv.iddecl);
+        if (item->usage == MOJOSHADER_USAGE_FOG)  // a float: the first of FOG's lanes -CNA
+        {
+            const int wm = item->writemask;
+            const uint32 lane = (wm & 0x1) ? 0 : (wm & 0x2) ? 1 : (wm & 0x4) ? 2 : 3;
+            uint32 id_fog = spv_bumpid(ctx);
+            spv_emit(ctx, 5, SpvOpCompositeExtract, spv_get_type(ctx, STI_FLOAT), id_fog,
+                     id_value, lane);
+            id_value = id_fog;
+        } // if
         spv_emit(ctx, 3, SpvOpStore, item->spirv.iddecl, id_value);
         pop_output(ctx);
     } // for
@@ -2553,13 +2562,11 @@ static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterTyp
             first = scan;
         if ((scan->usage == usage) && (scan->index == (unsigned int) index))
             item = scan;
-        // Fog and point size are scalar outputs, and the parser narrows every write to a
-        // register declared as one to .x, so it cannot share that register with another
-        // semantic. Refuse it rather than emit a module that does not validate.
-        if ((scan->usage == MOJOSHADER_USAGE_FOG) ||
-            (scan->usage == MOJOSHADER_USAGE_POINTSIZE))
+        // A point size is declared with a full mask, so the parser refuses it in a register
+        //  any other semantic shares; this is never reached. -CNA
+        if (scan->usage == MOJOSHADER_USAGE_POINTSIZE)
         {
-            fail(ctx, "Fog or point size cannot share a register with another semantic.");
+            fail(ctx, "Point size cannot share a register with another semantic.");
             return;
         } // if
     } // for
@@ -2607,8 +2614,10 @@ static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterTyp
 
     if (shader_is_vertex(ctx))
     {
+        // FOG is a float output, as it is in a register of its own; spv_emit_packed_vs_outputs()
+        //  stores the first of its lanes to it. -CNA
         push_output(ctx, &ctx->mainline_intro);
-        tid = spv_get_type(ctx, STI_PTR_VEC4_O);
+        tid = spv_get_type(ctx, (usage == MOJOSHADER_USAGE_FOG) ? STI_PTR_FLOAT_O : STI_PTR_VEC4_O);
         spv_emit(ctx, 4, SpvOpVariable, tid, item->spirv.iddecl, SpvStorageClassOutput);
         pop_output(ctx);
         spv_link_vs_attributes(ctx, item->spirv.iddecl, usage, index);

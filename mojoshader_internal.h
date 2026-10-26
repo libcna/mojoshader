@@ -458,6 +458,7 @@ void buffer_patch(Buffer *buffer, const size_t start,
 #define OPCODE_LOOP 27
 #define OPCODE_RET 28
 #define OPCODE_LABEL 30
+#define OPCODE_DCL 31
 #define OPCODE_REP 38
 #define OPCODE_IF 40
 #define OPCODE_IFC 41

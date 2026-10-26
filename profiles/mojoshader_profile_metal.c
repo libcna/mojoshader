@@ -125,16 +125,6 @@ static int is_METAL_packed_register(Context *ctx, const RegisterType regtype,
     return (semantics > 1);
 } // is_METAL_packed_register
 
-// isscalar() judges a register by its first semantic. A packed register is a float4 local
-//  even when that semantic is FOG, and its writes must keep their masks. -CNA
-static int isscalar_METAL(Context *ctx, const RegisterType regtype,
-                          const int regnum)
-{
-    if (is_METAL_packed_register(ctx, regtype, regnum))
-        return 0;
-    return isscalar(ctx, ctx->shader_type, regtype, regnum);
-} // isscalar_METAL
-
 static void get_METAL_writemask_suffix(const int writemask, char *buf,
                                        const size_t len)
 {
@@ -304,7 +294,7 @@ const char *make_METAL_destarg_assign(Context *ctx, char *buf,
                                                        sizeof (regnum_str));
     char writemask_str[6];
     size_t i = 0;
-    const int scalar = isscalar_METAL(ctx, arg->regtype, arg->regnum);
+    const int scalar = isscalar(ctx, ctx->shader_type, arg->regtype, arg->regnum);
     if (!scalar && !writemask_xyzw(arg->writemask))
     {
         writemask_str[i++] = '.';
@@ -504,7 +494,7 @@ const char *make_METAL_srcarg_string(Context *ctx, const size_t idx,
     } // if
 
     char swiz_str[6] = { '\0' };
-    if (!isscalar_METAL(ctx, arg->regtype, arg->regnum))
+    if (!isscalar(ctx, ctx->shader_type, arg->regtype, arg->regnum))
     {
         make_METAL_swizzle_string(swiz_str, sizeof (swiz_str),
                                  arg->swizzle, writemask);

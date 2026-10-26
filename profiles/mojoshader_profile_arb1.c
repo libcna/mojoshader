@@ -844,6 +844,24 @@ void emit_ARB1_attribute(Context *ctx, RegisterType regtype, int regnum,
     char varname[64];
     get_ARB1_varname_in_buf(ctx, regtype, regnum, varname, sizeof (varname));
 
+    // A Shader Model 3 register carrying several semantics would need a temporary copied to
+    //  each of them; this profile binds a register's name to one, and bound it twice. Refuse
+    //  it, once, whichever semantic was declared first. -CNA
+    if (shader_version_atleast(ctx, 3, 0) &&
+        ((shader_is_vertex(ctx) && (regtype == REG_TYPE_OUTPUT)) ||
+         (shader_is_pixel(ctx) && (regtype == REG_TYPE_INPUT))))
+    {
+        const RegisterList *reg = reglist_find(&ctx->attributes, regtype, regnum);
+        if ((reg != NULL) && (reg->next != NULL) && (reg->next->regtype == regtype) &&
+            (reg->next->regnum == regnum))
+        {
+            if ((reg->usage == usage) && (reg->index == (unsigned int) index))
+                failf(ctx, "packed Shader Model 3 semantics unsupported in %s profile",
+                      ctx->profile->name);
+            return;
+        } // if
+    } // if
+
     //assert((flags & MOD_PP) == 0);  // !!! FIXME: is PP allowed?
 
     if (index != 0)  // !!! FIXME: a lot of these MUST be zero.

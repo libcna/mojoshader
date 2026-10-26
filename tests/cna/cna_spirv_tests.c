@@ -289,6 +289,156 @@ static void test_plain_pair(void)
     check_pair("plain_vs_plain_ps", plain_vs3, sizeof (plain_vs3), plain_ps3, sizeof (plain_ps3), 2);
 } // test_plain_pair
 
+/* vs_3_0: FOG in o1.x and TEXCOORD0 in o1.yzw, FOG declared first; each lane written alone. */
+static const uint32_t fog_first_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* The same, TEXCOORD0 declared first. */
+static const uint32_t fog_last_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* vs_3_0: TEXCOORD0 in o1.xyz and FOG in o1.w, FOG declared first; one write to all four. */
+static const uint32_t fog_w_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x8),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 0x7),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/* ps_3_0: FOG in v0.x and TEXCOORD0 in v0.yzw, FOG declared first, read whole. */
+static const uint32_t fog_first_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_INPUT, 0, 0x1),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_INPUT, 0, 0xE),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/* The same, TEXCOORD0 declared first. */
+static const uint32_t fog_last_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_INPUT, 0, 0xE),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_INPUT, 0, 0x1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/*
+ * The lane a vertex module stores to its one Location-decorated float Output (FOG): the index
+ * of the OpCompositeExtract whose result is stored there. -1 when there is no such output, it
+ * is stored something else, or there is more than one.
+ */
+static int fog_output_lane(const MOJOSHADER_parseData *pd)
+{
+    static int extract_lane[MAX_IDS];
+    const uint32_t *words = (const uint32_t *) pd->output;
+    const size_t count = cna_spirv_module_words(pd);
+    uint32_t float_type = 0, float_output = 0, fog = 0;
+    int fogs = 0, lane = -1;
+    size_t at;
+    SpirvFacts facts;
+
+    read_facts(pd, &facts);
+    memset(extract_lane, 0xFF, sizeof (extract_lane));
+    for (at = 5; at < count; at += words[at] >> 16)
+    {
+        const uint32_t length = words[at] >> 16;
+        const uint32_t opcode = words[at] & 0xFFFF;
+        if ((length == 0) || (at + length > count))
+            return -1;
+        if ((opcode == SpvOpTypeFloat) && (length == 3) && (words[at + 2] == 32))
+            float_type = words[at + 1];
+        else if ((opcode == SpvOpTypePointer) && (length == 4) && (words[at + 3] == float_type) &&
+                 (words[at + 2] == SpvStorageClassOutput))
+            float_output = words[at + 1];
+        else if ((opcode == SpvOpVariable) && (length >= 4) && (words[at + 1] == float_output) &&
+                 (words[at + 2] < MAX_IDS) && (facts.location[words[at + 2]] != -1))
+        {
+            fog = words[at + 2];
+            fogs++;
+        } // else if
+        else if ((opcode == SpvOpCompositeExtract) && (length == 5) && (words[at + 2] < MAX_IDS))
+            extract_lane[words[at + 2]] = (int) words[at + 4];
+        else if ((opcode == SpvOpStore) && (length == 3) && (fog != 0) && (words[at + 1] == fog) &&
+                 (words[at + 2] < MAX_IDS))
+            lane = extract_lane[words[at + 2]];
+    } // for
+    return (fogs == 1) ? lane : -1;
+} // fog_output_lane
+
+/*
+ * R2-03 (2026-10-26 remediation review): FOG packed with TEXCOORD0 in one register, in either
+ * declaration order, on either side. FOG is a float Output as in a register of its own, stored
+ * from its own lane; each semantic links to its own Location. Before, the parser narrowed the
+ * register by its first semantic (FOG first: a false "writemasks overlap", or with FOG in .w
+ * TEXCOORD0 and every write silently narrowed to .x), and the profile refused FOG in a packed
+ * register outright.
+ */
+static void test_packed_fog(void)
+{
+    static const struct { const char *name; const uint32_t *tokens; size_t bytes; int lane; } vs[] = {
+        { "fog_first_vs", fog_first_vs3, sizeof (fog_first_vs3), 0 },
+        { "fog_last_vs", fog_last_vs3, sizeof (fog_last_vs3), 0 },
+        { "fog_w_vs", fog_w_vs3, sizeof (fog_w_vs3), 3 },
+    };
+    static const struct { const char *name; const uint32_t *tokens; size_t bytes; } ps[] = {
+        { "fog_first_ps", fog_first_ps3, sizeof (fog_first_ps3) },
+        { "fog_last_ps", fog_last_ps3, sizeof (fog_last_ps3) },
+    };
+    size_t i, j;
+    char label[128];
+
+    for (i = 0; i < sizeof (vs) / sizeof (vs[0]); i++)
+    {
+        for (j = 0; j < sizeof (ps) / sizeof (ps[0]); j++)
+        {
+            snprintf(label, sizeof (label), "%s_%s", vs[i].name, ps[j].name);
+            check_pair(label, vs[i].tokens, vs[i].bytes, ps[j].tokens, ps[j].bytes, 2);
+        } // for
+
+        {
+            static const char *profiles[2] = { "spirv", "glspirv" };
+            int p;
+            for (p = 0; p < 2; p++)
+            {
+                const MOJOSHADER_parseData *pd = cna_parse(profiles[p], vs[i].tokens, vs[i].bytes);
+                snprintf(label, sizeof (label), "%s %s", vs[i].name, profiles[p]);
+                CNA_CHECK(cna_report_errors(label, pd) == 0, "the vertex shader translates");
+                if (pd->error_count == 0)
+                {
+                    CNA_CHECK(fog_output_lane(pd) == vs[i].lane,
+                              "FOG is one float output, stored from its own lane");
+                    snprintf(label, sizeof (label), "%s_%s", vs[i].name, profiles[p]);
+                    CNA_CHECK(cna_spirv_validate(pd, label) != 0, "spirv-val accepts it");
+                } // if
+                MOJOSHADER_freeParseData(pd);
+            } // for
+        } // block
+    } // for
+} // test_packed_fog
+
 /* Counts what MOJOSHADER_parse() allocates through the caller's allocator, and frees. */
 static int live_allocations = 0;
 
@@ -367,6 +517,7 @@ int main(void)
     cna_test_run("packed_vertex_outputs", test_packed_vertex_outputs);
     cna_test_run("packed_pixel_inputs", test_packed_pixel_inputs);
     cna_test_run("packed_both", test_packed_both);
+    cna_test_run("packed_fog", test_packed_fog);
     cna_test_run("rastout_semantics", test_rastout_semantics);
     return cna_test_finish();
 } // main
