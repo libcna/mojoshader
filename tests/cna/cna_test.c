@@ -153,6 +153,12 @@ void cna_alloc_reset(int fail_at)
     cna_alloc_was_hit = 0;
 } // cna_alloc_reset
 
+void cna_alloc_arm(int fail_at)
+{
+    cna_alloc_fail_at = fail_at;
+    cna_alloc_was_hit = 0;
+} // cna_alloc_arm
+
 int cna_alloc_attempts(void) { return cna_alloc_attempt_count; }
 int cna_alloc_live(void) { return cna_alloc_live_count; }
 int cna_alloc_hit(void) { return cna_alloc_was_hit; }

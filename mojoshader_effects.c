@@ -934,6 +934,11 @@ static void readsmallobjects(const uint32 numsmallobjects,
             if (length > 0)
             {
                 char *str = (char *) m(length, d);
+                if (str == NULL)
+                {
+                    errorlist_add(errors, NULL, 0, "Effect object allocation failed.");
+                    return;
+                } // if
                 memcpy(str, *ptr, length);
                 object->string.string = str;
             } // if
@@ -952,6 +957,11 @@ static void readsmallobjects(const uint32 numsmallobjects,
             if (length > 0)
             {
                 char *str = (char *) m(length, d);
+                if (str == NULL)
+                {
+                    errorlist_add(errors, NULL, 0, "Effect object allocation failed.");
+                    return;
+                } // if
                 memcpy(str, *ptr, length);
                 object->mapping.name = str;
             } // if
@@ -994,6 +1004,12 @@ static void readsmallobjects(const uint32 numsmallobjects,
             object->shader.param_count = pd->symbol_count;
             object->shader.params = (uint32 *) m(object->shader.param_count * sizeof (uint32), d);
             object->shader.samplers = (MOJOSHADER_samplerStateRegister *) m(object->shader.sampler_count * sizeof (MOJOSHADER_samplerStateRegister), d);
+            if (((object->shader.param_count > 0) && (object->shader.params == NULL)) ||
+                ((object->shader.sampler_count > 0) && (object->shader.samplers == NULL)))
+            {
+                errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+                return;
+            } // if
             uint32 curSampler = 0;
             for (j = 0; j < pd->symbol_count; j++)
             {
@@ -1027,6 +1043,12 @@ static void readsmallobjects(const uint32 numsmallobjects,
             {
                 object->shader.preshader_param_count = pd->preshader->symbol_count;
                 object->shader.preshader_params = (uint32 *) m(object->shader.preshader_param_count * sizeof (uint32), d);
+                if ((object->shader.preshader_param_count > 0) &&
+                    (object->shader.preshader_params == NULL))
+                {
+                    errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+                    return;
+                } // if
                 for (j = 0; j < pd->preshader->symbol_count; j++)
                 {
                     int par = findparameter(effect->params,
@@ -1290,6 +1312,12 @@ static void readlargeobjects(const uint32 numlargeobjects,
                 } // if
                 object->shader.preshader_param_count = object->shader.preshader->symbol_count;
                 object->shader.preshader_params = (uint32 *) m(object->shader.preshader_param_count * sizeof (uint32), d);
+                if ((object->shader.preshader_param_count > 0) &&
+                    (object->shader.preshader_params == NULL))
+                {
+                    errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+                    return;
+                } // if
                 for (j = 0; j < object->shader.preshader->symbol_count; j++)
                 {
                     int par = findparameter(effect->params,
@@ -1336,6 +1364,12 @@ static void readlargeobjects(const uint32 numlargeobjects,
                 object->shader.param_count = pd->symbol_count;
                 object->shader.params = (uint32 *) m(object->shader.param_count * sizeof (uint32), d);
                 object->shader.samplers = (MOJOSHADER_samplerStateRegister *) m(object->shader.sampler_count * sizeof (MOJOSHADER_samplerStateRegister), d);
+                if (((object->shader.param_count > 0) && (object->shader.params == NULL)) ||
+                    ((object->shader.sampler_count > 0) && (object->shader.samplers == NULL)))
+                {
+                    errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+                    return;
+                } // if
                 uint32 curSampler = 0;
                 for (j = 0; j < pd->symbol_count; j++)
                 {
@@ -1372,6 +1406,12 @@ static void readlargeobjects(const uint32 numlargeobjects,
                 {
                     object->shader.preshader_param_count = pd->preshader->symbol_count;
                     object->shader.preshader_params = (uint32 *) m(object->shader.preshader_param_count * sizeof (uint32), d);
+                    if ((object->shader.preshader_param_count > 0) &&
+                        (object->shader.preshader_params == NULL))
+                    {
+                        errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+                        return;
+                    } // if
                     for (j = 0; j < pd->preshader->symbol_count; j++)
                     {
                         int par = findparameter(effect->params,
@@ -1399,6 +1439,11 @@ static void readlargeobjects(const uint32 numlargeobjects,
             if (length > 0)
             {
                 char *str = (char *) m(length, d);
+                if (str == NULL)
+                {
+                    errorlist_add(errors, NULL, 0, "Effect object allocation failed.");
+                    return;
+                } // if
                 memcpy(str, *ptr, length);
                 object->mapping.name = str;
             } // if
@@ -1601,11 +1646,14 @@ void freetypeinfo(MOJOSHADER_symbolTypeInfo *typeinfo,
                   MOJOSHADER_free f, void *d)
 {
     int i;
-    for (i = 0; i < typeinfo->member_count; i++)
-    {
-        f((void *) typeinfo->members[i].name, d);
-        freetypeinfo(&typeinfo->members[i].info, f, d);
-    } // for
+    // A failed allocation can leave member_count nonzero with no member array; walk it only when
+    // it exists, so a partially built type frees cleanly. -CNA
+    if (typeinfo->members != NULL)
+        for (i = 0; i < typeinfo->member_count; i++)
+        {
+            f((void *) typeinfo->members[i].name, d);
+            freetypeinfo(&typeinfo->members[i].info, f, d);
+        } // for
     f((void *) typeinfo->members, d);
 } // freetypeinfo
 
@@ -1618,9 +1666,10 @@ void freevalue(MOJOSHADER_effectValue *value, MOJOSHADER_free f, void *d)
     freetypeinfo(&value->type, f, d);
     // This has to match how the storage was allocated, not just the type: a value whose class is
     // not OBJECT never held sampler states, and walking it as if it did frees whatever the heap
-    // held past the end of a much smaller buffer. -CNA
-    if (value_is_sampler(value))
-        for (i = 0; i < value->value_count; i++)
+    // held past the end of a much smaller buffer. The NULL check also covers a sampler value
+    // whose state array a failed allocation never created. -CNA
+    if (value_is_sampler(value) && (value->values != NULL))
+        for (i = 0; i < (int) value->value_count; i++)
             freevalue(&value->valuesSS[i].value, f, d);
     f(value->values, d);
 } // freevalue
@@ -1636,59 +1685,66 @@ void MOJOSHADER_deleteEffect(const MOJOSHADER_effect *_effect)
     void *d = effect->ctx.malloc_data;
     int i, j, k;
 
+    // Every array below may be NULL with a nonzero count when a parse or clone failed partway;
+    // each loop is guarded on its array so a half-built effect frees without dereferencing one of
+    // them. -CNA
+
     /* Free errors */
-    for (i = 0; i < effect->error_count; i++)
-    {
-        f((void *) effect->errors[i].error, d);
-        f((void *) effect->errors[i].filename, d);
-    } // for
+    if (effect->errors != NULL)
+        for (i = 0; i < effect->error_count; i++)
+        {
+            f((void *) effect->errors[i].error, d);
+            f((void *) effect->errors[i].filename, d);
+        } // for
     f((void *) effect->errors, d);
 
     /* Free parameters, including annotations */
-    for (i = 0; i < effect->param_count; i++)
-    {
-        MOJOSHADER_effectParam *param = &effect->params[i];
-        freevalue(&param->value, f, d);
-        for (j = 0; j < param->annotation_count; j++)
+    if (effect->params != NULL)
+        for (i = 0; i < effect->param_count; i++)
         {
-            freevalue(&param->annotations[j], f, d);
+            MOJOSHADER_effectParam *param = &effect->params[i];
+            freevalue(&param->value, f, d);
+            if (param->annotations != NULL)
+                for (j = 0; j < param->annotation_count; j++)
+                    freevalue(&param->annotations[j], f, d);
+            f((void *) param->annotations, d);
         } // for
-        f((void *) param->annotations, d);
-    } // for
     f((void *) effect->params, d);
 
     /* Free techniques, including passes and all annotations */
-    for (i = 0; i < effect->technique_count; i++)
-    {
-        MOJOSHADER_effectTechnique *technique = &effect->techniques[i];
-        f((void *) technique->name, d);
-        for (j = 0; j < technique->pass_count; j++)
+    if (effect->techniques != NULL)
+        for (i = 0; i < effect->technique_count; i++)
         {
-            MOJOSHADER_effectPass *pass = &technique->passes[j];
-            f((void *) pass->name, d);
-            for (k = 0; k < pass->state_count; k++)
-            {
-                MOJOSHADER_freePreshader(pass->states[k].preshader);
-                f((void *) pass->states[k].preshader_params, d);
-                freevalue(&pass->states[k].value, f, d);
-            } // for
-            f((void *) pass->states, d);
-            for (k = 0; k < pass->annotation_count; k++)
-            {
-                freevalue(&pass->annotations[k], f, d);
-            } // for
-            f((void *) pass->annotations, d);
+            MOJOSHADER_effectTechnique *technique = &effect->techniques[i];
+            f((void *) technique->name, d);
+            if (technique->passes != NULL)
+                for (j = 0; j < technique->pass_count; j++)
+                {
+                    MOJOSHADER_effectPass *pass = &technique->passes[j];
+                    f((void *) pass->name, d);
+                    if (pass->states != NULL)
+                        for (k = 0; k < pass->state_count; k++)
+                        {
+                            MOJOSHADER_freePreshader(pass->states[k].preshader);
+                            f((void *) pass->states[k].preshader_params, d);
+                            freevalue(&pass->states[k].value, f, d);
+                        } // for
+                    f((void *) pass->states, d);
+                    if (pass->annotations != NULL)
+                        for (k = 0; k < pass->annotation_count; k++)
+                            freevalue(&pass->annotations[k], f, d);
+                    f((void *) pass->annotations, d);
+                } // for
+            f((void *) technique->passes, d);
+            if (technique->annotations != NULL)
+                for (j = 0; j < technique->annotation_count; j++)
+                    freevalue(&technique->annotations[j], f, d);
+            f((void *) technique->annotations, d);
         } // for
-        f((void *) technique->passes, d);
-        for (j = 0; j < technique->annotation_count; j++)
-        {
-            freevalue(&technique->annotations[j], f, d);
-        } // for
-        f((void *) technique->annotations, d);
-    } // for
     f((void *) effect->techniques, d);
 
     /* Free object table */
+    if (effect->objects != NULL)
     for (i = 0; i < effect->object_count; i++)
     {
         MOJOSHADER_effectObject *object = &effect->objects[i];
@@ -1719,14 +1775,18 @@ void MOJOSHADER_deleteEffect(const MOJOSHADER_effect *_effect)
 } // MOJOSHADER_freeEffect
 
 
-// !!! FIXME: Out of memory check!
+// A failed copy leaves the destination string NULL (as the caller memset it); the owning value is
+// freed either way, so the clone is short a name rather than crashing on strcpy(NULL). -CNA
 #define COPY_STRING(location) \
     if (src->location != NULL) \
     { \
         siz = strlen(src->location) + 1; \
         stringcopy = (char *) m(siz, d); \
-        strcpy(stringcopy, src->location); \
-        dst->location = stringcopy; \
+        if (stringcopy != NULL) \
+        { \
+            strcpy(stringcopy, src->location); \
+            dst->location = stringcopy; \
+        } \
     } // if
 
 
@@ -1782,8 +1842,15 @@ void copyvalue(MOJOSHADER_effectValue *dst,
     {
         siz = dst->value_count * 4;
         dst->values = m(siz, d);
-        // !!! FIXME: Out of memory check!
-        memcpy(dst->values, src->values, siz);
+        // A failed copy clears value_count so freevalue frees only what exists; memcpy also skips
+        // a zero-length copy, whose source may legitimately be NULL. -CNA
+        if (dst->values == NULL)
+        {
+            dst->value_count = 0;
+            return;
+        } // if
+        if (siz > 0)
+            memcpy(dst->values, src->values, siz);
     } // if
     else if (dst->type.parameter_class == MOJOSHADER_SYMCLASS_OBJECT)
     {
@@ -1795,9 +1862,15 @@ void copyvalue(MOJOSHADER_effectValue *dst,
         {
             siz = dst->value_count * sizeof (MOJOSHADER_effectSamplerState);
             dst->values = m(siz, d);
-            // !!! FIXME: Out of memory check!
+            // Clearing value_count before returning keeps freevalue from walking the sampler
+            // states this failed allocation never created. -CNA
+            if (dst->values == NULL)
+            {
+                dst->value_count = 0;
+                return;
+            } // if
             memset(dst->values, '\0', siz);
-            for (i = 0; i < dst->value_count; i++)
+            for (i = 0; i < (int) dst->value_count; i++)
             {
                 dst->valuesSS[i].type = src->valuesSS[i].type;
                 copyvalue(&dst->valuesSS[i].value,
@@ -1809,8 +1882,13 @@ void copyvalue(MOJOSHADER_effectValue *dst,
         {
             siz = dst->value_count * 4;
             dst->values = m(siz, d);
-            // !!! FIXME: Out of memory check!
-            memcpy(dst->values, src->values, siz);
+            if (dst->values == NULL)
+            {
+                dst->value_count = 0;
+                return;
+            } // if
+            if (siz > 0)
+                memcpy(dst->values, src->values, siz);
         } // else
     } // else if
 
@@ -1840,15 +1918,25 @@ void copysymbolinfo(MOJOSHADER_symbolTypeInfo *dst,
     {
         siz = sizeof (MOJOSHADER_symbolStructMember) * dst->member_count;
         dst->members = (MOJOSHADER_symbolStructMember *) m(siz, d);
-        // !!! FIXME: Out of memory check!
-        for (i = 0; i < dst->member_count; i++)
+        if (dst->members == NULL)
+        {
+            dst->member_count = 0;
+            return;
+        } // if
+        // Zero first, so a name or nested member a failed allocation below never reaches is a
+        // NULL the destructor can free, not heap garbage it would dereference. -CNA
+        memset(dst->members, '\0', siz);
+        for (i = 0; i < (int) dst->member_count; i++)
         {
             if (src->members[i].name != NULL)
             {
                 siz = strlen(src->members[i].name) + 1;
                 stringcopy = (char *) m(siz, d);
-                strcpy(stringcopy, src->members[i].name);
-                dst->members[i].name = stringcopy;
+                if (stringcopy != NULL)
+                {
+                    strcpy(stringcopy, src->members[i].name);
+                    dst->members[i].name = stringcopy;
+                } // if
             } // if
             copysymbolinfo(&dst->members[i].info, &src->members[i].info, m, d);
         } // for
@@ -1863,8 +1951,9 @@ void copysymbol(MOJOSHADER_symbol *dst,
 {
     uint32 siz = strlen(src->name) + 1;
     char *stringcopy = (char *) m(siz, d);
-    // !!! FIXME: Out of memory check!
-    strcpy(stringcopy, src->name);
+    // A failed name copy leaves dst->name NULL, which free_symbols tolerates. -CNA
+    if (stringcopy != NULL)
+        strcpy(stringcopy, src->name);
     dst->name = stringcopy;
     dst->register_set = src->register_set;
     dst->register_index = src->register_index;
@@ -1882,51 +1971,85 @@ MOJOSHADER_preshader *copypreshader(const MOJOSHADER_preshader *src,
     uint32 siz;
     MOJOSHADER_preshader *retval;
 
+    // Every count is published only once the array behind it exists, and every failed allocation
+    // frees the partial preshader (MOJOSHADER_freePreshader walks the counts, which is why they
+    // trail their arrays) and returns NULL. -CNA
     retval = (MOJOSHADER_preshader *) m(sizeof (MOJOSHADER_preshader), d);
-    // !!! FIXME: Out of memory check!
+    if (retval == NULL)
+        return NULL;
     memset(retval, '\0', sizeof (MOJOSHADER_preshader));
     retval->malloc = m;
     retval->free = f;
     retval->malloc_data = d;
 
     siz = sizeof (double) * src->literal_count;
-    retval->literal_count = src->literal_count;
     retval->literals = (double *) m(siz, d);
-    // !!! FIXME: Out of memory check!
-    memcpy(retval->literals, src->literals, siz);
+    if (retval->literals == NULL)
+    {
+        MOJOSHADER_freePreshader(retval);
+        return NULL;
+    } // if
+    if (siz > 0)
+        memcpy(retval->literals, src->literals, siz);
+    retval->literal_count = src->literal_count;
 
     retval->temp_count = src->temp_count;
 
     siz = sizeof (MOJOSHADER_symbol) * src->symbol_count;
-    retval->symbol_count = src->symbol_count;
     retval->symbols = (MOJOSHADER_symbol *) m(siz, d);
-    // !!! FIXME: Out of memory check!
+    if (retval->symbols == NULL)
+    {
+        MOJOSHADER_freePreshader(retval);
+        return NULL;
+    } // if
     memset(retval->symbols, '\0', siz);
+    retval->symbol_count = src->symbol_count;
 
-    for (i = 0; i < retval->symbol_count; i++)
+    for (i = 0; i < (int) retval->symbol_count; i++)
         copysymbol(&retval->symbols[i], &src->symbols[i], m, d);
 
     siz = sizeof (MOJOSHADER_preshaderInstruction) * src->instruction_count;
-    retval->instruction_count = src->instruction_count;
     retval->instructions = (MOJOSHADER_preshaderInstruction *) m(siz, d);
-    // !!! FIXME: Out of memory check!
-    memcpy(retval->instructions, src->instructions, siz);
-    for (i = 0; i < retval->instruction_count; i++)
-        for (j = 0; j < retval->instructions[i].operand_count; j++)
+    if (retval->instructions == NULL)
+    {
+        MOJOSHADER_freePreshader(retval);
+        return NULL;
+    } // if
+    if (siz > 0)
+        memcpy(retval->instructions, src->instructions, siz);
+    retval->instruction_count = src->instruction_count;
+    // The memcpy above copied src's array_registers pointers into the clone; null them so a
+    // later failure (or the free on one) never touches or double-frees src's arrays. -CNA
+    for (i = 0; i < (int) retval->instruction_count; i++)
+        for (j = 0; j < (int) retval->instructions[i].operand_count; j++)
+            retval->instructions[i].operands[j].array_registers = NULL;
+    for (i = 0; i < (int) retval->instruction_count; i++)
+        for (j = 0; j < (int) retval->instructions[i].operand_count; j++)
         {
             siz = sizeof (unsigned int) * retval->instructions[i].operands[j].array_register_count;
+            if (siz == 0)
+                continue;
             retval->instructions[i].operands[j].array_registers = (unsigned int *) m(siz, d);
-            // !!! FIXME: Out of memory check!
+            if (retval->instructions[i].operands[j].array_registers == NULL)
+            {
+                MOJOSHADER_freePreshader(retval);
+                return NULL;
+            } // if
             memcpy(retval->instructions[i].operands[j].array_registers,
                    src->instructions[i].operands[j].array_registers,
                    siz);
         } // for
 
     siz = sizeof (float) * 4 * src->register_count;
-    retval->register_count = src->register_count;
     retval->registers = (float *) m(siz, d);
-    // !!! FIXME: Out of memory check!
-    memcpy(retval->registers, src->registers, siz);
+    if (retval->registers == NULL)
+    {
+        MOJOSHADER_freePreshader(retval);
+        return NULL;
+    } // if
+    if (siz > 0)
+        memcpy(retval->registers, src->registers, siz);
+    retval->register_count = src->register_count;
 
     return retval;
 } // copypreshader
@@ -2128,20 +2251,28 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
             siz = sizeof (uint32) * effect->objects[i].shader.preshader_param_count;
             clone->objects[i].shader.preshader_param_count = effect->objects[i].shader.preshader_param_count;
             clone->objects[i].shader.preshader_params = (uint32 *) m(siz, d);
-            memcpy(clone->objects[i].shader.preshader_params,
-                   effect->objects[i].shader.preshader_params,
-                   siz);
+            if ((siz > 0) && (clone->objects[i].shader.preshader_params == NULL))
+                goto cloneEffect_outOfMemory;
+            if (siz > 0)
+                memcpy(clone->objects[i].shader.preshader_params,
+                       effect->objects[i].shader.preshader_params,
+                       siz);
             siz = sizeof (uint32) * effect->objects[i].shader.param_count;
             clone->objects[i].shader.param_count = effect->objects[i].shader.param_count;
             clone->objects[i].shader.params = (uint32 *) m(siz, d);
-            memcpy(clone->objects[i].shader.params,
-                   effect->objects[i].shader.params,
-                   siz);
+            if ((siz > 0) && (clone->objects[i].shader.params == NULL))
+                goto cloneEffect_outOfMemory;
+            if (siz > 0)
+                memcpy(clone->objects[i].shader.params,
+                       effect->objects[i].shader.params,
+                       siz);
 
             if (clone->objects[i].shader.is_preshader)
             {
                 clone->objects[i].shader.preshader = copypreshader(
                     effect->objects[i].shader.preshader, m, effect->ctx.f, d);
+                if (clone->objects[i].shader.preshader == NULL)
+                    goto cloneEffect_outOfMemory;
                 continue;
             } // if
 

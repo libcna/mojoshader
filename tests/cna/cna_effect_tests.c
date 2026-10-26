@@ -331,6 +331,152 @@ static void test_value_struct_member_count_out_of_range(void)
     expect_rejected(bytes, len, "value struct member count out of range");
 } // test_value_struct_member_count_out_of_range
 
+/* A valid effect with one float4 parameter "Scale", one technique/pass, and a pass state of type
+ * PIXELSHADERCONSTANT whose large-object block carries a preshader -- so loading it runs the
+ * preshader reader and cloning it runs copypreshader. Returns the file length. */
+static unsigned int preshader_effect(unsigned char *out)
+{
+    Image base, file;
+    CnaWords pre;
+    uint32_t empty, pname, techname, passname, ptype, pval, stype, sval;
+    unsigned int prelen;
+
+    memset(&pre, '\0', sizeof (pre));
+    cna_push_preshader(&pre, "Scale", NULL);
+    prelen = (unsigned int) (pre.count * 4);
+
+    memset(&base, '\0', sizeof (base));
+    empty = base.len; put_u32(&base, 0);
+    pname = put_string(&base, "Scale");
+    techname = put_string(&base, "T");
+    passname = put_string(&base, "P");
+    ptype = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, pname); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
+    pval = base.len; put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0);
+    stype = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, empty); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
+    sval = base.len; put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0);
+
+    memset(&file, '\0', sizeof (file));
+    put_u32(&file, 0xFEFF0901);
+    put_u32(&file, base.len);
+    memcpy(file.bytes + file.len, base.bytes, base.len);
+    file.len += base.len;
+    put_u32(&file, 1);                   /* parameters */
+    put_u32(&file, 1);                   /* techniques */
+    put_u32(&file, 0);
+    put_u32(&file, 0);                   /* objects */
+    put_u32(&file, ptype); put_u32(&file, pval); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, techname); put_u32(&file, 0); put_u32(&file, 1);      /* technique */
+    put_u32(&file, passname); put_u32(&file, 0); put_u32(&file, 1);      /* pass */
+    put_u32(&file, 160); put_u32(&file, 0); put_u32(&file, stype); put_u32(&file, sval);  /* state */
+    put_u32(&file, 0);                   /* small objects */
+    put_u32(&file, 1);                   /* large objects */
+    /* large object: technique 0, pass 0, FIXME, state 0, type 0, length; then the preshader */
+    put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, prelen);
+    memcpy(file.bytes + file.len, pre.at, prelen);
+    file.len += prelen;
+
+    memcpy(out, file.bytes, file.len);
+    cna_words_free(&pre);
+    return file.len;
+} // preshader_effect
+
+static MOJOSHADER_effectShaderContext counting_backend(void)
+{
+    MOJOSHADER_effectShaderContext ctx = backend();
+    ctx.m = cna_alloc_malloc;
+    ctx.f = cna_alloc_free;
+    return ctx;
+} // counting_backend
+
+/* A-06: failing each allocation of a valid effect's load in turn must return a deletable result
+ * and free everything -- never crash on a half-built array or leak. */
+static void inject_load(const unsigned char *bytes, unsigned int len, const char *what)
+{
+    unsigned char *copy = (unsigned char *) cna_exact_copy(bytes, len);
+    int fail_at;
+    int got_full_run = 0;
+    for (fail_at = 1; fail_at <= 512; fail_at++)
+    {
+        MOJOSHADER_effectShaderContext ctx = counting_backend();
+        const MOJOSHADER_effect *e;
+        cna_alloc_reset(fail_at);
+        e = MOJOSHADER_compileEffect(copy, len, NULL, 0, NULL, 0, &ctx);
+        MOJOSHADER_deleteEffect(e);
+        CNA_CHECK(cna_alloc_live() == 0, what);
+        if (!cna_alloc_hit())
+        {
+            got_full_run = 1;
+            break;
+        } // if
+    } // for
+    CNA_CHECK(got_full_run, what);
+    free(copy);
+} // inject_load
+
+/* A-06: the same for cloning a cleanly loaded effect -- copyvalue, the symbol/type copies and
+ * copypreshader must each fail cleanly. */
+static void inject_clone(const unsigned char *bytes, unsigned int len, const char *what)
+{
+    unsigned char *copy = (unsigned char *) cna_exact_copy(bytes, len);
+    MOJOSHADER_effectShaderContext ctx = counting_backend();
+    const MOJOSHADER_effect *e;
+    int base_live;
+    int fail_at;
+    int got_full_run = 0;
+
+    cna_alloc_reset(0);
+    e = MOJOSHADER_compileEffect(copy, len, NULL, 0, NULL, 0, &ctx);
+    CNA_CHECK((e != NULL) && (e->error_count == 0), "the clone source loads cleanly");
+    base_live = cna_alloc_live();
+
+    for (fail_at = 1; fail_at <= 512; fail_at++)
+    {
+        MOJOSHADER_effect *clone;
+        cna_alloc_arm(cna_alloc_attempts() + fail_at);
+        clone = MOJOSHADER_cloneEffect(e);
+        if (clone != NULL)
+            MOJOSHADER_deleteEffect(clone);
+        CNA_CHECK(cna_alloc_live() == base_live, what);
+        if (!cna_alloc_hit())
+        {
+            got_full_run = 1;
+            break;
+        } // if
+    } // for
+    CNA_CHECK(got_full_run, what);
+
+    MOJOSHADER_deleteEffect(e);
+    CNA_CHECK(cna_alloc_live() == 0, "the source frees with nothing left over");
+    free(copy);
+} // inject_clone
+
+static void test_effect_load_allocation_failures(void)
+{
+    unsigned char bytes[2048];
+    unsigned int len;
+    len = struct_effect(bytes);
+    inject_load(bytes, len, "a struct effect load frees everything under allocation failure");
+    len = preshader_effect(bytes);
+    inject_load(bytes, len, "a preshader effect load frees everything under allocation failure");
+} // test_effect_load_allocation_failures
+
+static void test_effect_clone_allocation_failures(void)
+{
+    /* The preshader effect carries a named parameter (COPY_STRING, copyvalue), a preshader
+     * symbol (copysymbol/copysymbolinfo) and a pass-state preshader (copypreshader), and has a
+     * technique so clone reaches its object table. struct_effect has no technique, which
+     * MOJOSHADER_cloneEffect does not support (an unrelated pre-existing assert), so it is loaded
+     * above but not cloned here. */
+    unsigned char bytes[2048];
+    unsigned int len = preshader_effect(bytes);
+    inject_clone(bytes, len, "a preshader effect clone frees everything under allocation failure");
+} // test_effect_clone_allocation_failures
+
 /* A-04: the XNA4 wrapper read a second version token after skipping its header without checking
  * four bytes remained. */
 static void test_xna4_wrapper_truncated_after_skip(void)
@@ -356,5 +502,7 @@ int main(void)
     cna_test_run("value_object_index_out_of_range", test_value_object_index_out_of_range);
     cna_test_run("value_struct_member_count_out_of_range", test_value_struct_member_count_out_of_range);
     cna_test_run("xna4_wrapper_truncated_after_skip", test_xna4_wrapper_truncated_after_skip);
+    cna_test_run("effect_load_allocation_failures", test_effect_load_allocation_failures);
+    cna_test_run("effect_clone_allocation_failures", test_effect_clone_allocation_failures);
     return cna_test_finish();
 } // main

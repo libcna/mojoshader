@@ -93,6 +93,10 @@ void *cna_exact_copy(const void *data, size_t bytes);
  * 0 fails none).
  */
 void cna_alloc_reset(int fail_at);
+/* Arms a new failing allocation (an absolute attempt number) and clears the hit flag without
+ * disturbing the running attempt or live counts -- for failing a clone of an already-built
+ * fixture, whose own allocations must stay counted. */
+void cna_alloc_arm(int fail_at);
 int cna_alloc_attempts(void);   /* allocations asked for since the reset */
 int cna_alloc_live(void);       /* allocations handed out and not yet freed */
 int cna_alloc_hit(void);        /* whether the chosen allocation was reached and failed */
