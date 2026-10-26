@@ -70,3 +70,5 @@ add_dependencies(cna_build_tests mojoshader_cna_opengl_noflip)
 mojoshader_cna_test(cna_effect_tests)
 
 mojoshader_cna_test(cna_spirv_tests)
+
+mojoshader_cna_test(cna_parser_tests)

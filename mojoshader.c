@@ -4306,7 +4306,12 @@ static int parse_ctab_typeinfo(Context *ctx, const uint8 *start,
     unsigned int i;
     // The member table's own offset is read from the constant table and was never bounded, so a
     // struct in untrusted bytecode could point its member list anywhere. -CNA
-    const uint32 memberpos = (uint32) SWAP16(typeptr[6]);
+    // D3DXSHADER_TYPEINFO.StructMemberInfo is a DWORD at byte 12, after six WORDs; reading
+    // only its low WORD misplaced a member table beyond 64 KiB. memcpy: pos need not keep the
+    // DWORD aligned. -CNA
+    uint32 memberpos;
+    memcpy(&memberpos, start + pos + 12, sizeof (memberpos));
+    memberpos = SWAP32(memberpos);
     if ((memberpos >= bytes) || ((bytes - memberpos) < (member_count * 8)))
         return 0;  // corrupt CTAB.
     const uint32 *member = (const uint32 *) (start + memberpos);
