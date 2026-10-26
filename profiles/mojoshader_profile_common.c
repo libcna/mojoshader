@@ -58,8 +58,14 @@ int set_output(Context *ctx, Buffer **section)
     if (*section == NULL)
     {
         *section = buffer_create(256, MallocBridge, FreeBridge, ctx);
+        // Out of memory (MallocBridge() failed the context): there is no section to write to,
+        //  and none other may be written in its place. The buffer functions take NULL, and
+        //  output_line() and the like stop at the failure first. -CNA
         if (*section == NULL)
+        {
+            ctx->output = NULL;
             return 0;
+        } // if
     } // if
 
     ctx->output = *section;
@@ -134,7 +140,9 @@ int shader_is_vertex(const Context *ctx)
 
 int isfail(const Context *ctx)
 {
-    return ctx->isfail;
+    // MOJOSHADER_parse() clears isfail before each token, to report every bad instruction, but
+    //  a context out of memory stays failed: what it wrote, and what it has left, is partial. -CNA
+    return ctx->isfail || ctx->out_of_memory;
 } // isfail
 
 void failf(Context *ctx, const char *fmt, ...) ISPRINTF(2,3);
@@ -161,9 +169,9 @@ void fail(Context *ctx, const char *reason)
 void output_line(Context *ctx, const char *fmt, ...) ISPRINTF(2,3);
 void output_line(Context *ctx, const char *fmt, ...)
 {
-    assert(ctx->output != NULL);
     if (isfail(ctx))
         return;  // we failed previously, don't go on...
+    assert(ctx->output != NULL);
 
     const int indent = ctx->indent;
     if (indent > 0)
@@ -183,9 +191,10 @@ void output_line(Context *ctx, const char *fmt, ...)
 
 void output_blank_line(Context *ctx)
 {
+    if (isfail(ctx))
+        return;
     assert(ctx->output != NULL);
-    if (!isfail(ctx))
-        buffer_append(ctx->output, ctx->endline, ctx->endline_len);
+    buffer_append(ctx->output, ctx->endline, ctx->endline_len);
 } // output_blank_line
 
 /* MOJOSHADER_printFloat already writes the C-locale literal the profiles want, with no

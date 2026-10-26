@@ -98,6 +98,9 @@ endif()
 
 mojoshader_cna_test(cna_printfloat_tests)
 
+# Every profile's translation while each of its allocations fails in turn.
+mojoshader_cna_test(cna_alloc_tests)
+
 # The SDL_GPU glue, when find_package() finds an SDL3 package (CMAKE_PREFIX_PATH). It is built as
 # FNA3D builds it on SDL3 -- USE_SDL3 and SDL's standard library (MOJOSHADER_USE_SDL_STDLIB) -- so
 # the rest of the library is compiled once more with those switches; cna_sdlgpu_tests compiles

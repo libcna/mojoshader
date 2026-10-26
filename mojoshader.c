@@ -152,6 +152,8 @@ static inline void add_sampler(Context *ctx, const int regnum,
     // !!! FIXME: make sure it doesn't exist?
     // !!! FIXME:  (ps_1_1 assume we can add it multiple times...)
     RegisterList *item = reglist_insert(ctx, &ctx->samplers, rtype, regnum);
+    if (item == NULL)
+        return;  // out of memory, and the context says so. -CNA
 
     if (ctx->samplermap != NULL)
     {
@@ -5263,6 +5265,24 @@ static void destroy_context(Context *ctx)
 #if SUPPORT_PROFILE_SPIRV
         // Still the context's when no parse data took the patch table over (build_parsedata()).
         MOJOSHADER_spirv_free_patch_table(&ctx->spirv.patch_table, f, d);
+        // The SPIR-V profile's constant caches; emit_SPIRV_finalize() is not reached by a
+        //  refused or out-of-memory parse, and freeing them there leaked them then. -CNA
+        {
+            ComponentList *lists[3];
+            int i;
+            lists[0] = ctx->spirv.cl.f.next;
+            lists[1] = ctx->spirv.cl.i.next;
+            lists[2] = ctx->spirv.cl.u.next;
+            for (i = 0; i < 3; i++)
+            {
+                while (lists[i] != NULL)
+                {
+                    ComponentList *next = lists[i]->next;
+                    f(lists[i], d);
+                    lists[i] = next;
+                } // while
+            } // for
+        }
 #endif
         f((void *) ctx->mainfn, d);
         f(ctx, d);
@@ -5656,7 +5676,8 @@ static MOJOSHADER_parseData *build_parsedata(Context *ctx)
 
         if (ctx->out_of_memory)
         {
-            for (i = 0; i < error_count; i++)
+            // errorlist_flatten() itself may be what ran out. -CNA
+            for (i = 0; (errors != NULL) && (i < error_count); i++)
             {
                 Free(ctx, (void *) errors[i].filename);
                 Free(ctx, (void *) errors[i].error);
@@ -6047,6 +6068,11 @@ const MOJOSHADER_parseData *MOJOSHADER_parse(const char *profile,
             failed = 1;
             ctx->isfail = 0;
         } // if
+
+        // Out of memory, nothing more can be reported, and going on would build on what the
+        //  failed allocation left out. -CNA
+        if (ctx->out_of_memory)
+            break;
 
         rc = parse_token(ctx);
         if ( ((uint32) rc) > ctx->tokencount )

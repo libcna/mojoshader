@@ -70,17 +70,6 @@ static RegisterList *spv_getreg(Context *ctx, const RegisterType regtype, const 
     return r;
 } // spv_getreg
 
-static void spv_componentlist_free(Context *ctx, ComponentList *cl)
-{
-    ComponentList *next;
-    while (cl)
-    {
-        next = cl->next;
-        Free(ctx, cl);
-        cl = next;
-    } // while
-} // spv_componentlist_free
-
 static ComponentList *spv_componentlist_alloc(Context *ctx)
 {
     ComponentList *ret = (ComponentList *) Malloc(ctx, sizeof(ComponentList));
@@ -165,9 +154,9 @@ static uint32 spv_get_uniform_array_id(Context *ctx, const RegisterType regtype)
 
 static void spv_emit_part_va(Context* ctx, uint32 word_count, uint32 argc, SpvOp op, va_list args)
 {
-    assert(ctx->output != NULL);
     if (isfail(ctx))
         return;  // we failed previously, don't go on...
+    assert(ctx->output != NULL);
 
     uint32 word = op | (word_count << 16);
     buffer_append(ctx->output, &word, sizeof(word));
@@ -196,9 +185,9 @@ static void spv_emit(Context *ctx, uint32 word_count, SpvOp op, ...)
 
 static void spv_emit_word(Context *ctx, uint32 word)
 {
-    assert(ctx->output != NULL);
     if (isfail(ctx))
         return;  // we failed previously, don't go on...
+    assert(ctx->output != NULL);
 
     buffer_append(ctx->output, &word, sizeof(word));
 } // spv_emit_word
@@ -207,9 +196,9 @@ static void spv_emit_str(Context *ctx, const char *str)
 {
     size_t len;
     uint32 trail;
-    assert(ctx->output != NULL);
     if (isfail(ctx))
         return;  // we failed previously, don't go on...
+    assert(ctx->output != NULL);
 
     if (str == NULL)
         return spv_emit_word(ctx, 0);
@@ -504,6 +493,8 @@ static uint32 spv_getscalarf(Context *ctx, float v)
         cl = cl->next;
     } // while
     cl = spv_componentlist_alloc(ctx);
+    if (cl == NULL)
+        return 0;  // out of memory; the context has failed. -CNA
     cl->next = prev->next;
     prev->next = cl;
     cl->v.f = v;
@@ -524,6 +515,8 @@ static uint32 spv_getscalari(Context *ctx, int v)
         cl = cl->next;
     } // while
     cl = spv_componentlist_alloc(ctx);
+    if (cl == NULL)
+        return 0;  // out of memory; the context has failed. -CNA
     cl->next = prev->next;
     prev->next = cl;
     cl->v.i = v;
@@ -2377,6 +2370,11 @@ void emit_SPIRV_const_array(Context *ctx,
     // FIXME: Multiple constant arrays probably won't work. Are those even possible?
     // Maybe it would be better to do this in emit_SPIRV_finalize and use used_registers for it?
     uint32 *constituents = (uint32 *)Malloc(ctx, size * sizeof(uint32));
+    if (constituents == NULL)
+    {
+        pop_output(ctx);
+        return;  // Malloc() has marked the context out of memory. -CNA
+    } // if
     uint32 tid_constituent = spv_get_type(ctx, STI_VEC4);
     for (i = 0; i < size; i++)
     {
@@ -3341,9 +3339,8 @@ void emit_SPIRV_finalize(Context *ctx)
     buffer_append(ctx->output, &ctx->spirv.patch_table, sizeof(ctx->spirv.patch_table));
     pop_output(ctx);
 
-    spv_componentlist_free(ctx, ctx->spirv.cl.f.next);
-    spv_componentlist_free(ctx, ctx->spirv.cl.i.next);
-    spv_componentlist_free(ctx, ctx->spirv.cl.u.next);
+    // The constant caches (ctx->spirv.cl) are freed with the context, which a parse that never
+    //  gets here -- a refused or out-of-memory one -- left them to. -CNA
 } // emit_SPIRV_finalize
 
 void emit_SPIRV_NOP(Context *ctx)

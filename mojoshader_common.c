@@ -691,8 +691,14 @@ Buffer *buffer_create(size_t blksz, MOJOSHADER_malloc m,
     return buffer;
 } // buffer_create
 
+// A NULL buffer is one that could not be created: out of memory, and already reported by
+//  whoever asked for it. Writing to it fails, and it is empty. -CNA
+
 char *buffer_reserve(Buffer *buffer, const size_t len)
 {
+    if (buffer == NULL)
+        return NULL;
+
     // note that we make the blocks bigger than blocksize when we have enough
     //  data to overfill a fresh block, to reduce allocations.
     const size_t blocksize = buffer->block_size;
@@ -738,6 +744,9 @@ char *buffer_reserve(Buffer *buffer, const size_t len)
 int buffer_append(Buffer *buffer, const void *_data, size_t len)
 {
     const uint8 *data = (const uint8 *) _data;
+
+    if (buffer == NULL)
+        return 0;
 
     // note that we make the blocks bigger than blocksize when we have enough
     //  data to overfill a fresh block, to reduce allocations.
@@ -800,6 +809,9 @@ int buffer_append_va(Buffer *buffer, const char *fmt, va_list va)
 {
     char scratch[256];
 
+    if (buffer == NULL)
+        return 0;
+
     va_list ap;
     va_copy(ap, va);
     const int len = vsnprintf(scratch, sizeof (scratch), fmt, ap);
@@ -825,11 +837,13 @@ int buffer_append_va(Buffer *buffer, const char *fmt, va_list va)
 
 size_t buffer_size(Buffer *buffer)
 {
-    return buffer->total_bytes;
+    return (buffer == NULL) ? 0 : buffer->total_bytes;
 } // buffer_size
 
 void buffer_empty(Buffer *buffer)
 {
+    if (buffer == NULL)
+        return;
     BufferBlock *item = buffer->head;
     while (item != NULL)
     {
@@ -843,6 +857,8 @@ void buffer_empty(Buffer *buffer)
 
 char *buffer_flatten(Buffer *buffer)
 {
+    if (buffer == NULL)
+        return NULL;
     char *retval = (char *) buffer->m(buffer->total_bytes + 1, buffer->d);
     if (retval == NULL)
         return NULL;
@@ -929,7 +945,7 @@ void buffer_destroy(Buffer *buffer)
 void buffer_patch(Buffer *buffer, const size_t start,
                   const void *_data, const size_t len)
 {
-    if (len == 0)
+    if ((buffer == NULL) || (len == 0))
         return;  // Nothing to do.
 
     if ((start + len) > buffer->total_bytes)
