@@ -7,7 +7,7 @@
 # since it needs d3d11.h; the SDL_GPU glue only when an SDL3 package is found (see the end).
 
 set(_cna_mojoshader_dir "${CMAKE_CURRENT_SOURCE_DIR}/../..")
-add_library(mojoshader_cna_tests STATIC
+set(_cna_mojoshader_sources
     ${_cna_mojoshader_dir}/mojoshader.c
     ${_cna_mojoshader_dir}/mojoshader_common.c
     ${_cna_mojoshader_dir}/mojoshader_effects.c
@@ -22,23 +22,36 @@ add_library(mojoshader_cna_tests STATIC
     ${_cna_mojoshader_dir}/profiles/mojoshader_profile_spirv.c
     cna_test.c
 )
+add_library(mojoshader_cna_tests STATIC ${_cna_mojoshader_sources})
+set(_cna_mojoshader_profile_definitions)
+# Not the SUPPORT_PROFILE_*=0 switches the top level derives from its PROFILE_* options (GLSLES3
+# has no option there at all, so a standalone build always turns it off): every profile, here.
+foreach(_profile D3D BYTECODE HLSL GLSL GLSL120 GLSLES GLSLES3 ARB1 ARB1_NV METAL SPIRV GLSPIRV)
+    remove_definitions(-DSUPPORT_PROFILE_${_profile}=0)
+    list(APPEND _cna_mojoshader_profile_definitions SUPPORT_PROFILE_${_profile}=1)
+endforeach()
 set(_cna_mojoshader_test_definitions
     MOJOSHADER_NO_VERSION_INCLUDE
     MOJOSHADER_EFFECT_SUPPORT
     MOJOSHADER_DEPTH_CLIPPING
     MOJOSHADER_FLIP_RENDERTARGET
     MOJOSHADER_XNA4_VERTEX_TEXTURES
+    ${_cna_mojoshader_profile_definitions}
 )
-# Not the SUPPORT_PROFILE_*=0 switches the top level derives from its PROFILE_* options (GLSLES3
-# has no option there at all, so a standalone build always turns it off): every profile, here.
-foreach(_profile D3D BYTECODE HLSL GLSL GLSL120 GLSLES GLSLES3 ARB1 ARB1_NV METAL SPIRV GLSPIRV)
-    remove_definitions(-DSUPPORT_PROFILE_${_profile}=0)
-    list(APPEND _cna_mojoshader_test_definitions SUPPORT_PROFILE_${_profile}=1)
-endforeach()
 target_compile_definitions(mojoshader_cna_tests PUBLIC ${_cna_mojoshader_test_definitions})
 target_include_directories(mojoshader_cna_tests PUBLIC "${_cna_mojoshader_dir}" "${CMAKE_CURRENT_SOURCE_DIR}")
 if(UNIX)
     target_link_libraries(mojoshader_cna_tests PUBLIC m)
+endif()
+
+# The same library with MojoShader's own defaults (the top level's DEPTH_CLIPPING, FLIP_VIEWPORT
+# and XNA4_VERTEXTEXTURE options are OFF), for the cases whose output depends on those switches.
+add_library(mojoshader_cna_default STATIC ${_cna_mojoshader_sources})
+target_compile_definitions(mojoshader_cna_default PUBLIC
+    MOJOSHADER_NO_VERSION_INCLUDE MOJOSHADER_EFFECT_SUPPORT ${_cna_mojoshader_profile_definitions})
+target_include_directories(mojoshader_cna_default PUBLIC "${_cna_mojoshader_dir}" "${CMAKE_CURRENT_SOURCE_DIR}")
+if(UNIX)
+    target_link_libraries(mojoshader_cna_default PUBLIC m)
 endif()
 
 # The OpenGL glue must also compile without the render-target flip, MojoShader's own default.
@@ -50,9 +63,17 @@ target_include_directories(mojoshader_cna_opengl_noflip PRIVATE "${_cna_mojoshad
 # spirv-val, when found, checks every SPIR-V module a test produces (cna_spirv_validate()).
 find_program(MOJOSHADER_SPIRV_VAL NAMES spirv-val)
 
+# mojoshader_cna_test(<name> [<source> <library>]): ${name}.c against mojoshader_cna_tests, or a
+# source built once more against another library.
 function(mojoshader_cna_test name)
-    add_executable(${name} ${name}.c)
-    target_link_libraries(${name} PRIVATE mojoshader_cna_tests)
+    set(_source ${name}.c)
+    set(_library mojoshader_cna_tests)
+    if(ARGC GREATER 2)
+        set(_source ${ARGV1})
+        set(_library ${ARGV2})
+    endif()
+    add_executable(${name} ${_source})
+    target_link_libraries(${name} PRIVATE ${_library})
     add_test(NAME ${name} COMMAND ${name})
     set(_environment "MOJOSHADER_CNA_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/${name}.out")
     if(MOJOSHADER_SPIRV_VAL)
@@ -78,6 +99,7 @@ mojoshader_cna_test(cna_spirv_tests)
 mojoshader_cna_test(cna_ps14_tests)
 
 mojoshader_cna_test(cna_glspirv_tests)
+mojoshader_cna_test(cna_glspirv_default_tests cna_glspirv_tests.c mojoshader_cna_default)
 
 mojoshader_cna_test(cna_parser_tests)
 

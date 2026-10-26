@@ -1512,10 +1512,13 @@ static void spv_assign_destarg(Context *ctx, SpirvResult value)
     } // switch
 } // spv_assign_destarg
 
+// The GLSPIRV vertex epilogue. It always applies the XNA pixel centre, as the GLSL profile's
+//  does; the render-target flip and the depth-range fix only when their switches are defined.
+//  It used to exist only with one of those two, so a build with neither -- MojoShader's own
+//  default -- ignored MOJOSHADER_glProgramPixelCenterInfo for every GLSPIRV program. -CNA
 static void spv_emit_vs_main_end(Context* ctx)
 {
 #if SUPPORT_PROFILE_GLSPIRV
-#if defined(MOJOSHADER_DEPTH_CLIPPING) || defined(MOJOSHADER_FLIP_RENDERTARGET)
     if (!ctx->profile_supports_glspirv || !shader_is_vertex(ctx))
         return;
 
@@ -1619,7 +1622,6 @@ static void spv_emit_vs_main_end(Context* ctx)
     pop_output(ctx);
 
     spv_output_name(ctx, id_func, "vs_epilogue");
-#endif // defined(MOJOSHADER_DEPTH_CLIPPING) || defined(MOJOSHADER_FLIP_RENDERTARGET)
 #endif // SUPPORT_PROFILE_GLSPIRV
 } // spv_emit_vs_main_end
 
@@ -1810,7 +1812,7 @@ static void spv_emit_func_end(Context *ctx)
     push_output(ctx, &ctx->mainline);
 
 #if SUPPORT_PROFILE_GLSPIRV
-#if defined(MOJOSHADER_DEPTH_CLIPPING) || defined(MOJOSHADER_FLIP_RENDERTARGET)
+    // main() calls the epilogue, spv_emit_vs_main_end(), in every configuration. -CNA
     if (ctx->profile_supports_glspirv
      && shader_is_vertex(ctx)
      && ctx->spirv.id_vs_main_end == 0)
@@ -1823,7 +1825,6 @@ static void spv_emit_func_end(Context *ctx)
         spv_emit(ctx, 4, SpvOpFunctionCall, tid_void, id_res, ctx->spirv.id_vs_main_end);
         pop_output(ctx);
     } // if
-#endif // defined(MOJOSHADER_DEPTH_CLIPPING) || defined(MOJOSHADER_FLIP_RENDERTARGET)
 #endif // SUPPORT_PROFILE_GLSPIRV
 
     spv_emit(ctx, 1, SpvOpReturn);

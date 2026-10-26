@@ -5,6 +5,10 @@
  * GLSL-only, so a program linked through ARB_gl_spirv silently ignored both setters. The Vulkan
  * SPIR-V profile, whose renderer moves the viewport instead, must not grow either uniform.
  *
+ * cna_glspirv_default_tests is this file once more, against the library built with MojoShader's
+ * own defaults -- neither MOJOSHADER_FLIP_RENDERTARGET nor MOJOSHADER_DEPTH_CLIPPING, which is
+ * how the GLSPIRV pixel centre went missing (R2-05, 2026-10-26 remediation review).
+ *
  * This file is part of the libcna fork of MojoShader; see tests/cna/README.md.
  */
 
@@ -145,6 +149,18 @@ static void check_profile(const char *profile, const uint32_t *tokens, size_t by
         CNA_CHECK((id != -1) && (entry->location == module.location[id]),
                   "the patch table names the uniform's location, which the GL glue looks up");
         CNA_CHECK(validate_for_opengl(name) != 0, "spirv-val accepts the module for OpenGL 4.5");
+        if (strcmp(uniform, "cnaPixelCenter") == 0)
+        {
+            /* The pixel centre in every configuration; the render-target flip, whose location
+             * comes first, only with its switch. */
+#ifdef MOJOSHADER_FLIP_RENDERTARGET
+            CNA_CHECK((table.vpflip.location == 0) && (table.pixelcenter.location == 1) &&
+                      (table.location_count == 2), "vpFlip, then cnaPixelCenter");
+#else
+            CNA_CHECK((table.vpflip.location == -1) && (table.pixelcenter.location == 0) &&
+                      (table.location_count == 1), "cnaPixelCenter alone, without the flip");
+#endif
+        } // if
     } // if
     else
     {
