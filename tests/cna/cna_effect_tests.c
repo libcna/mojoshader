@@ -406,6 +406,103 @@ static void test_value_struct_member_wider_than_a_register(void)
     expect_rejected(bytes, len, "a struct member eight columns wide");
 } // test_value_struct_member_wider_than_a_register
 
+/* The smallest record count whose array, sizeof (element) bytes apiece, needs more than 2^32
+ * bytes: computed in size_t and kept in 32 bits, its byte count wraps to less than one element. */
+static uint32_t wrapping_count(size_t elemsize)
+{
+    return (uint32_t) ((0x100000000ull + elemsize - 1) / elemsize);
+} // wrapping_count
+
+/* One float parameter with the given annotation count, then (when techniques is nonzero) one
+ * technique with the given pass count whose first pass has the given state count. Each count's
+ * records are followed by one honest record, so only the count is wrong. */
+static unsigned int record_count_effect(unsigned char *out, uint32_t annotations,
+                                        uint32_t passes, uint32_t states)
+{
+    Image base, file;
+    uint32_t empty, nm, type, val;
+    memset(&base, '\0', sizeof (base));
+    empty = base.len; put_u32(&base, 0);
+    nm = put_string(&base, "P");
+    type = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_SCALAR);
+    put_u32(&base, nm); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 1); put_u32(&base, 1);
+    val = base.len; put_f32(&base, 0.5f);
+
+    memset(&file, '\0', sizeof (file));
+    put_u32(&file, 0xFEFF0901);
+    put_u32(&file, base.len);
+    memcpy(file.bytes + file.len, base.bytes, base.len);
+    file.len += base.len;
+    put_u32(&file, 1);                           /* parameters */
+    put_u32(&file, (passes || states) ? 1 : 0);  /* techniques */
+    put_u32(&file, 0);
+    put_u32(&file, 0);                           /* objects */
+    put_u32(&file, type); put_u32(&file, val); put_u32(&file, 0); put_u32(&file, annotations);
+    if (annotations)
+    {
+        put_u32(&file, type); put_u32(&file, val);
+    } // if
+    if (passes || states)
+    {
+        put_u32(&file, nm); put_u32(&file, 0); put_u32(&file, passes ? passes : 1);
+        put_u32(&file, nm); put_u32(&file, 0); put_u32(&file, states);
+        if (states)
+        {
+            put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, type); put_u32(&file, val);
+        } // if
+    } // if
+    put_u32(&file, 0);                           /* small objects */
+    put_u32(&file, 0);                           /* large objects */
+    memcpy(out, file.bytes, file.len);
+    return file.len;
+} // record_count_effect
+
+/* A-04 (found with R2-02): annotation, pass and state counts sized their arrays through a byte
+ * count kept in 32 bits, so a count large enough to wrap it allocated less than one record and
+ * the loop wrote past it. */
+static void test_annotation_count_wraps_its_array(void)
+{
+    unsigned char bytes[1024];
+    const unsigned int len = record_count_effect(
+        bytes, wrapping_count(sizeof (MOJOSHADER_effectAnnotation)), 0, 0);
+    expect_rejected(bytes, len, "an annotation count that wraps its array size");
+} // test_annotation_count_wraps_its_array
+
+static void test_pass_count_wraps_its_array(void)
+{
+    unsigned char bytes[1024];
+    const unsigned int len = record_count_effect(
+        bytes, 0, wrapping_count(sizeof (MOJOSHADER_effectPass)), 0);
+    expect_rejected(bytes, len, "a pass count that wraps its array size");
+} // test_pass_count_wraps_its_array
+
+static void test_state_count_wraps_its_array(void)
+{
+    unsigned char bytes[1024];
+    const unsigned int len = record_count_effect(
+        bytes, 0, 0, wrapping_count(sizeof (MOJOSHADER_effectState)));
+    expect_rejected(bytes, len, "a state count that wraps its array size");
+} // test_state_count_wraps_its_array
+
+/* The control: the same layout with honest counts loads. */
+static void test_record_counts_honest(void)
+{
+    unsigned char bytes[1024];
+    const unsigned int len = record_count_effect(bytes, 1, 1, 1);
+    MOJOSHADER_effectShaderContext ctx = backend();
+    const MOJOSHADER_effect *effect = MOJOSHADER_compileEffect(bytes, len, NULL, 0, NULL, 0, &ctx);
+    CNA_CHECK((effect != NULL) && (effect->error_count == 0), "honest record counts load");
+    if ((effect != NULL) && (effect->error_count == 0))
+    {
+        CNA_CHECK(effect->params[0].annotation_count == 1, "one annotation");
+        CNA_CHECK(effect->technique_count == 1, "one technique");
+        CNA_CHECK(effect->techniques[0].pass_count == 1, "one pass");
+        CNA_CHECK(effect->techniques[0].passes[0].state_count == 1, "one state");
+    } // if
+    MOJOSHADER_deleteEffect(effect);
+} // test_record_counts_honest
+
 /* A valid effect with one float4 parameter "Scale", one technique/pass, and a pass state of type
  * PIXELSHADERCONSTANT whose large-object block carries a preshader -- so loading it runs the
  * preshader reader and cloning it runs copypreshader. Returns the file length. */
@@ -1020,6 +1117,10 @@ int main(void)
     cna_test_run("value_taller_than_a_matrix", test_value_taller_than_a_matrix);
     cna_test_run("value_struct_member_wider_than_a_register",
                  test_value_struct_member_wider_than_a_register);
+    cna_test_run("record_counts_honest", test_record_counts_honest);
+    cna_test_run("annotation_count_wraps_its_array", test_annotation_count_wraps_its_array);
+    cna_test_run("pass_count_wraps_its_array", test_pass_count_wraps_its_array);
+    cna_test_run("state_count_wraps_its_array", test_state_count_wraps_its_array);
     cna_test_run("xna4_wrapper_truncated_after_skip", test_xna4_wrapper_truncated_after_skip);
     cna_test_run("effect_load_allocation_failures", test_effect_load_allocation_failures);
     cna_test_run("clone_coverage_effect_loads_and_clones", test_clone_coverage_effect_loads_and_clones);

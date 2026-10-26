@@ -700,6 +700,18 @@ static int readvalue(const uint8 *base,
     return 1;
 } // readvalue
 
+// Annotation, parameter, technique, pass and state counts are content, and each sizes an array
+// whose byte count was computed in size_t and stored in 32 bits: a large enough count wrapped it to
+// a few bytes, and the loop that fills the array wrote far past them. Every record is `words` 32-bit
+// words of the stream the caller is about to read, so an honest count fits in what is left of it;
+// the array must also fit in the int the allocator takes. -CNA
+static int record_count_fits(const uint32 count, const uint32 words, const uint32 len,
+                             const size_t elemsize)
+{
+    return (count <= (len / (words * sizeof (uint32)))) &&
+           (count <= (0x7FFFFFFFu / elemsize));
+} // record_count_fits
+
 static int readannotations(const uint32 numannos,
                             const uint8 *base,
                             const uint32 base_len,
@@ -713,6 +725,8 @@ static int readannotations(const uint32 numannos,
 {
     int i;
     if (numannos == 0) return 1;
+    if (!record_count_fits(numannos, 2, *len, sizeof (MOJOSHADER_effectAnnotation)))
+        return 0;
 
     const uint32 siz = sizeof(MOJOSHADER_effectAnnotation) * numannos;
     *annotations = (MOJOSHADER_effectAnnotation *) m(siz, d);
@@ -748,6 +762,8 @@ static int readparameters(const uint32 numparams,
 {
     int i;
     if (numparams == 0) return 1;
+    if (!record_count_fits(numparams, 4, *len, sizeof (MOJOSHADER_effectParam)))
+        return 0;
 
     uint32 siz = sizeof(MOJOSHADER_effectParam) * numparams;
     *params = (MOJOSHADER_effectParam *) m(siz, d);
@@ -802,6 +818,8 @@ static int readstates(const uint32 numstates,
 {
     int i;
     if (numstates == 0) return 1;
+    if (!record_count_fits(numstates, 4, *len, sizeof (MOJOSHADER_effectState)))
+        return 0;
 
     const uint32 siz = sizeof (MOJOSHADER_effectState) * numstates;
     *states = (MOJOSHADER_effectState *) m(siz, d);
@@ -844,6 +862,8 @@ static int readpasses(const uint32 numpasses,
 {
     int i;
     if (numpasses == 0) return 1;
+    if (!record_count_fits(numpasses, 3, *len, sizeof (MOJOSHADER_effectPass)))
+        return 0;
 
     const uint32 siz = sizeof (MOJOSHADER_effectPass) * numpasses;
     *passes = (MOJOSHADER_effectPass *) m(siz, d);
@@ -889,6 +909,8 @@ static int readtechniques(const uint32 numtechniques,
 {
     int i;
     if (numtechniques == 0) return 1;
+    if (!record_count_fits(numtechniques, 3, *len, sizeof (MOJOSHADER_effectTechnique)))
+        return 0;
 
     const uint32 siz = sizeof (MOJOSHADER_effectTechnique) * numtechniques;
     *techniques = (MOJOSHADER_effectTechnique *) m(siz, d);
