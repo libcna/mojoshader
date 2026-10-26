@@ -17,3 +17,12 @@ Metal sources are checked by their structure only.
 
 A test needs only valid shader bytecode, written out as tokens in the test, and its expected
 translation. Nothing here renders.
+
+`cna_sdlgpu_tests` covers the SDL_GPU glue and is built only when CMake finds an SDL3 package
+(`-DCMAKE_PREFIX_PATH=<SDL3 install>`). It uses the dynamic SDL_shadercross path, and on Linux the
+build makes a stand-in `libSDL3_shadercross.so.0` for it, so its cases without a GPU device run
+anywhere. The cases that create a GPU device run only with `MOJOSHADER_CNA_SDLGPU_DEVICE=1`, which
+belongs on a private display, not on a desktop someone is using; under AddressSanitizer add
+`ASAN_OPTIONS=detect_leaks=0`, since Vulkan drivers leave process allocations behind:
+
+    MOJOSHADER_CNA_SDLGPU_DEVICE=1 ASAN_OPTIONS=detect_leaks=0 ctest --test-dir <build> -R sdlgpu

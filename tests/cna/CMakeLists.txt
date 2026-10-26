@@ -3,8 +3,8 @@
 # The library is compiled again here, separately from the `mojoshader` target, with every source
 # profile on -- HLSL and Metal included, whatever the host -- and with the switches FNA3D builds
 # MojoShader with, so each emitter is exercised on any machine that can run CMake and a C99
-# compiler. The OpenGL glue is compiled (it needs no GL at build time); the SDL_GPU and Direct3D 11
-# glue are not, since they need SDL3 and d3d11.h.
+# compiler. The OpenGL glue is compiled (it needs no GL at build time); the Direct3D 11 glue is not,
+# since it needs d3d11.h; the SDL_GPU glue only when an SDL3 package is found (see the end).
 
 set(_cna_mojoshader_dir "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 add_library(mojoshader_cna_tests STATIC
@@ -95,3 +95,55 @@ if(MOJOSHADER_SHADERC_LIBRARY)
 endif()
 
 mojoshader_cna_test(cna_printfloat_tests)
+
+# The SDL_GPU glue, when find_package() finds an SDL3 package (CMAKE_PREFIX_PATH). It is built as
+# FNA3D builds it on SDL3 -- USE_SDL3 and SDL's standard library (MOJOSHADER_USE_SDL_STDLIB) -- so
+# the rest of the library is compiled once more with those switches; cna_sdlgpu_tests compiles
+# mojoshader_sdlgpu.c itself, by including it. SDL_shadercross is the dynamic one, loaded with
+# SDL_LoadObject() (no CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC): on Linux a stand-in
+# libSDL3_shadercross.so.0 is built and put first on the test's library path. The cases that need
+# a GPU device run only with MOJOSHADER_CNA_SDLGPU_DEVICE=1 in the environment (cna_sdlgpu_tests.c).
+find_package(SDL3 CONFIG QUIET)
+if(TARGET SDL3::SDL3)
+    add_library(mojoshader_cna_sdl STATIC
+        ${_cna_mojoshader_dir}/mojoshader.c
+        ${_cna_mojoshader_dir}/mojoshader_common.c
+        ${_cna_mojoshader_dir}/mojoshader_effects.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_arb1.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_bytecode.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_common.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_d3d.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_glsl.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_hlsl.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_metal.c
+        ${_cna_mojoshader_dir}/profiles/mojoshader_profile_spirv.c
+        cna_test.c
+    )
+    target_compile_definitions(mojoshader_cna_sdl PUBLIC ${_cna_mojoshader_test_definitions}
+        USE_SDL3 MOJOSHADER_USE_SDL_STDLIB)
+    target_include_directories(mojoshader_cna_sdl PUBLIC "${_cna_mojoshader_dir}" "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(mojoshader_cna_sdl PUBLIC SDL3::SDL3)
+    if(UNIX)
+        target_link_libraries(mojoshader_cna_sdl PUBLIC m)
+    endif()
+
+    add_executable(cna_sdlgpu_tests cna_sdlgpu_tests.c)
+    target_link_libraries(cna_sdlgpu_tests PRIVATE mojoshader_cna_sdl)
+    add_test(NAME cna_sdlgpu_tests COMMAND cna_sdlgpu_tests)
+
+    if(UNIX AND NOT APPLE)
+        set(_cna_shadercross_stub_dir "${CMAKE_CURRENT_BINARY_DIR}/shadercross-stub")
+        add_library(cna_sdlgpu_shadercross_stub SHARED cna_sdlgpu_shadercross_stub.c)
+        set_target_properties(cna_sdlgpu_shadercross_stub PROPERTIES
+            OUTPUT_NAME SDL3_shadercross
+            SOVERSION 0
+            LIBRARY_OUTPUT_DIRECTORY "${_cna_shadercross_stub_dir}")
+        target_link_libraries(cna_sdlgpu_shadercross_stub PRIVATE SDL3::SDL3)
+        add_dependencies(cna_sdlgpu_tests cna_sdlgpu_shadercross_stub)
+        set_tests_properties(cna_sdlgpu_tests PROPERTIES ENVIRONMENT
+            "LD_LIBRARY_PATH=${_cna_shadercross_stub_dir};MOJOSHADER_CNA_SHADERCROSS_STUB=1")
+    endif()
+    message(STATUS "MojoShader CNA tests: SDL_GPU glue tests with SDL3 ${SDL3_VERSION}")
+else()
+    message(STATUS "MojoShader CNA tests: no SDL3 package, SDL_GPU glue tests not built")
+endif()
