@@ -65,6 +65,7 @@ static PFN_SDL_ShaderCross_CompileGraphicsShaderFromSPIRV SDL_ShaderCross_Compil
 
 /* Max entries for each register file type */
 #define MAX_REG_FILE_F 8192
+#define MAX_TEXBEMS 16  /* as mojoshader_opengl.c: one per D3D9 texture stage */
 #define MAX_REG_FILE_I 2047
 #define MAX_REG_FILE_B 2047
 
@@ -112,6 +113,9 @@ struct MOJOSHADER_sdlContext
     int32_t ps_reg_file_i[MAX_REG_FILE_I * 4];
     uint8_t ps_reg_file_b[MAX_REG_FILE_B * 4];
 
+    /* Per texture stage: BUMPENVMAT00, 01, 10, 11, LSCALE, LOFFSET. -CNA */
+    float texbem_state[MAX_TEXBEMS * 6];
+
     uint8_t *uniform_staging;
     uint32_t uniform_staging_length;
 
@@ -132,6 +136,7 @@ struct MOJOSHADER_sdlShaderData
     uint32_t refcount;
     uint32_t samplerSlots;
     int32_t uniformBufferSize;
+    int32_t texbemCount;  /* samplers a ps_1_x TEXBEM/TEXBEML reads -CNA */
 };
 
 struct MOJOSHADER_sdlProgram
@@ -256,6 +261,13 @@ static uint8_t update_uniform_buffer(
     {
         ctx->free_fn(ctx->uniform_staging, ctx->malloc_data);
         ctx->uniform_staging = (uint8_t*) ctx->malloc_fn(shader->uniformBufferSize, ctx->malloc_data);
+        // Out of memory: nothing to stage, and nothing is pushed (the caller skips it). -CNA
+        if (ctx->uniform_staging == NULL)
+        {
+            ctx->uniform_staging_length = 0;
+            out_of_memory();
+            return 0;
+        } // if
         ctx->uniform_staging_length = shader->uniformBufferSize;
     } // if
 
@@ -300,6 +312,29 @@ static uint8_t update_uniform_buffer(
 
         offset += size * 16;
     } // for
+
+    /* A sampler a ps_1_x TEXBEM or TEXBEML reads has two more float4 registers after every
+     * uniform, in sampler order (emit_SPIRV_sampler()): its bump matrix, then its luminance
+     * scale and offset -- exactly what the OpenGL glue appends from the same state. Only ps_1_x
+     * has TEXBEM, and it has no integer or boolean constants for these to precede. -CNA */
+    if (shader->texbemCount > 0)
+    {
+        const MOJOSHADER_parseData *pd = shader->parseData;
+        for (i = 0; i < pd->sampler_count; i++)
+        {
+            float *dstf;
+            if (!pd->samplers[i].texbem)
+                continue;
+            dstf = (float *) (ctx->uniform_staging + offset);
+            if ((pd->samplers[i].index >= 0) && (pd->samplers[i].index < MAX_TEXBEMS))
+                memcpy(dstf, &ctx->texbem_state[6 * pd->samplers[i].index], sizeof (float) * 6);
+            else
+                memset(dstf, '\0', sizeof (float) * 6);
+            dstf[6] = 0.0f;
+            dstf[7] = 0.0f;
+            offset += 32;
+        } // for
+    } // if
 
     return 1; // FIXME: Return 0 when uniform data is unchanged
 } // update_uniform_buffer
@@ -420,6 +455,22 @@ void MOJOSHADER_sdlSetColorTargetCount(MOJOSHADER_sdlContext *ctx, unsigned int 
         ctx->color_target_count = count;
 } // MOJOSHADER_sdlSetColorTargetCount
 
+void MOJOSHADER_sdlSetLegacyBumpMapEnv(MOJOSHADER_sdlContext *ctx, unsigned int sampler,
+                                       float mat00, float mat01, float mat10, float mat11,
+                                       float lscale, float loffset)
+{
+    float *dstf;
+    if ((ctx == NULL) || (sampler >= MAX_TEXBEMS))
+        return;
+    dstf = ctx->texbem_state + (6 * sampler);
+    dstf[0] = mat00;
+    dstf[1] = mat01;
+    dstf[2] = mat10;
+    dstf[3] = mat11;
+    dstf[4] = lscale;
+    dstf[5] = loffset;
+} // MOJOSHADER_sdlSetLegacyBumpMapEnv
+
 const char *MOJOSHADER_sdlGetError(
     MOJOSHADER_sdlContext *ctx
 ) {
@@ -534,6 +585,13 @@ MOJOSHADER_sdlShaderData *MOJOSHADER_sdlCompileShader(
     {
         shader->uniformBufferSize += SDL_max(pd->uniforms[i].array_count, 1);
     } // for
+    shader->texbemCount = 0;
+    for (i = 0; i < pd->sampler_count; i++)
+    {
+        if (pd->samplers[i].texbem)
+            shader->texbemCount++;
+    } // for
+    shader->uniformBufferSize += 2 * shader->texbemCount;  // see update_uniform_buffer() -CNA
     shader->uniformBufferSize *= 16; // Yes, even the bool registers are this size
 
     return shader;

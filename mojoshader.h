@@ -1966,6 +1966,16 @@ DECLSPEC void MOJOSHADER_d3d11GetBoundShaders(MOJOSHADER_d3d11Context *context,
  *  context from multiple threads, you must protect this call with whatever
  *  thread synchronization technique you have for your other D3D calls.
  */
+/*
+ * Sets the bump-environment state of texture stage (sampler), 0 to 15, that a ps_1_x TEXBEM or
+ *  TEXBEML reading that stage applies; as MOJOSHADER_sdlSetLegacyBumpMapEnv(), for this
+ *  context's shaders. Starts as all zeros.
+ */
+DECLSPEC void MOJOSHADER_d3d11SetLegacyBumpMapEnv(MOJOSHADER_d3d11Context *context,
+                                                  unsigned int sampler, float mat00,
+                                                  float mat01, float mat10, float mat11,
+                                                  float lscale, float loffset);
+
 DECLSPEC void MOJOSHADER_d3d11MapUniformBufferMemory(MOJOSHADER_d3d11Context *context,
                                                      float **vsf, int **vsi, unsigned char **vsb,
                                                      float **psf, int **psi, unsigned char **psb);
@@ -2121,6 +2131,18 @@ DECLSPEC int MOJOSHADER_sdlSetSpirvTransform(MOJOSHADER_sdlContext *context,
  */
 DECLSPEC void MOJOSHADER_sdlSetColorTargetCount(MOJOSHADER_sdlContext *context,
                                                 unsigned int count);
+
+/*
+ * Sets the bump-environment state (Direct3D 9's D3DTSS_BUMPENVMAT00..11, D3DTSS_BUMPENVLSCALE
+ *  and D3DTSS_BUMPENVLOFFSET) of texture stage (sampler), 0 to 15, that a ps_1_x TEXBEM or
+ *  TEXBEML reading that stage applies. It is context state, used by every pixel shader drawn
+ *  afterwards until it is set again, and starts as all zeros. The OpenGL counterpart is
+ *  MOJOSHADER_glSetLegacyBumpMapEnv().
+ */
+DECLSPEC void MOJOSHADER_sdlSetLegacyBumpMapEnv(MOJOSHADER_sdlContext *context,
+                                                unsigned int sampler, float mat00,
+                                                float mat01, float mat10, float mat11,
+                                                float lscale, float loffset);
 
 /* CNA test hook: force an available ShaderCross path on a SPIR-V-capable device. */
 DECLSPEC int MOJOSHADER_sdlSetShaderCrossTestMode(MOJOSHADER_sdlContext *context,

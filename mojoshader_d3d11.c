@@ -146,6 +146,7 @@ typedef struct MOJOSHADER_d3d11Shader
     uint32 refcount;
     ID3D11Buffer *ubo;
     size_t buflen;
+    int texbemCount;  // samplers a ps_1_x TEXBEM/TEXBEML reads -CNA
     unsigned char *constantData;
     unsigned int mapCapacity;
     unsigned int numMaps;
@@ -156,6 +157,7 @@ typedef struct MOJOSHADER_d3d11Shader
 #define MAX_REG_FILE_F 8192
 #define MAX_REG_FILE_I 2047
 #define MAX_REG_FILE_B 2047
+#define MAX_TEXBEMS 16  // as mojoshader_opengl.c: one per D3D9 texture stage -CNA
 
 typedef struct MOJOSHADER_d3d11Context
 {
@@ -173,6 +175,9 @@ typedef struct MOJOSHADER_d3d11Context
     float ps_reg_file_f[MAX_REG_FILE_F * 4];
     int ps_reg_file_i[MAX_REG_FILE_I * 4];
     uint8 ps_reg_file_b[MAX_REG_FILE_B];
+
+    // Per texture stage: BUMPENVMAT00, 01, 10, 11, LSCALE, LOFFSET. -CNA
+    float texbem_state[MAX_TEXBEMS * 6];
 
     // Pointer to the active ID3D11Device.
     ID3D11Device *device;
@@ -294,6 +299,33 @@ static void update_uniform_buffer(
 
         offset += size;
     } // for
+
+    // A sampler a ps_1_x TEXBEM or TEXBEML reads has two more float4 registers after every
+    // uniform, in sampler order (emit_HLSL_sampler()): its bump matrix, then its luminance
+    // scale and offset, as the OpenGL glue appends them. -CNA
+    if (shader->texbemCount > 0)
+    {
+        const MOJOSHADER_parseData *pd = shader->parseData;
+        for (i = 0; i < pd->sampler_count; i++)
+        {
+            float texbem[8];
+            if (!pd->samplers[i].texbem)
+                continue;
+            memset(texbem, '\0', sizeof (texbem));
+            if ((pd->samplers[i].index >= 0) && (pd->samplers[i].index < MAX_TEXBEMS))
+                memcpy(texbem, &ctx->texbem_state[6 * pd->samplers[i].index], sizeof (float) * 6);
+            if ((offset + sizeof (texbem)) <= shader->buflen)
+            {
+                dst = shader->constantData + offset;
+                if (memcmp(dst, texbem, sizeof (texbem)) != 0)
+                {
+                    memcpy(dst, texbem, sizeof (texbem));
+                    needsUpdate = 1;
+                } // if
+            } // if
+            offset += sizeof (texbem);
+        } // for
+    } // if
 
     if (needsUpdate)
     {
@@ -743,7 +775,13 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
     retval->ubo = NULL;
     retval->constantData = NULL;
     retval->buflen = 0;
+    retval->texbemCount = 0;
     retval->numMaps = 0;
+    for (i = 0; i < pd->sampler_count; i++)
+    {
+        if (pd->samplers[i].texbem)
+            retval->texbemCount++;
+    } // for
 
     // Allocate shader maps
     retval->mapCapacity = 4; // arbitrary!
@@ -754,7 +792,7 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
     memset(retval->shaderMaps, '\0', retval->mapCapacity * sizeof(d3d11ShaderMap));
 
     // Create the uniform buffer, if needed
-    if (pd->uniform_count > 0)
+    if ((pd->uniform_count > 0) || (retval->texbemCount > 0))
     {
         // Calculate how big we need to make the buffer
         for (i = 0; i < pd->uniform_count; i++)
@@ -762,6 +800,7 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
             const int arrayCount = pd->uniforms[i].array_count;
             retval->buflen += (arrayCount ? arrayCount : 1) * 16;
         } // for
+        retval->buflen += 32 * retval->texbemCount;  // see update_uniform_buffer() -CNA
 
         D3D11_BUFFER_DESC bdesc;
         bdesc.ByteWidth = next_highest_alignment(retval->buflen);
@@ -775,6 +814,15 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
 
         // Additionally allocate a CPU-side staging buffer
         retval->constantData = (unsigned char *) m(retval->buflen, d);
+        if (retval->constantData == NULL)  // -CNA
+        {
+            out_of_memory();
+            if (retval->ubo != NULL)
+                ID3D11Buffer_Release((ID3D11Buffer*) retval->ubo);
+            f(retval->shaderMaps, d);
+            f(retval, d);
+            goto compile_shader_fail;
+        } // if
         memset(retval->constantData, '\0', retval->buflen);
     } // if
 
@@ -873,6 +921,22 @@ void MOJOSHADER_d3d11GetBoundShaders(
     *vshader = ctx->vertexShader;
     *pshader = ctx->pixelShader;
 } // MOJOSHADER_d3d11GetBoundShaders
+
+void MOJOSHADER_d3d11SetLegacyBumpMapEnv(MOJOSHADER_d3d11Context *ctx, unsigned int sampler,
+                                         float mat00, float mat01, float mat10, float mat11,
+                                         float lscale, float loffset)
+{
+    float *dstf;
+    if ((ctx == NULL) || (sampler >= MAX_TEXBEMS))
+        return;
+    dstf = ctx->texbem_state + (6 * sampler);
+    dstf[0] = mat00;
+    dstf[1] = mat01;
+    dstf[2] = mat10;
+    dstf[3] = mat11;
+    dstf[4] = lscale;
+    dstf[5] = loffset;
+} // MOJOSHADER_d3d11SetLegacyBumpMapEnv
 
 void MOJOSHADER_d3d11MapUniformBufferMemory(
     MOJOSHADER_d3d11Context *ctx,
