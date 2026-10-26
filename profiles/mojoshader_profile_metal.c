@@ -2224,6 +2224,8 @@ void emit_METAL_TEXBEM(Context *ctx)
 } // emit_METAL_TEXBEM
 
 
+// The luminance is src.z * BUMPENVLSCALE + BUMPENVLOFFSET: <sampler>_texbeml holds
+//  (lscale, loffset), <sampler>_texbem the 2x2 matrix, whose .y is not the offset. -CNA
 void emit_METAL_TEXBEML(Context *ctx)
 {
     // !!! FIXME: this code counts on the register not having swizzles, etc.
@@ -2241,7 +2243,7 @@ void emit_METAL_TEXBEML(Context *ctx)
     make_METAL_destarg_assign(ctx, code, sizeof (code),
         "(%s_texture.sample(%s, float2(%s.x + (%s_texbem.x * %s.x) + (%s_texbem.z * %s.y),"
         " %s.y + (%s_texbem.y * %s.x) + (%s_texbem.w * %s.y)))) *"
-        " ((%s.z * %s_texbeml.x) + %s_texbem.y)",
+        " ((%s.z * %s_texbeml.x) + %s_texbeml.y)",
         sampler, sampler,
         dst, sampler, src, sampler, src,
         dst, sampler, src, sampler, src,

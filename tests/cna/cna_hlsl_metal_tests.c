@@ -1,5 +1,5 @@
 /**
- * HLSL and Metal emitter regressions (A2v2 A-12, A-02, A-03).
+ * HLSL and Metal emitter regressions (A2v2 A-12, A-02, A-03, and TEXBEML's luminance offset).
  *
  * Every case translates a valid shader with both profiles and checks the structure of the
  * source. Where the shaderc library was found at configure time ($MOJOSHADER_SHADERC), the HLSL
@@ -26,6 +26,7 @@
 enum { CNA_POSITION = 0, CNA_TEXCOORD = 5, CNA_COLOR = 10, CNA_FOG = 11 };
 
 #define CNA_MOVA 46  /* D3DSIO_MOVA */
+#define CNA_TEXBEML 68  /* D3DSIO_TEXBEML */
 
 /* dcl_2d s# (D3DSTT_2D in bits 27-30). */
 #define CNA_DCL_2D (0x80000000u | (2u << 27))
@@ -865,6 +866,36 @@ static void test_explicit_main_ret(void)
                     plain_vs2_hlsl, plain_vs2_metal);
 } // test_explicit_main_ret
 
+/* -- TEXBEML ------------------------------------------------------------------------------- */
+
+/* ps_1_1: tex t0; texbeml t1, t0; mov r0, t1. */
+static const uint32_t texbeml_ps11[] = {
+    CNA_PS(1, 1),
+    CNA_TEX, CNA_DST(CNA_TEXTURE, 0, 0xF),
+    CNA_TEXBEML, CNA_DST(CNA_TEXTURE, 1, 0xF), CNA_SRC(CNA_TEXTURE, 0),
+    CNA_MOV, CNA_DST(CNA_TEMP, 0, 0xF), CNA_SRC(CNA_TEXTURE, 1),
+    CNA_END
+};
+
+static void test_texbeml_luminance(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const MOJOSHADER_parseData *pd = cna_translate(profile, texbeml_ps11,
+            sizeof (texbeml_ps11), "texbeml");
+        CNA_CHECK(pd->output != NULL, "there is source");
+        /* lum = t0.z * BUMPENVLSCALE + BUMPENVLOFFSET, both in s1_texbeml. */
+        CNA_CHECK(cna_output_contains(pd, "* ((t0.z * s1_texbeml.x) + s1_texbeml.y)"),
+                  "the luminance is offset by BUMPENVLOFFSET");
+        CNA_CHECK(!cna_output_contains(pd, "+ s1_texbem.y)"),
+                  "not by the bump matrix's second element");
+        cna_check_hlsl_compiles(pd, profile, "texbeml");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_texbeml_luminance
+
 /* With an argument, runs only the case of that name (one case per process, so an abort on an
  * unfixed tree does not hide the others). */
 int main(int argc, char **argv)
@@ -880,7 +911,8 @@ int main(int argc, char **argv)
         { "nested_subroutines", test_nested_subroutines },
         { "sampling_subroutine", test_sampling_subroutine },
         { "relative_subroutine", test_relative_subroutine },
-        { "packed_register_in_subroutine", test_packed_register_in_subroutine }
+        { "packed_register_in_subroutine", test_packed_register_in_subroutine },
+        { "texbeml_luminance", test_texbeml_luminance }
     };
     size_t i;
     for (i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
