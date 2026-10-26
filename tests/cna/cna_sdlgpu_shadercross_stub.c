@@ -30,19 +30,23 @@ typedef struct SDL_ShaderCross_SPIRV_Info
     SDL_PropertiesID props;
 } SDL_ShaderCross_SPIRV_Info;
 
-/* The tests' stand-in for SDL_ShaderCross_GraphicsShaderMetadata; the caller only SDL_free()s it. */
-typedef struct StubMetadata
+/*
+ * The tests' own SDL_ShaderCross_GraphicsShaderMetadata; the caller only passes it on and
+ * SDL_free()s it. The functions take and return it by that name, as the glue's pointer types do:
+ * a call through a pointer of another function type is undefined, and clang's -fsanitize=function
+ * stops on it (a `void *` return here did).
+ */
+typedef struct SDL_ShaderCross_GraphicsShaderMetadata
 {
     Uint32 reflected_bytes;
-} StubMetadata;
+} SDL_ShaderCross_GraphicsShaderMetadata;
 
 SDL_DECLSPEC SDL_GPUShaderFormat SDLCALL SDL_ShaderCross_GetSPIRVShaderFormats(void);
-SDL_DECLSPEC void *SDLCALL SDL_ShaderCross_ReflectGraphicsSPIRV(const Uint8 *bytecode,
-                                                               size_t bytecode_size,
-                                                               SDL_PropertiesID props);
+SDL_DECLSPEC SDL_ShaderCross_GraphicsShaderMetadata *SDLCALL SDL_ShaderCross_ReflectGraphicsSPIRV(
+    const Uint8 *bytecode, size_t bytecode_size, SDL_PropertiesID props);
 SDL_DECLSPEC SDL_GPUShader *SDLCALL SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
-    SDL_GPUDevice *device, const SDL_ShaderCross_SPIRV_Info *info, const void *resource_info,
-    SDL_PropertiesID props);
+    SDL_GPUDevice *device, const SDL_ShaderCross_SPIRV_Info *info,
+    const SDL_ShaderCross_GraphicsShaderMetadata *metadata, SDL_PropertiesID props);
 
 SDL_GPUShaderFormat SDLCALL SDL_ShaderCross_GetSPIRVShaderFormats(void)
 {
@@ -50,28 +54,28 @@ SDL_GPUShaderFormat SDLCALL SDL_ShaderCross_GetSPIRVShaderFormats(void)
     return SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL;
 }
 
-void *SDLCALL SDL_ShaderCross_ReflectGraphicsSPIRV(const Uint8 *bytecode, size_t bytecode_size,
-                                                  SDL_PropertiesID props)
+SDL_ShaderCross_GraphicsShaderMetadata *SDLCALL SDL_ShaderCross_ReflectGraphicsSPIRV(
+    const Uint8 *bytecode, size_t bytecode_size, SDL_PropertiesID props)
 {
-    StubMetadata *metadata;
+    SDL_ShaderCross_GraphicsShaderMetadata *metadata;
     (void) props;
     if ((bytecode == NULL) || (bytecode_size < 20))
     {
         SDL_SetError("cna shadercross stub: no SPIR-V to reflect");
         return NULL;
     }
-    metadata = (StubMetadata *) SDL_calloc(1, sizeof (StubMetadata));
+    metadata = (SDL_ShaderCross_GraphicsShaderMetadata *) SDL_calloc(1, sizeof (*metadata));
     if (metadata != NULL)
         metadata->reflected_bytes = (Uint32) bytecode_size;
     return metadata;
 }
 
 SDL_GPUShader *SDLCALL SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
-    SDL_GPUDevice *device, const SDL_ShaderCross_SPIRV_Info *info, const void *resource_info,
-    SDL_PropertiesID props)
+    SDL_GPUDevice *device, const SDL_ShaderCross_SPIRV_Info *info,
+    const SDL_ShaderCross_GraphicsShaderMetadata *metadata, SDL_PropertiesID props)
 {
     (void) device;
-    (void) resource_info;
+    (void) metadata;
     (void) props;
     SDL_SetError("cna shadercross stub: compiled no %s shader",
                  ((info != NULL) && (info->shader_stage == SDL_SHADERCROSS_SHADERSTAGE_VERTEX))
