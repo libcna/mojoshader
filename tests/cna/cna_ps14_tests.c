@@ -21,6 +21,13 @@
 
 #define PS14_PHASE 0x0000fffdu
 #define PS14_TEXKILL 65
+#define PS14_SWZ_XYZZ 0xa4
+#define PS14_SWZ_XYWW 0xf4
+#define PS14_DZ 9
+#define PS14_DW 10
+/* A source token with a selector and a source modifier. */
+#define PS14_SRC(type, num, swizzle, mod) \
+    (CNA_SRC_SWZ(type, num, swizzle) | ((uint32_t) (mod) << 24))
 
 /* ps_1_1: `texcoord t0`, then r0 = t0. The mutable ps_1_1..1_3 texture register. */
 static const uint32_t ps11_texcoord[] = {
@@ -46,6 +53,15 @@ static const uint32_t ps14_texcrd_t5[] = {
     CNA_END
 };
 
+/* `texcrd r0.xy, t3_dw.xyw`: the projective form, x and y divided by w. */
+static const uint32_t ps14_texcrd_dw[] = {
+    CNA_PS(1, 4),
+    CNA_OP(CNA_TEXCRD, 0), CNA_DST(CNA_TEMP, 0, 3),
+    PS14_SRC(CNA_TEXTURE, 3, PS14_SWZ_XYWW, PS14_DW),
+    CNA_OP(CNA_MOV, 0), CNA_DST(CNA_TEMP, 0, 12), CNA_SRC(CNA_CONST, 0),
+    CNA_END
+};
+
 /* `texld r0, t0` and `texld r1, t3`: stages 0 and 1 at two texture coordinates. */
 static const uint32_t ps14_texld_t[] = {
     CNA_PS(1, 4),
@@ -68,6 +84,19 @@ static const uint32_t ps14_texld_phase2[] = {
     CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEMP, 1),
     CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 2, 15), CNA_SRC(CNA_TEMP, 2),
     CNA_OP(CNA_MUL, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEMP, 0), CNA_SRC(CNA_TEMP, 2),
+    CNA_END
+};
+
+/* Projective sampling: `texld r0, r3_dz.xyz` after a phase, and `texld r1, t1_dw.xyw`. */
+static const uint32_t ps14_texld_projective[] = {
+    CNA_PS(1, 4),
+    CNA_OP(CNA_TEXCRD, 0), CNA_DST(CNA_TEMP, 3, 7), CNA_SRC(CNA_TEXTURE, 2),
+    PS14_PHASE,
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 0, 15),
+    PS14_SRC(CNA_TEMP, 3, PS14_SWZ_XYZZ, PS14_DZ),
+    CNA_OP(CNA_TEXLD, 0), CNA_DST(CNA_TEMP, 1, 15),
+    PS14_SRC(CNA_TEXTURE, 1, PS14_SWZ_XYWW, PS14_DW),
+    CNA_OP(CNA_MUL, 0), CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEMP, 0), CNA_SRC(CNA_TEMP, 1),
     CNA_END
 };
 
@@ -105,11 +134,18 @@ static const Ps14Case cases[] = {
       { "#define ps_t0 gl_TexCoord[0]", "ps_r0.xyz = ps_t0.xyz;", "ps_r0.w = ps_c0.w;" } },
     { "ps14_texcrd_t5", ps14_texcrd_t5, sizeof (ps14_texcrd_t5), 0x20, -1, 0, 0,
       { "#define ps_t5 io_5_5", "ps_r0.xyz = ps_t5.xyz;", NULL } },
+    { "ps14_texcrd_dw", ps14_texcrd_dw, sizeof (ps14_texcrd_dw), 0x08, -1, 0, 1,
+      { "ps_r0.xy = ((ps_t3.w == 0.0) ? vec2(1.0) : (ps_t3.xy / ps_t3.w));", NULL, NULL } },
     { "ps14_texld_t", ps14_texld_t, sizeof (ps14_texld_t), 0x09, -1, 2, 0,
       { "ps_r0 = texture2D(ps_s0, ps_t0.xy);", "ps_r1 = texture2D(ps_s1, ps_t3.xy);", NULL } },
     { "ps14_texld_phase2", ps14_texld_phase2, sizeof (ps14_texld_phase2), 0x12, -1, 3, 0,
       { "ps_r2 = texture2D(ps_s2, ps_t4.xy);", "ps_r0 = texture2D(ps_s0, ps_r1.xy);",
         "ps_r2 = texture2D(ps_s2, ps_r2.xy);" } },
+    { "ps14_texld_projective", ps14_texld_projective, sizeof (ps14_texld_projective), 0x06,
+      -1, 2, 2,
+      { "ps_r0 = texture2D(ps_s0, ((ps_r3.z == 0.0) ? vec2(1.0) : (ps_r3.xy / ps_r3.z)));",
+        "ps_r1 = texture2D(ps_s1, ((ps_t1.w == 0.0) ? vec2(1.0) : (ps_t1.xy / ps_t1.w)));",
+        NULL } },
     { "ps14_texld_cube", ps14_texld_cube, sizeof (ps14_texld_cube), 0x04, 0, 1, 0,
       { "ps_r0 = textureCube(ps_s0, ps_t2.xyz);", NULL, NULL } },
     { "ps14_texkill", ps14_texkill, sizeof (ps14_texkill), 0x02, -1, 0, 0,

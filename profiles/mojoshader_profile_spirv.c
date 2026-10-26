@@ -1186,6 +1186,7 @@ static SpirvResult spv_load_srcarg(Context *ctx, const size_t idx, const int wri
     else
         result = spv_loadreg(ctx, reg);
 
+    const SpirvResult unswizzled = result;  // _dz and _dw divide by the register's own z or w.
     result = spv_swizzle(ctx, result, arg->swizzle, writemask);
 
     switch (arg->src_mod)
@@ -1273,15 +1274,45 @@ static SpirvResult spv_load_srcarg(Context *ctx, const size_t idx, const int wri
             break;
         } // case
 
-        // case SRCMOD_DZ:
-        //     fail(ctx, "SRCMOD_DZ unsupported"); return buf; // !!! FIXME
-        //     postmod_str = "_dz";
-        //     break;
+        case SRCMOD_DZ:
+        case SRCMOD_DW:
+        {
+            /* ps_1_4's projective TEXLD/TEXCRD source: the selected components divided by the
+             * register's own z (_dz) or w (_dw), and all ones where that divisor is zero -- the
+             * GLSL profile's `((r.w == 0.0) ? vecN(1.0) : (r.xy / r.w))`. The parser admits
+             * these modifiers on those two instructions only. -CNA */
+            if ((unswizzled.tid == 0) || (result.tid == 0))
+                return result;  // the load was already refused.
 
-        // case SRCMOD_DW:
-        //     fail(ctx, "SRCMOD_DW unsupported"); return buf; // !!! FIXME
-        //     postmod_str = "_dw";
-        //     break;
+            const uint32 dim =
+                (result.tid == ctx->spirv.tid[STI_VEC4]) ? 4 :
+                (result.tid == ctx->spirv.tid[STI_VEC3]) ? 3 :
+                (result.tid == ctx->spirv.tid[STI_VEC2]) ? 2 : 1;
+            uint32 tid_float = spv_get_type(ctx, STI_FLOAT);
+            uint32 tid_bool = spv_get_type(ctx, spv_change_base_type_vec_dim(STI_BOOL, dim));
+            uint32 id_zero = spv_get_zero(ctx, result.tid);
+            uint32 id_one = spv_get_one(ctx, result.tid);
+            uint32 id_divisor = spv_bumpid(ctx);
+            spv_emit(ctx, 5, SpvOpCompositeExtract, tid_float, id_divisor, unswizzled.id,
+                     (arg->src_mod == SRCMOD_DZ) ? 2 : 3);
+            if (dim > 1)
+            {
+                uint32 id_splat = spv_bumpid(ctx);
+                spv_emit_part(ctx, 3 + dim, 3, SpvOpCompositeConstruct, result.tid, id_splat);
+                for (uint32 i = 0; i < dim; i++)
+                    spv_emit_word(ctx, id_divisor);
+                id_divisor = id_splat;
+            } // if
+
+            uint32 id_is_zero = spv_bumpid(ctx);
+            uint32 id_quotient = spv_bumpid(ctx);
+            uint32 id_new = spv_bumpid(ctx);
+            spv_emit(ctx, 5, SpvOpFOrdEqual, tid_bool, id_is_zero, id_divisor, id_zero);
+            spv_emit(ctx, 5, SpvOpFDiv, result.tid, id_quotient, result.id, id_divisor);
+            spv_emit(ctx, 6, SpvOpSelect, result.tid, id_new, id_is_zero, id_one, id_quotient);
+            result.id = id_new;
+            break;
+        } // case
 
         case SRCMOD_ABSNEGATE:
         {
