@@ -4640,7 +4640,9 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
             preshader->literals = (double *) Malloc(ctx, len);
             if (preshader->literals == NULL)
                 return;  // oh well.
-            const double *litptr = (const double *) (clit.tokens + 2);
+            // A byte pointer: the doubles are only as aligned as the words holding them, and
+            //  a `const double *` to them is a misaligned access (UBSan reports it). -CNA
+            const uint8 *litptr = (const uint8 *) (clit.tokens + 2);
             // !!! FIXME: This should be a SWAPDBL loop, but in addition to
             // !!! FIXME:  never having an implementation, it turns out some
             // !!! FIXME:  MinGW versions do not optimize this correctly, which

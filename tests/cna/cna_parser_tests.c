@@ -177,6 +177,36 @@ static void test_preshader_valid_still_parses(void)
     cna_words_free(&w);
 } // test_preshader_valid_still_parses
 
+/*
+ * R6-01 (2026-10-26 remediation review, round 2): a CLIT block's literals are doubles that a
+ * preshader -- inside an effect file, say -- holds only word-aligned. parse_preshader() copied
+ * them through a `const double *`, which clang's UndefinedBehaviorSanitizer reports as a
+ * misaligned load when the literals sit at an address that is not a multiple of eight. The
+ * preshader here starts one word into its buffer, which puts its literals there; they must
+ * parse, and parse to their values.
+ */
+static void test_preshader_literals_word_aligned(void)
+{
+    CnaWords w;
+    unsigned char *buffer;
+    const MOJOSHADER_preshader *pre;
+    unsigned int i;
+
+    memset(&w, '\0', sizeof (w));
+    cna_words_push(&w, 0);  /* the padding word, not part of the preshader */
+    cna_push_preshader(&w, "Scale", NULL);
+    buffer = (unsigned char *) cna_exact_copy(w.at, w.count * 4);
+    CNA_CHECK(((size_t) (buffer + 4 + 16) & 7) != 0, "the literals are not 8-byte aligned");
+    pre = MOJOSHADER_parsePreshader(buffer + 4, (unsigned int) ((w.count - 1) * 4),
+                                    NULL, NULL, NULL);
+    CNA_CHECK((pre != NULL) && (pre->literal_count == 4), "the preshader and its four literals");
+    for (i = 0; (pre != NULL) && (i < pre->literal_count); i++)
+        CNA_CHECK(pre->literals[i] == 2.0, "each literal keeps its value");
+    MOJOSHADER_freePreshader(pre);
+    free(buffer);
+    cna_words_free(&w);
+} // test_preshader_literals_word_aligned
+
 /* A-05: parse_preshader read its version token before checking the buffer held one. */
 static void test_preshader_empty_buffer(void)
 {
@@ -601,5 +631,6 @@ int main(void)
     cna_test_run("shader_ctab_span_truncated", test_shader_ctab_span_truncated);
     cna_test_run("packed_fog_dcl_masks", test_packed_fog_dcl_masks);
     cna_test_run("standalone_fog_masks", test_standalone_fog_masks);
+    cna_test_run("preshader_literals_word_aligned", test_preshader_literals_word_aligned);
     return cna_test_finish();
 } // main
