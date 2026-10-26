@@ -579,6 +579,9 @@ void emit_METAL_start(Context *ctx, const char *profilestr)
             ctx->mainfn = StrDup(ctx, "FragmentShader");
     } // if
 
+    // MSL's as_type<float>() reinterprets a same-sized value's bits; it needs no header. -CNA
+    ctx->float_from_bits_function = "as_type<float>";
+
     set_output(ctx, &ctx->mainline);
     ctx->indent++;
 } // emit_METAL_start

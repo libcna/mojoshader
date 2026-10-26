@@ -619,6 +619,10 @@ void emit_HLSL_start(Context *ctx, const char *profilestr)
             ctx->mainfn = StrDup(ctx, "PixelShader");
     } // if
 
+    // Shader Model 4, which this output is compiled for (vs_4_0/ps_4_0), has asfloat(uint),
+    // which keeps every bit, a NaN's payload included. -CNA
+    ctx->float_from_bits_function = "asfloat";
+
     set_output(ctx, &ctx->mainline);
     ctx->indent++;
 } // emit_HLSL_start

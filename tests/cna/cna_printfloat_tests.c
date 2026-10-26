@@ -303,7 +303,7 @@ static void test_exhaustive(void)
 
     if ((enabled == NULL) || (strcmp(enabled, "1") != 0))
     {
-        printf("  [ SKIP ] set MOJOSHADER_CNA_PRINTFLOAT_EXHAUSTIVE=1 to check all 2^32 patterns\n");
+        printf("  [ SKIP ] MOJOSHADER_CNA_PRINTFLOAT_EXHAUSTIVE=1 checks all 2^32 patterns\n");
         return;
     } // if
     if ((shard != NULL) && ((sscanf(shard, "%u/%u", &index, &stride) != 2) ||
@@ -539,6 +539,175 @@ static void test_profiles_finite(void)
     } // for
 } // test_profiles_finite
 
+/* The three shapes a DEF row can be written in: a vertex shader macro, a pixel shader const,
+ * and a relatively addressed constant array. */
+#define DEF_VS(ROW0, ROW1) \
+{ \
+    CNA_VS(2, 0), DEF4(0, ROW0), DEF4(1, ROW1), \
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 0xF), \
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0), \
+    CNA_OP(CNA_ADD, 3), CNA_DST(CNA_ATTROUT, 0, 0xF), CNA_SRC(CNA_CONST, 0), \
+        CNA_SRC(CNA_CONST, 1), \
+    CNA_END \
+}
+#define DEF_PS(ROW0, ROW1) \
+{ \
+    CNA_PS(2, 0), DEF4(0, ROW0), DEF4(1, ROW1), \
+    CNA_OP(CNA_ADD, 3), CNA_DST(CNA_TEMP, 0, 0xF), CNA_SRC(CNA_CONST, 0), CNA_SRC(CNA_CONST, 1), \
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 0xF), CNA_SRC(CNA_TEMP, 0), \
+    CNA_END \
+}
+#define DEF_RELATIVE_VS(ROW0, ROW1) \
+{ \
+    CNA_VS(2, 0), CTAB_VS_2_0, DEF4(0, ROW0), DEF4(1, ROW1), \
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 0xF), \
+    CNA_OP(CNA_MOVA, 2), CNA_DST(CNA_ADDR, 0, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0x00), \
+    CNA_OP(CNA_MOV, 3), CNA_DST(CNA_RASTOUT, 0, 0xF), CNA_SRC(CNA_CONST, 0) | CNA_RELATIVE, \
+        CNA_SRC_SWZ(CNA_ADDR, 0, 0x00), \
+    CNA_END \
+}
+
+// Both infinities among finite values; then NaNs: quiet, negative with a payload, signalling.
+#define INF_ROW0 0x7f800000u, 0xff800000u, 0x3f800000u, 0x3f000000u
+#define INF_ROW1 0xff800000u, 0x00000000u, 0x7f800000u, 0x80000000u
+#define NAN_ROW0 0x7fc00000u, 0xffc00001u, 0x7f800001u, 0x3f800000u
+#define NAN_ROW1 0x3f000000u, 0x7fc00000u, 0x00000000u, 0x7fc00000u
+
+static const uint32_t inf_vs[] = DEF_VS(INF_ROW0, INF_ROW1);
+static const uint32_t inf_ps[] = DEF_PS(INF_ROW0, INF_ROW1);
+static const uint32_t inf_relative_vs[] = DEF_RELATIVE_VS(INF_ROW0, INF_ROW1);
+static const uint32_t nan_vs[] = DEF_VS(NAN_ROW0, NAN_ROW1);
+static const uint32_t nan_ps[] = DEF_PS(NAN_ROW0, NAN_ROW1);
+static const uint32_t nan_relative_vs[] = DEF_RELATIVE_VS(NAN_ROW0, NAN_ROW1);
+
+/* How `profile` must write one constant: its literal when finite, else the language's own
+ * spelling. Returns 0 where the profile has none and must refuse the shader. */
+static int expected_spelling(const char *profile, const uint32_t bits, char *text,
+                             const size_t size)
+{
+    if ((bits & 0x7f800000u) != 0x7f800000u)
+    {
+        MOJOSHADER_printFloat(text, size, float_from_bits(bits));
+        return 1;
+    } // if
+    if (strcmp(profile, MOJOSHADER_PROFILE_HLSL) == 0)
+        snprintf(text, size, "asfloat(0x%08xu)", (unsigned) bits);  // Shader Model 4
+    else if (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0)
+        snprintf(text, size, "as_type<float>(0x%08xu)", (unsigned) bits);
+    else if ((strcmp(profile, MOJOSHADER_PROFILE_GLSLES3) == 0) && ((bits & 0x007fffffu) == 0))
+        snprintf(text, size, "%s1.0e39", (bits >> 31) ? "-" : "");  // ESSL 3.00 section 4.1.4
+    else
+        return 0;
+    return 1;
+} // expected_spelling
+
+/* A profile with no spelling must refuse the shader and say why, instead of writing text no
+ * compiler takes. */
+static void expect_refusal(const char *profile, const char *what, const uint32_t *tokens,
+                           const size_t bytes, const char *reason)
+{
+    const MOJOSHADER_parseData *pd = cna_parse(profile, tokens, bytes);
+    int explained = 0;
+    int i;
+    for (i = 0; (pd != NULL) && (i < pd->error_count); i++)
+    {
+        if ((pd->errors[i].error != NULL) && (strstr(pd->errors[i].error, reason) != NULL))
+            explained = 1;
+    } // for
+    if (!explained)
+    {
+        fprintf(stderr, "  %s %s: expected the error `%s`, got %d error(s) and:\n%s\n",
+                profile, what, reason, pd ? pd->error_count : -1,
+                (pd && pd->output) ? pd->output : "(no output)");
+    } // if
+    CNA_CHECK(explained, "a profile without a spelling refuses the constant, saying why");
+    MOJOSHADER_freeParseData(pd);
+} // expect_refusal
+
+static void check_nonfinite_rows(const uint32_t rows[2][4], const char *reason,
+                                 const uint32_t *vs, const size_t vs_bytes,
+                                 const uint32_t *ps, const size_t ps_bytes,
+                                 const uint32_t *relative_vs, const size_t relative_vs_bytes)
+{
+    int i;
+    for (i = 0; i < TEXT_PROFILE_COUNT; i++)
+    {
+        const TextProfile *profile = &text_profiles[i];
+        char storage[2][256];
+        const char *needles[2];
+        int spellable = 1;
+        int row;
+        for (row = 0; row < 2; row++)
+        {
+            char values[4][48];
+            int column;
+            for (column = 0; column < 4; column++)
+            {
+                spellable &= expected_spelling(profile->name, rows[row][column], values[column],
+                                               sizeof (values[column]));
+            } // for
+            snprintf(storage[row], sizeof (storage[row]), "%s%s, %s, %s, %s%s",
+                     profile->vector_open, values[0], values[1], values[2], values[3],
+                     profile->vector_close);
+            needles[row] = storage[row];
+        } // for
+
+        if (!spellable)
+        {
+            expect_refusal(profile->name, "vs_2_0 DEF", vs, vs_bytes, reason);
+            expect_refusal(profile->name, "ps_2_0 DEF", ps, ps_bytes, reason);
+            expect_refusal(profile->name, "vs_2_0 relative DEF", relative_vs,
+                           relative_vs_bytes, reason);
+        } // if
+        else
+        {
+            expect_translation(profile->name, "vs_2_0 DEF", vs, vs_bytes, needles, 2, 1);
+            expect_translation(profile->name, "ps_2_0 DEF", ps, ps_bytes, needles, 2, 1);
+            expect_translation(profile->name, "vs_2_0 relative DEF", relative_vs,
+                               relative_vs_bytes, needles, 2, profile->constant_arrays ? 2 : 1);
+        } // else
+    } // for
+} // check_nonfinite_rows
+
+static void test_profiles_infinity(void)
+{
+    static const uint32_t rows[2][4] = { { INF_ROW0 }, { INF_ROW1 } };
+    check_nonfinite_rows(rows, "Float constant +inf (0x7f800000) cannot be written",
+                         inf_vs, sizeof (inf_vs), inf_ps, sizeof (inf_ps),
+                         inf_relative_vs, sizeof (inf_relative_vs));
+} // test_profiles_infinity
+
+static void test_profiles_nan(void)
+{
+    static const uint32_t rows[2][4] = { { NAN_ROW0 }, { NAN_ROW1 } };
+    check_nonfinite_rows(rows, "Float constant NaN (0x7fc00000) cannot be written",
+                         nan_vs, sizeof (nan_vs), nan_ps, sizeof (nan_ps),
+                         nan_relative_vs, sizeof (nan_relative_vs));
+} // test_profiles_nan
+
+/* SPIR-V writes constants as binary words, never through floatstr(), and must keep taking
+ * every one of them. */
+static void test_spirv_nonfinite(void)
+{
+    static const char *const profiles[] = { MOJOSHADER_PROFILE_SPIRV, MOJOSHADER_PROFILE_GLSPIRV };
+    const uint32_t *const shaders[] = { inf_ps, nan_ps, inf_vs, nan_vs };
+    const size_t sizes[] = { sizeof (inf_ps), sizeof (nan_ps), sizeof (inf_vs), sizeof (nan_vs) };
+    int i;
+    int j;
+    for (i = 0; i < 2; i++)
+    {
+        for (j = 0; j < 4; j++)
+        {
+            const MOJOSHADER_parseData *pd = cna_parse(profiles[i], shaders[j], sizes[j]);
+            char name[64];
+            snprintf(name, sizeof (name), "printfloat_nonfinite_%d_%s", j, profiles[i]);
+            CNA_CHECK(cna_report_errors(name, pd) == 0, "SPIR-V takes non-finite constants");
+            CNA_CHECK(cna_spirv_validate(pd, name) != 0, "the SPIR-V module validates");
+            MOJOSHADER_freeParseData(pd);
+        } // for
+    } // for
+} // test_spirv_nonfinite
+
 static const char *find_comma_locale(void)
 {
     static const char *const candidates[] =
@@ -619,6 +788,9 @@ int main(void)
     cna_test_run("exhaustive", test_exhaustive);
     cna_test_run("buffer_bounds", test_buffer_bounds);
     cna_test_run("profiles_finite", test_profiles_finite);
+    cna_test_run("profiles_infinity", test_profiles_infinity);
+    cna_test_run("profiles_nan", test_profiles_nan);
+    cna_test_run("spirv_nonfinite", test_spirv_nonfinite);
     cna_test_run("locale_independence", test_locale_independence);
     return cna_test_finish();
 } // main

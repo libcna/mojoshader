@@ -645,6 +645,13 @@ void emit_GLSL_start(Context *ctx, const char *profilestr)
     else if (strcmp(profilestr, MOJOSHADER_PROFILE_GLSLES3) == 0)
     {
         ctx->profile_supports_glsles3 = 1;
+        // GLSL ES 3.00 converts a float literal too large for single precision to infinity
+        // (section 4.1.4), and a literal is a constant expression, as a pixel shader's global
+        // `const vec4` DEF needs. Its uintBitsToFloat leaves an inf or NaN encoding unspecified
+        // (section 8.3) and NaNs need not exist at all (4.5.1), so a NaN DEF is refused. GLSL
+        // 1.10, 1.20 and GLSL ES 1.00 have no bit casts and make neither an overflowing literal
+        // nor a division by zero an infinity, so those profiles refuse both. -CNA
+        ctx->float_infinity_literal = "1.0e39";
         push_output(ctx, &ctx->preflight);
         output_line(ctx, "#version 300 es");
         output_line(ctx, "#define texture2D texture");

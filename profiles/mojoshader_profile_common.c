@@ -197,11 +197,45 @@ void output_blank_line(Context *ctx)
 void floatstr(Context *ctx, char *buf, size_t bufsize, float f,
               int leavedecimal)
 {
-    const size_t len = MOJOSHADER_printFloat(buf, bufsize, f);
+    size_t len;
     char *dot;
     char *exponent;
     char *end;
+    uint32 bits;
 
+    memcpy(&bits, &f, sizeof (bits));
+    if ((bits & 0x7F800000) == 0x7F800000)
+    {
+        // Infinity or NaN. These used to come out as "inf" (for either sign) or "NaN", which
+        // no shader compiler accepts. -CNA
+        const int is_nan = ((bits & 0x007FFFFF) != 0);
+        const int negative = ((bits & 0x80000000) != 0);
+        int written;
+        if (bufsize > 0)
+            buf[0] = '\0';
+        if (ctx->float_from_bits_function != NULL)
+        {
+            written = snprintf(buf, bufsize, "%s(0x%08xu)",
+                               ctx->float_from_bits_function, (uint) bits);
+        } // if
+        else if ((ctx->float_infinity_literal != NULL) && (!is_nan))
+        {
+            written = snprintf(buf, bufsize, "%s%s", negative ? "-" : "",
+                               ctx->float_infinity_literal);
+        } // else if
+        else
+        {
+            failf(ctx, "Float constant %s (0x%08x) cannot be written in this profile: its "
+                  "language defines no spelling for it",
+                  is_nan ? "NaN" : (negative ? "-inf" : "+inf"), (uint) bits);
+            return;
+        } // else
+        if ((written < 0) || (((size_t) written) >= bufsize))
+            fail(ctx, "BUG: internal buffer is too small");
+        return;
+    } // if
+
+    len = MOJOSHADER_printFloat(buf, bufsize, f);
     if (len >= bufsize)
     {
         fail(ctx, "BUG: internal buffer is too small");
@@ -209,9 +243,7 @@ void floatstr(Context *ctx, char *buf, size_t bufsize, float f,
     } // if
 
     dot = strchr(buf, '.');
-    if (dot == NULL)
-        return;  // "inf", "-inf" or "nan": no number to trim.
-
+    assert(dot != NULL);  // every finite spelling has one
     exponent = strchr(dot, 'e');
     end = (exponent != NULL) ? exponent : (buf + len);
     if ((!leavedecimal) && (end == dot + 2) && (dot[1] == '0'))

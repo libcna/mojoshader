@@ -273,6 +273,13 @@ typedef struct Context
 #if SUPPORT_PROFILE_HLSL
     char hlsl_outpos_name[16];
 #endif
+
+    // How floatstr() writes an infinite or NaN constant, which no shader language has a plain
+    // literal for: a profile whose language has a bit cast from uint names its function, and
+    // the constant becomes name(0x7f800000u); one that can only spell an infinity names that
+    // literal, negated for -inf. Whatever neither covers fails the translation. -CNA
+    const char *float_from_bits_function;
+    const char *float_infinity_literal;
 } Context;
 
 // Use these macros so we can remove all bits of these profiles from the build.
