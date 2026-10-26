@@ -166,6 +166,8 @@ typedef struct SpirvContext
     uint32 id_vs_main_end;
 #endif // SUPPORT_PROFILE_GLSPIRV
     SpirvMode mode;
+    // Set once main()'s function end has been emitted; any later end closes a subroutine. -CNA
+    int main_ended;
     uint32 hasdepth;
     // ext. glsl instructions have been imported
     uint32 idext;

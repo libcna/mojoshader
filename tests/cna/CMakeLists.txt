@@ -68,3 +68,5 @@ target_sources(cna_build_tests PRIVATE $<TARGET_OBJECTS:mojoshader_cna_version_h
 add_dependencies(cna_build_tests mojoshader_cna_opengl_noflip)
 
 mojoshader_cna_test(cna_effect_tests)
+
+mojoshader_cna_test(cna_spirv_tests)

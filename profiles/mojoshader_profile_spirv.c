@@ -1662,8 +1662,72 @@ static void spv_emit_func_lit(Context *ctx)
     spv_output_name(ctx, ctx->spirv.id_func_lit, "LIT");
 } // spv_emit_func_lit
 
+/*
+ * Shader Model 3 lets one vertex output or pixel input register carry several semantics in
+ * disjoint write masks (fxc packs two float2 as `dcl_texcoord0 o1.xy` + `dcl_texcoord1 o1.zw`),
+ * one attribute-list entry each (add_attribute_register()). Each semantic needs a Location of its
+ * own, so such a register is a Private vec4 that the shader's code reads and writes, and every
+ * semantic gets its own Input or Output variable -- its id kept in its attribute entry's
+ * spirv.iddecl. Lanes keep their positions, which is how Direct3D 9 links them and how the GLSL
+ * profile copies them: a vertex shader copies the register to each of its semantics where main()
+ * returns, a pixel shader assembles the register from its semantics' lanes, (0, 0, 0, 1) where
+ * none supplies one, before main()'s first instruction. -CNA
+ */
+static int spv_register_is_packed(Context *ctx, const RegisterType regtype, const int regnum)
+{
+    const RegisterList *item;
+    int count = 0;
+
+    if (!shader_version_atleast(ctx, 3, 0))
+        return 0;
+    if (!((shader_is_vertex(ctx) && (regtype == REG_TYPE_OUTPUT)) ||
+          (shader_is_pixel(ctx) && (regtype == REG_TYPE_INPUT))))
+        return 0;
+
+    for (item = ctx->attributes.next; item != NULL; item = item->next)
+    {
+        if ((item->regtype == regtype) && (item->regnum == regnum) && (++count > 1))
+            return 1;
+    } // for
+    return 0;
+} // spv_register_is_packed
+
+static void spv_emit_packed_vs_outputs(Context *ctx)
+{
+    RegisterList *item;
+    for (item = ctx->attributes.next; item != NULL; item = item->next)
+    {
+        if (!spv_register_is_packed(ctx, item->regtype, item->regnum))
+            continue;
+
+        // A declared register the shader never writes is reported by emit_SPIRV_attribute().
+        RegisterList *r = reglist_find(&ctx->used_registers, item->regtype, item->regnum);
+        if (r == NULL)
+            continue;
+        if (r->spirv.iddecl == 0)
+            r->spirv.iddecl = spv_bumpid(ctx);
+        if (item->spirv.iddecl == 0)
+            item->spirv.iddecl = spv_bumpid(ctx);
+
+        uint32 tid_vec4 = spv_get_type(ctx, STI_VEC4);
+        uint32 id_value = spv_bumpid(ctx);
+        push_output(ctx, &ctx->mainline);
+        spv_emit(ctx, 4, SpvOpLoad, tid_vec4, id_value, r->spirv.iddecl);
+        spv_emit(ctx, 3, SpvOpStore, item->spirv.iddecl, id_value);
+        pop_output(ctx);
+    } // for
+} // spv_emit_packed_vs_outputs
+
 static void spv_emit_func_end(Context *ctx)
 {
+    // D3D9 requires main() first, so the first function end is main()'s.
+    if (!ctx->spirv.main_ended)
+    {
+        ctx->spirv.main_ended = 1;
+        if (shader_is_vertex(ctx))
+            spv_emit_packed_vs_outputs(ctx);
+    } // if
+
     push_output(ctx, &ctx->mainline);
 
 #if SUPPORT_PROFILE_GLSPIRV
@@ -2355,6 +2419,141 @@ void emit_SPIRV_sampler(Context *ctx, int stage, TextureType ttype, int texbem)
     spv_output_regname(ctx, result, REG_TYPE_SAMPLER, stage);
 } // emit_SPIRV_sampler
 
+// One semantic of a packed register (see spv_register_is_packed()).
+static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterType regtype,
+                                      int regnum, MOJOSHADER_usage usage, int index,
+                                      int wmask, int flags)
+{
+    RegisterList *item = NULL;
+    RegisterList *first = NULL;
+    RegisterList *scan;
+    char regname[64];
+    char name[96];
+    uint32 tid;
+
+    for (scan = ctx->attributes.next; scan != NULL; scan = scan->next)
+    {
+        if ((scan->regtype != regtype) || (scan->regnum != regnum))
+            continue;
+        if (first == NULL)
+            first = scan;
+        if ((scan->usage == usage) && (scan->index == (unsigned int) index))
+            item = scan;
+        // Fog and point size are scalar outputs, and the parser narrows every write to a
+        // register declared as one to .x, so it cannot share that register with another
+        // semantic. Refuse it rather than emit a module that does not validate.
+        if ((scan->usage == MOJOSHADER_USAGE_FOG) ||
+            (scan->usage == MOJOSHADER_USAGE_POINTSIZE))
+        {
+            fail(ctx, "Fog or point size cannot share a register with another semantic.");
+            return;
+        } // if
+    } // for
+    if (item == NULL)
+    {
+        fail(ctx, "BUG: packed attribute is missing from the attribute list");
+        return;
+    } // if
+    if (shader_is_pixel(ctx) && (flags & MOD_CENTROID))  // !!! FIXME, as for any other input.
+    {
+        failf(ctx, "centroid unsupported in %s profile", ctx->profile->name);
+        return;
+    } // if
+
+    ctx->spirv.inoutcount += 1;
+    if (r->usage == MOJOSHADER_USAGE_UNKNOWN)
+        r->usage = usage;
+
+    if (item == first)
+    {
+        if (r->spirv.iddecl == 0)
+            r->spirv.iddecl = spv_bumpid(ctx);
+        push_output(ctx, &ctx->mainline_intro);
+        tid = spv_get_type(ctx, STI_PTR_VEC4_P);
+        spv_emit(ctx, 4, SpvOpVariable, tid, r->spirv.iddecl, SpvStorageClassPrivate);
+        pop_output(ctx);
+        spv_output_regname(ctx, r->spirv.iddecl, regtype, regnum);
+
+        if (shader_is_pixel(ctx))
+        {
+            uint32 tid_vec4 = spv_get_type(ctx, STI_VEC4);
+            uint32 id_0 = spv_getscalarf(ctx, 0.0f);
+            uint32 id_1 = spv_getscalarf(ctx, 1.0f);
+            uint32 id_init = spv_bumpid(ctx);
+            push_output(ctx, &ctx->mainline_top);
+            spv_emit(ctx, 3 + 4, SpvOpCompositeConstruct, tid_vec4, id_init,
+                     id_0, id_0, id_0, id_1);
+            spv_emit(ctx, 3, SpvOpStore, r->spirv.iddecl, id_init);
+            pop_output(ctx);
+        } // if
+    } // if
+
+    if (item->spirv.iddecl == 0)
+        item->spirv.iddecl = spv_bumpid(ctx);
+
+    if (shader_is_vertex(ctx))
+    {
+        push_output(ctx, &ctx->mainline_intro);
+        tid = spv_get_type(ctx, STI_PTR_VEC4_O);
+        spv_emit(ctx, 4, SpvOpVariable, tid, item->spirv.iddecl, SpvStorageClassOutput);
+        pop_output(ctx);
+        spv_link_vs_attributes(ctx, item->spirv.iddecl, usage, index);
+    } // if
+    else
+    {
+        SpirvPatchTable *table = &ctx->spirv.patch_table;
+        const int pointcoord = (usage == MOJOSHADER_USAGE_TEXCOORD) && (index == 0);
+        uint32 tid_vec4 = spv_get_type(ctx, STI_VEC4);
+        uint32 tid_pvec4i = spv_get_type(ctx, STI_PTR_VEC4_I);
+        uint32 id_loaded = spv_bumpid(ctx);
+        uint32 id_current = spv_bumpid(ctx);
+        uint32 id_merged = spv_bumpid(ctx);
+        int lane;
+
+        if (pointcoord)
+        {
+            // TEXCOORD0 may be gl_PointCoord (a vec2) at link time; the same patch points as
+            // the unpacked TEXCOORD0 input in emit_SPIRV_attribute().
+            table->tid_pvec2i = spv_get_type(ctx, STI_PTR_VEC2_I);
+            table->tid_vec2 = spv_get_type(ctx, STI_VEC2);
+            table->tid_pvec4i = tid_pvec4i;
+            table->tid_vec4 = tid_vec4;
+        } // if
+
+        push_output(ctx, &ctx->mainline_intro);
+        if (pointcoord)
+            table->pointcoord_var_offset = buffer_size(ctx->mainline_intro) >> 2;
+        spv_emit(ctx, 4, SpvOpVariable, tid_pvec4i, item->spirv.iddecl, SpvStorageClassInput);
+        pop_output(ctx);
+        spv_link_ps_attributes(ctx, item->spirv.iddecl, regtype, usage, index);
+
+        push_output(ctx, &ctx->mainline_top);
+        if (pointcoord)
+            table->pointcoord_load_offset = buffer_size(ctx->mainline_top) >> 2;
+        spv_emit(ctx, 4, SpvOpLoad, tid_vec4, id_loaded, item->spirv.iddecl);
+        if (pointcoord)
+        {
+            uint32 id_widened = spv_bumpid(ctx);
+            spv_emit(ctx, 9, SpvOpVectorShuffle, tid_vec4, id_widened, id_loaded, id_loaded,
+                     0, 1, 2, 3);
+            id_loaded = id_widened;
+        } // if
+        spv_emit(ctx, 4, SpvOpLoad, tid_vec4, id_current, r->spirv.iddecl);
+        // Components 0-3 are the semantic's, 4-7 the register's current value.
+        spv_emit_part(ctx, 5 + 4, 5, SpvOpVectorShuffle, tid_vec4, id_merged,
+                      id_loaded, id_current);
+        for (lane = 0; lane < 4; lane++)
+            spv_emit_word(ctx, (wmask & (1 << lane)) ? (uint32) lane : (uint32) (4 + lane));
+        spv_emit(ctx, 3, SpvOpStore, r->spirv.iddecl, id_merged);
+        pop_output(ctx);
+    } // else
+
+    get_SPIRV_varname_in_buf(ctx, regtype, regnum, regname, sizeof (regname));
+    snprintf(name, sizeof (name), "%s_%s_semantic%d_%d", ctx->shader_type_str, regname,
+             (int) usage, index);
+    spv_output_name(ctx, item->spirv.iddecl, name);
+} // spv_emit_packed_attribute
+
 void emit_SPIRV_attribute(Context *ctx, RegisterType regtype, int regnum,
                           MOJOSHADER_usage usage, int index, int wmask,
                           int flags)
@@ -2367,6 +2566,12 @@ void emit_SPIRV_attribute(Context *ctx, RegisterType regtype, int regnum,
     if (r == NULL)
     {
         fail(ctx, "Shader declares an attribute for a register it never used.");
+        return;
+    } // if
+
+    if (spv_register_is_packed(ctx, regtype, regnum))
+    {
+        spv_emit_packed_attribute(ctx, r, regtype, regnum, usage, index, wmask, flags);
         return;
     } // if
 
@@ -2800,6 +3005,16 @@ void emit_SPIRV_finalize(Context *ctx)
     p = p->next;
     while (p)
     {
+        // A packed register is Private; its semantics' own variables are the interface.
+        if (spv_register_is_packed(ctx, p->regtype, p->regnum))
+        {
+            if (p->spirv.iddecl)
+                spv_add_interface_id(ctx, p->spirv.iddecl,
+                                     interface_ids, &interface_count, interface_max);
+            p = p->next;
+            continue;
+        } // if
+
         r = spv_getreg(ctx, p->regtype, p->regnum);
         if (r)
         {
