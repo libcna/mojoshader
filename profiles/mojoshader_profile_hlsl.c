@@ -1411,8 +1411,11 @@ void emit_HLSL_LOOP(Context *ctx)
     assert(ctx->source_args[0].regnum == 0);  // in case they add aL1 someday.
     output_line(ctx, "{");
     ctx->indent++;
-    output_line(ctx, "const int aLend = %s.x + %s.y;", var, var);
-    output_line(ctx, "for (int aL = %s.y; aL < aLend; aL += %s.z) {", var, var);
+    // i#.x is the iteration count and i#.z only the step added to aL, so the loop counts its
+    //  iterations itself: comparing aL against x+y runs fewer than x iterations for a step
+    //  above one, and never ends for a step of zero or below. As in the GLSL profile. -CNA
+    output_line(ctx, "for (int aL = %s.y, aL_count = 0; aL_count < %s.x; "
+                     "aL += %s.z, aL_count++) {", var, var, var);
     ctx->indent++;
 } // emit_HLSL_LOOP
 

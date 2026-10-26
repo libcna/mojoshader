@@ -80,3 +80,14 @@ mojoshader_cna_test(cna_parser_tests)
 mojoshader_cna_test(cna_glsl_tests)
 
 mojoshader_cna_test(cna_opengl_tests)
+
+# The HLSL and Metal emitters. shaderc (glslang's HLSL front end), when its library is found,
+# compiles every HLSL source the test produces; the test loads it at run time, so only the
+# library is needed, not its headers. Without it those compilations are reported as skipped.
+find_library(MOJOSHADER_SHADERC_LIBRARY NAMES shaderc_shared libshaderc.so.1 shaderc)
+mojoshader_cna_test(cna_hlsl_metal_tests)
+target_link_libraries(cna_hlsl_metal_tests PRIVATE ${CMAKE_DL_LIBS})
+if(MOJOSHADER_SHADERC_LIBRARY)
+    set_property(TEST cna_hlsl_metal_tests APPEND PROPERTY
+        ENVIRONMENT "MOJOSHADER_SHADERC=${MOJOSHADER_SHADERC_LIBRARY}")
+endif()
