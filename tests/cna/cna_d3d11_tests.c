@@ -272,6 +272,76 @@ static void test_refused_buffer_frees_staging(void)
     free(ctx);
 } // test_refused_buffer_frees_staging
 
+/*
+ * R5-03 (2026-10-26 remediation review, round 2): MOJOSHADER_d3d11CompileShader() with each of
+ * its allocations failing in turn -- the parse's, the shader wrapper, its shader-map array and
+ * the constant buffer's staging copy. Each failure must return NULL, say "out of memory", and
+ * leave nothing allocated. Failing the wrapper set no error, and failing the map array set none
+ * and leaked the wrapper.
+ */
+/* The parse's own failure reads "Out of memory", the glue's "out of memory". */
+static int says_out_of_memory(const char *error)
+{
+    return (strcmp(error, "Out of memory") == 0) || (strcmp(error, "out of memory") == 0);
+} // says_out_of_memory
+
+static void check_allocation_failures(const char *what, const uint32_t *tokens, size_t bytes)
+{
+    char label[128];
+    int fail_at, complete = 0, refused = 0;
+
+    for (fail_at = 1; fail_at < 4096; fail_at++)
+    {
+        MOJOSHADER_d3d11Context *ctx;
+        MOJOSHADER_d3d11Shader *shader;
+
+        cna_alloc_reset(0);
+        ctx = make_context();
+        if (ctx == NULL)
+            break;
+        set_error("");
+        cna_alloc_reset(fail_at);
+        shader = MOJOSHADER_d3d11CompileShader(ctx, "main", (const unsigned char *) tokens,
+                                               (unsigned int) bytes, NULL, 0, NULL, 0);
+        if (!cna_alloc_hit())
+        {
+            snprintf(label, sizeof (label), "%s: the compile without a failure succeeds", what);
+            CNA_CHECK(shader != NULL, label);
+            if (shader != NULL)
+                MOJOSHADER_d3d11DeleteShader(ctx, shader);
+            CNA_CHECK(cna_alloc_live() == 0, label);
+            free(ctx);
+            complete = 1;
+            break;
+        } // if
+
+        refused++;
+        snprintf(label, sizeof (label), "%s, allocation %d refused: no shader comes back",
+                 what, fail_at);
+        CNA_CHECK(shader == NULL, label);
+        if (shader != NULL)
+            MOJOSHADER_d3d11DeleteShader(ctx, shader);
+        snprintf(label, sizeof (label), "%s, allocation %d refused: the error says so", what, fail_at);
+        if (!says_out_of_memory(MOJOSHADER_d3d11GetError(ctx)))
+            fprintf(stderr, "  %s (error: '%s')\n", label, MOJOSHADER_d3d11GetError(ctx));
+        CNA_CHECK(says_out_of_memory(MOJOSHADER_d3d11GetError(ctx)), label);
+        snprintf(label, sizeof (label), "%s, allocation %d refused: nothing is left allocated",
+                 what, fail_at);
+        if (cna_alloc_live() != 0)
+            fprintf(stderr, "  %s (%d live)\n", label, cna_alloc_live());
+        CNA_CHECK((cna_alloc_live() == 0) && (buffers_live == 0), label);
+        free(ctx);
+    } // for
+    snprintf(label, sizeof (label), "%s: the sweep reaches a compile without a failure", what);
+    CNA_CHECK(complete && (refused > 3), label);
+} // check_allocation_failures
+
+static void test_compile_allocation_failures(void)
+{
+    check_allocation_failures("vs_2_0 c0", uniform_vs2, sizeof (uniform_vs2));
+    check_allocation_failures("ps_1_1 TEXBEM", texbem_ps11, sizeof (texbem_ps11));
+} // test_compile_allocation_failures
+
 static const uint32_t fog_alone_z_vs3[] = CNA_FOG_ALONE_VS3(0x4);
 static const uint32_t fog_alone_z_ps3[] = CNA_FOG_ALONE_PS3(0x4, 0xAA);
 
@@ -325,6 +395,7 @@ int main(void)
     cna_test_run("texbem_zero_state", test_texbem_zero_state);
     cna_test_run("uniform_zero_state", test_uniform_zero_state);
     cna_test_run("refused_buffer_frees_staging", test_refused_buffer_frees_staging);
+    cna_test_run("compile_allocation_failures", test_compile_allocation_failures);
     cna_test_run("fog_pair_rewrite", test_fog_pair_rewrite);
     return cna_test_finish();
 } // main

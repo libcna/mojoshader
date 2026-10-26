@@ -752,6 +752,7 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
     MOJOSHADER_malloc m = ctx->malloc_fn;
     MOJOSHADER_free f = ctx->free_fn;
     void *d = ctx->malloc_data;
+    MOJOSHADER_d3d11Shader *retval = NULL;
     int i;
 
     const MOJOSHADER_parseData *pd = MOJOSHADER_parse("hlsl", mainfn, tokenbuf,
@@ -766,9 +767,13 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
         goto compile_shader_fail;
     } // if
 
-    MOJOSHADER_d3d11Shader *retval = (MOJOSHADER_d3d11Shader *) m(sizeof(MOJOSHADER_d3d11Shader), d);
+    // Every failure below says why and frees what was made before it. -CNA
+    retval = (MOJOSHADER_d3d11Shader *) m(sizeof(MOJOSHADER_d3d11Shader), d);
     if (retval == NULL)
+    {
+        out_of_memory();
         goto compile_shader_fail;
+    } // if
 
     retval->parseData = pd;
     retval->refcount = 1;
@@ -787,7 +792,10 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
     retval->mapCapacity = 4; // arbitrary!
     retval->shaderMaps = (d3d11ShaderMap *) m(retval->mapCapacity * sizeof(d3d11ShaderMap), d);
     if (retval->shaderMaps == NULL)
+    {
+        out_of_memory();
         goto compile_shader_fail;
+    } // if
 
     memset(retval->shaderMaps, '\0', retval->mapCapacity * sizeof(d3d11ShaderMap));
 
@@ -811,8 +819,6 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
         if (retval->constantData == NULL)  // -CNA
         {
             out_of_memory();
-            f(retval->shaderMaps, d);
-            f(retval, d);
             goto compile_shader_fail;
         } // if
         memset(retval->constantData, '\0', bytewidth);
@@ -835,6 +841,12 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
     return retval;
 
 compile_shader_fail:
+    if (retval != NULL)
+    {
+        if (retval->shaderMaps != NULL)
+            f(retval->shaderMaps, d);
+        f(retval, d);
+    } // if
     MOJOSHADER_freeParseData(pd);
     return NULL;
 } // MOJOSHADER_d3d11CompileShader
