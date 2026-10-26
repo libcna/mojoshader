@@ -331,6 +331,81 @@ static void test_value_struct_member_count_out_of_range(void)
     expect_rejected(bytes, len, "value struct member count out of range");
 } // test_value_struct_member_count_out_of_range
 
+/* One numeric parameter of the given class, columns and rows, with `words` words of default data
+ * behind its type -- as many as the claimed shape would copy, so only the shape is wrong. */
+static unsigned int shaped_param_effect(unsigned char *out, uint32_t klass, uint32_t columns,
+                                        uint32_t rows, unsigned int words)
+{
+    Image base;
+    uint32_t empty, nm, type, val;
+    unsigned int i;
+    memset(&base, '\0', sizeof (base));
+    empty = base.len; put_u32(&base, 0);
+    nm = put_string(&base, "P");
+    type = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, klass);
+    put_u32(&base, nm); put_u32(&base, empty); put_u32(&base, 0);
+    put_u32(&base, columns); put_u32(&base, rows);
+    val = base.len;
+    for (i = 0; i < words; i++)
+        put_f32(&base, 0.5f + (float) i);
+    return one_param_effect(out, &base, type, val, 0);
+} // shaped_param_effect
+
+/* R2-02: a value's rows are copied into four-float registers, columncount words each; a vector
+ * five wide copied 20 bytes into the 16 allocated for it, past the end of the allocation. */
+static void test_value_wider_than_a_register(void)
+{
+    unsigned char bytes[1024];
+    unsigned int len = shaped_param_effect(bytes, MOJOSHADER_SYMCLASS_VECTOR, 5, 1, 5);
+    expect_rejected(bytes, len, "a vector five columns wide");
+    len = shaped_param_effect(bytes, MOJOSHADER_SYMCLASS_MATRIX_ROWS, 8, 2, 16);
+    expect_rejected(bytes, len, "a matrix eight columns wide");
+} // test_value_wider_than_a_register
+
+/* R2-02: columncount << 2 was computed in 32 bits before being widened, so 2^30 + 1 columns
+ * became a four-byte row that passed every bound and loaded with a column count of a billion. */
+static void test_value_column_count_wraps(void)
+{
+    unsigned char bytes[1024];
+    const unsigned int len = shaped_param_effect(bytes, MOJOSHADER_SYMCLASS_VECTOR,
+                                                 0x40000001u, 1, 1);
+    expect_rejected(bytes, len, "a column count that wraps the byte count");
+} // test_value_column_count_wraps
+
+/* R2-02: no Direct3D 9 type has more than four rows; the count was taken as it stood. */
+static void test_value_taller_than_a_matrix(void)
+{
+    unsigned char bytes[1024];
+    const unsigned int len = shaped_param_effect(bytes, MOJOSHADER_SYMCLASS_MATRIX_ROWS, 4, 5, 20);
+    expect_rejected(bytes, len, "a matrix five rows tall");
+} // test_value_taller_than_a_matrix
+
+/* R2-02: the same for a struct member: each member row is copied into its own register, and a
+ * member eight floats wide wrote 32 bytes into the struct's last 16. */
+static void test_value_struct_member_wider_than_a_register(void)
+{
+    unsigned char bytes[1024];
+    Image base;
+    uint32_t empty, nm, mname, type;
+    unsigned int len, i;
+    memset(&base, '\0', sizeof (base));
+    empty = base.len; put_u32(&base, 0);
+    nm = put_string(&base, "S");
+    mname = put_string(&base, "M");
+    type = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_VOID); put_u32(&base, MOJOSHADER_SYMCLASS_STRUCT);
+    put_u32(&base, nm); put_u32(&base, empty); put_u32(&base, 0);
+    put_u32(&base, 1);                                             /* one member */
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, mname); put_u32(&base, empty); put_u32(&base, 0);
+    put_u32(&base, 8); put_u32(&base, 1);                          /* eight columns, one row */
+    for (i = 0; i < 8; i++)                                        /* its eight defaults */
+        put_f32(&base, 0.25f * (float) i);
+    len = one_param_effect(bytes, &base, type, 0, 0);
+    expect_rejected(bytes, len, "a struct member eight columns wide");
+} // test_value_struct_member_wider_than_a_register
+
 /* A valid effect with one float4 parameter "Scale", one technique/pass, and a pass state of type
  * PIXELSHADERCONSTANT whose large-object block carries a preshader -- so loading it runs the
  * preshader reader and cloning it runs copypreshader. Returns the file length. */
@@ -940,6 +1015,11 @@ int main(void)
     cna_test_run("value_value_offset_out_of_range", test_value_value_offset_out_of_range);
     cna_test_run("value_object_index_out_of_range", test_value_object_index_out_of_range);
     cna_test_run("value_struct_member_count_out_of_range", test_value_struct_member_count_out_of_range);
+    cna_test_run("value_wider_than_a_register", test_value_wider_than_a_register);
+    cna_test_run("value_column_count_wraps", test_value_column_count_wraps);
+    cna_test_run("value_taller_than_a_matrix", test_value_taller_than_a_matrix);
+    cna_test_run("value_struct_member_wider_than_a_register",
+                 test_value_struct_member_wider_than_a_register);
     cna_test_run("xna4_wrapper_truncated_after_skip", test_xna4_wrapper_truncated_after_skip);
     cna_test_run("effect_load_allocation_failures", test_effect_load_allocation_failures);
     cna_test_run("clone_coverage_effect_loads_and_clones", test_clone_coverage_effect_loads_and_clones);

@@ -466,6 +466,14 @@ static int readvalue(const uint8 *base,
         value->type.columns = columncount;
         value->type.rows = rowcount;
 
+        // Each row is stored padded to one four-float register, and columncount words of it are
+        // copied from the content: a row wider than four would copy past its register, the last
+        // one past the allocation, and a columncount of 2^30 or more wrapped the byte counts
+        // below. No Direct3D 9 type has more than four rows or columns, so both are capped
+        // before anything is computed from them. -CNA
+        if ((columncount > 4) || (rowcount > 4))
+            return 0;
+
         // value_count is 4 * rowcount padded registers, times the array length; the source read
         // is columncount words per register row. Both come from content: compute them wide,
         // refuse anything that would overflow or outrun the base region, then copy. -CNA
@@ -473,9 +481,12 @@ static int readvalue(const uint8 *base,
         if (numelements > 0)
             rows *= numelements;
         const uint64 vcount = rows * 4u;
-        const uint64 srcspan = (uint64) (columncount << 2) * rows;
+        const uint64 srcspan = ((uint64) columncount << 2) * rows;
         if ((base_len != 0) &&
             ((vcount > base_len) || ((uint64) valoffset + srcspan > base_len)))
+            return 0;
+        // The allocator takes the byte count as an int. -CNA
+        if (vcount > (0x7FFFFFFFu / 4))
             return 0;
         value->value_count = (unsigned int) vcount;
         const uint64 bytes = vcount * 4u;
@@ -505,6 +516,9 @@ static int readvalue(const uint8 *base,
             value->value_count = numstates;
 
             const uint64 siz = (uint64) sizeof (MOJOSHADER_effectSamplerState) * numstates;
+            // The allocator takes the byte count as an int; memset below takes all of it. -CNA
+            if (siz > 0x7FFFFFFFu)
+                return 0;
             value->values = m((int) siz, d);
             if (value->values == NULL)
                 return 0;
@@ -612,6 +626,11 @@ static int readvalue(const uint8 *base,
             mem->info.member_count = 0;
             mem->info.members = NULL;
 
+            // As for a plain value: each member row is copied into its own four-float register,
+            // so a member wider than four would write past it. -CNA
+            if ((mem->info.columns > 4) || (mem->info.rows > 4))
+                return 0;
+
             uint64 memsize = (uint64) 4 * mem->info.rows;
             if (mem->info.elements > 0)
                 memsize *= mem->info.elements;
@@ -620,12 +639,17 @@ static int readvalue(const uint8 *base,
 
         if ((base_len != 0) && (structsize > base_len))
             return 0;
+        // value_count * 4 below is the allocation size, an int for the allocator. -CNA
+        if (structsize > (0x7FFFFFFFu / 4))
+            return 0;
         value->type.columns = (unsigned int) structsize;
         value->type.rows = 1;
         uint64 vcount = structsize;
         if (numelements > 0)
             vcount *= numelements;
         if ((base_len != 0) && (vcount > base_len))
+            return 0;
+        if (vcount > (0x7FFFFFFFu / 4))
             return 0;
         value->value_count = (unsigned int) vcount;
 
@@ -651,12 +675,13 @@ static int readvalue(const uint8 *base,
                 siz = value->type.members[j].info.rows * (elements ? elements : 1);
                 for (k = 0; k < (int) siz; k++)
                 {
-                    if (base_len != 0)
-                    {
-                        if (((uint64) dst_offset + 4 > value->value_count) ||
-                            ((uint64) typeptr_off + src_offset + (columns << 2) > base_len))
-                            return 0;
-                    } // if
+                    // The destination register has to hold the copy whether or not the source
+                    // span is known. -CNA
+                    if ((uint64) dst_offset + 4 > value->value_count)
+                        return 0;
+                    if ((base_len != 0) &&
+                        ((uint64) typeptr_off + src_offset + (columns << 2) > base_len))
+                        return 0;
                     memcpy(value->valuesF + dst_offset,
                            typeptr + src_offset, /* Yes, typeptr. -flibit */
                            columns << 2);
