@@ -19,9 +19,38 @@ endif()
 
 set(repo "${TEST_WORKDIR}/merge-repo")
 set(gendir "${TEST_WORKDIR}/gen")
+set(isolation "${TEST_WORKDIR}/git-isolation")
 file(REMOVE_RECURSE "${TEST_WORKDIR}")
 file(MAKE_DIRECTORY "${repo}")
 file(MAKE_DIRECTORY "${gendir}")
+
+# R6-02: every git command below -- the fixture's and the generation module's -- runs with
+# configuration of its own. Only this process's environment changes; nothing the developer has
+# configured is touched. The user's and the system's git configuration are empty files here (a
+# global merge.verifySignatures=true refused the unsigned side branch's merge, and a global
+# core.hooksPath or init.templateDir would run the developer's hooks), the repository starts from
+# an empty template, so it has no hooks, the identity is the fixture's, and a repository named by
+# the calling environment (GIT_DIR and friends, as a git hook that runs ctest sets them) or found
+# above the work directory is not used.
+file(MAKE_DIRECTORY "${isolation}/home")
+file(MAKE_DIRECTORY "${isolation}/template")
+file(WRITE "${isolation}/empty.gitconfig" "")
+foreach(_var GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+             GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_PARAMETERS
+             GIT_CONFIG_COUNT)
+    unset(ENV{${_var}})
+endforeach()
+set(ENV{HOME} "${isolation}/home")
+set(ENV{XDG_CONFIG_HOME} "${isolation}/home/.config")
+set(ENV{GIT_CONFIG_GLOBAL} "${isolation}/empty.gitconfig")
+set(ENV{GIT_CONFIG_SYSTEM} "${isolation}/empty.gitconfig")
+set(ENV{GIT_CONFIG_NOSYSTEM} "1")
+set(ENV{GIT_TEMPLATE_DIR} "${isolation}/template")
+set(ENV{GIT_CEILING_DIRECTORIES} "${TEST_WORKDIR}")
+set(ENV{GIT_AUTHOR_NAME} "CNA Test")
+set(ENV{GIT_AUTHOR_EMAIL} "test@example.com")
+set(ENV{GIT_COMMITTER_NAME} "CNA Test")
+set(ENV{GIT_COMMITTER_EMAIL} "test@example.com")
 
 function(git_in)
     execute_process(COMMAND "${GIT}" ${ARGN} WORKING_DIRECTORY "${repo}"
@@ -31,10 +60,11 @@ function(git_in)
     endif()
 endfunction()
 
-git_in(init -q -b main)
+git_in(init -q -b main "--template=${isolation}/template")
 git_in(config user.email "test@example.com")
 git_in(config user.name "CNA Test")
 git_in(config commit.gpgsign false)
+git_in(config core.hooksPath "${isolation}/template")
 file(WRITE "${repo}/a.txt" "a\n")
 git_in(add a.txt)
 git_in(commit -q -m base)
