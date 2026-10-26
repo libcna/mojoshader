@@ -216,5 +216,13 @@ ENDIF(SPIRV_TOOLS_INCLUDE_DIR AND SPIRV_TOOLS_LIBRARY)
 ADD_EXECUTABLE(testoutput utils/testoutput.c)
 TARGET_LINK_LIBRARIES(testoutput mojoshader ${LIBM} ${LOBJC} ${CARBON_FRAMEWORK})
 
+# Regression tests for the libcna fork's changes (tests/cna/README.md). Off by default; they
+# build their own copy of the library with every profile enabled.
+OPTION(MOJOSHADER_CNA_TESTS "Build the libcna fork's regression tests in tests/cna" OFF)
+IF(MOJOSHADER_CNA_TESTS)
+    ENABLE_TESTING()
+    ADD_SUBDIRECTORY(tests/cna)
+ENDIF(MOJOSHADER_CNA_TESTS)
+
 # End of CMakeLists.txt ...
 
