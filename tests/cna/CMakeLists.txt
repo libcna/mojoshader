@@ -28,9 +28,13 @@ set(_cna_mojoshader_test_definitions
     MOJOSHADER_DEPTH_CLIPPING
     MOJOSHADER_FLIP_RENDERTARGET
     MOJOSHADER_XNA4_VERTEX_TEXTURES
-    SUPPORT_PROFILE_HLSL=1
-    SUPPORT_PROFILE_METAL=1
 )
+# Not the SUPPORT_PROFILE_*=0 switches the top level derives from its PROFILE_* options (GLSLES3
+# has no option there at all, so a standalone build always turns it off): every profile, here.
+foreach(_profile D3D BYTECODE HLSL GLSL GLSL120 GLSLES GLSLES3 ARB1 ARB1_NV METAL SPIRV GLSPIRV)
+    remove_definitions(-DSUPPORT_PROFILE_${_profile}=0)
+    list(APPEND _cna_mojoshader_test_definitions SUPPORT_PROFILE_${_profile}=1)
+endforeach()
 target_compile_definitions(mojoshader_cna_tests PUBLIC ${_cna_mojoshader_test_definitions})
 target_include_directories(mojoshader_cna_tests PUBLIC "${_cna_mojoshader_dir}" "${CMAKE_CURRENT_SOURCE_DIR}")
 if(UNIX)
@@ -72,3 +76,4 @@ mojoshader_cna_test(cna_effect_tests)
 mojoshader_cna_test(cna_spirv_tests)
 
 mojoshader_cna_test(cna_parser_tests)
+
