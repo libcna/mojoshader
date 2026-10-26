@@ -212,6 +212,65 @@ static void test_packed_fog(void)
     } // for
 } // test_packed_fog
 
+static const uint32_t fog_alone_y_vs3[] = CNA_FOG_ALONE_VS3(0x2);
+static const uint32_t fog_alone_z_vs3[] = CNA_FOG_ALONE_VS3(0x4);
+static const uint32_t fog_alone_w_vs3[] = CNA_FOG_ALONE_VS3(0x8);
+
+/* vs_3_0: FOG alone in o1.z, the register written whole. */
+static const uint32_t fog_alone_z_full_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x4),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/*
+ * R5-02 (2026-10-26 remediation review, round 2): FOG alone in a vs_3_0 output lane other than
+ * x. The parser narrowed every write to such a register to .x, so `mov o1.z, v0` became
+ * `vs_o1.x = vs_v0.x`; desktop GLSL then copied that x to gl_FogFragCoord (v0.x where FOG is
+ * v0.z) and GLSL ES copied the never-written z to its varying. The write keeps its lane and
+ * FOG is copied from it.
+ */
+static void test_standalone_fog_lanes(void)
+{
+    static const struct { const char *lane; const uint32_t *tokens; size_t bytes; } vs[] = {
+        { "y", fog_alone_y_vs3, sizeof (fog_alone_y_vs3) },
+        { "z", fog_alone_z_vs3, sizeof (fog_alone_z_vs3) },
+        { "w", fog_alone_w_vs3, sizeof (fog_alone_w_vs3) },
+    };
+    size_t i, j;
+    for (i = 0; i < sizeof (vs) / sizeof (vs[0]); i++)
+    {
+        char write[64], desktop_copy[64], es_copy[64];
+        const char *desktop[2], *es[2];
+        snprintf(write, sizeof (write), "vs_o1.%s = vs_v0.%s;", vs[i].lane, vs[i].lane);
+        snprintf(desktop_copy, sizeof (desktop_copy), "gl_FogFragCoord = vs_o1.%s;", vs[i].lane);
+        snprintf(es_copy, sizeof (es_copy), "io_11_0.%s = vs_o1.%s;", vs[i].lane, vs[i].lane);
+        desktop[0] = es[0] = write;
+        desktop[1] = desktop_copy;
+        es[1] = es_copy;
+        for (j = 0; j < sizeof (glsl_profiles) / sizeof (glsl_profiles[0]); j++)
+        {
+            const int is_es = (strncmp(glsl_profiles[j], "glsles", 6) == 0);
+            check_glsl("FOG alone", glsl_profiles[j], vs[i].tokens, vs[i].bytes,
+                       is_es ? es : desktop, 2);
+        } // for
+    } // for
+    {
+        static const char *const desktop[] = { "vs_o1 = vs_v0;", "gl_FogFragCoord = vs_o1.z;" };
+        static const char *const es[] = { "vs_o1 = vs_v0;", "io_11_0.z = vs_o1.z;" };
+        for (j = 0; j < sizeof (glsl_profiles) / sizeof (glsl_profiles[0]); j++)
+        {
+            const int is_es = (strncmp(glsl_profiles[j], "glsles", 6) == 0);
+            check_glsl("FOG alone in .z, written whole", glsl_profiles[j], fog_alone_z_full_vs3,
+                       sizeof (fog_alone_z_full_vs3), is_es ? es : desktop, 2);
+        } // for
+    } // block
+} // test_standalone_fog_lanes
+
 int main(void)
 {
     cna_test_run("color_written_in_subroutine_is_clamped",
@@ -219,5 +278,6 @@ int main(void)
     cna_test_run("epilogue_stays_inline_without_subroutines",
                  test_epilogue_stays_inline_without_subroutines);
     cna_test_run("packed_fog", test_packed_fog);
+    cna_test_run("standalone_fog_lanes", test_standalone_fog_lanes);
     return cna_test_finish();
 } // main

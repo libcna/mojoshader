@@ -216,7 +216,6 @@ typedef struct Context
     int determined_constants_arrays;
     int predicated;
     int uses_pointsize;
-    int uses_fog;
     int need_max_float;
 
     // !!! FIXME: move these into SUPPORT_PROFILE sections.

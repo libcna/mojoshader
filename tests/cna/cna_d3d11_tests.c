@@ -272,10 +272,59 @@ static void test_refused_buffer_frees_staging(void)
     free(ctx);
 } // test_refused_buffer_frees_staging
 
+static const uint32_t fog_alone_z_vs3[] = CNA_FOG_ALONE_VS3(0x4);
+static const uint32_t fog_alone_z_ps3[] = CNA_FOG_ALONE_PS3(0x4, 0xAA);
+
+/*
+ * R5-02 (2026-10-26 remediation review, round 2): the HLSL profile now gives a register carrying
+ * FOG alone a float4 local and a float member named after the register and the semantic, as it
+ * does a packed register. The pixel shader the glue compiles takes the vertex shader's output
+ * struct and renames each input register to the matching output's, so FOG in o1.z read as v0.z
+ * must become o1.z filled from the vertex struct's own member.
+ */
+static void test_fog_pair_rewrite(void)
+{
+    MOJOSHADER_d3d11Context *ctx;
+    MOJOSHADER_d3d11Shader *vs, *ps;
+    char *source;
+
+    cna_alloc_reset(0);
+    ctx = make_context();
+    vs = (ctx != NULL) ? compile(ctx, fog_alone_z_vs3, sizeof (fog_alone_z_vs3)) : NULL;
+    ps = (ctx != NULL) ? compile(ctx, fog_alone_z_ps3, sizeof (fog_alone_z_ps3)) : NULL;
+    CNA_CHECK((vs != NULL) && (ps != NULL), "both shaders compile");
+    if ((vs != NULL) && (ps != NULL))
+    {
+        source = rewritePixelShader(ctx, vs, ps);
+        CNA_CHECK(source != NULL, "the pixel shader is rewritten");
+        if (source != NULL)
+        {
+            CNA_CHECK(strstr(source, "float m_o1_fog : FOG;") != NULL,
+                      "the input struct is the vertex shader's, FOG a float member");
+            CNA_CHECK(strstr(source, "float4 o1 = float4(0.0, 0.0, 0.0, 1.0);") != NULL,
+                      "the input register is renamed to the vertex output's");
+            CNA_CHECK(strstr(source, "o1.z = input.m_o1_fog;") != NULL,
+                      "FOG fills its lane from the vertex shader's member");
+            CNA_CHECK(strstr(source, "oC0 = o1.zzzz;") != NULL, "the FOG lane is read");
+            CNA_CHECK(strstr(source, "m_v0") == NULL, "no pixel-side member name is left");
+            if (strstr(source, "o1.z = input.m_o1_fog;") == NULL)
+                fprintf(stderr, "%s\n", source);
+            ctx->free_fn(source, ctx->malloc_data);
+        } // if
+    } // if
+    if (vs != NULL)
+        MOJOSHADER_d3d11DeleteShader(ctx, vs);
+    if (ps != NULL)
+        MOJOSHADER_d3d11DeleteShader(ctx, ps);
+    CNA_CHECK((buffers_live == 0) && (cna_alloc_live() == 0), "everything is released");
+    free(ctx);
+} // test_fog_pair_rewrite
+
 int main(void)
 {
     cna_test_run("texbem_zero_state", test_texbem_zero_state);
     cna_test_run("uniform_zero_state", test_uniform_zero_state);
     cna_test_run("refused_buffer_frees_staging", test_refused_buffer_frees_staging);
+    cna_test_run("fog_pair_rewrite", test_fog_pair_rewrite);
     return cna_test_finish();
 } // main

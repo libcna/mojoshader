@@ -439,6 +439,80 @@ static void test_packed_fog_output(void)
     } // for
 } // test_packed_fog_output
 
+static const uint32_t fog_alone_x_vs3[] = CNA_FOG_ALONE_VS3(0x1);
+static const uint32_t fog_alone_y_vs3[] = CNA_FOG_ALONE_VS3(0x2);
+static const uint32_t fog_alone_z_vs3[] = CNA_FOG_ALONE_VS3(0x4);
+static const uint32_t fog_alone_w_vs3[] = CNA_FOG_ALONE_VS3(0x8);
+static const uint32_t fog_alone_x_ps3[] = CNA_FOG_ALONE_PS3(0x1, 0x00);
+static const uint32_t fog_alone_y_ps3[] = CNA_FOG_ALONE_PS3(0x2, 0x55);
+static const uint32_t fog_alone_z_ps3[] = CNA_FOG_ALONE_PS3(0x4, 0xAA);
+static const uint32_t fog_alone_w_ps3[] = CNA_FOG_ALONE_PS3(0x8, 0xFF);
+
+/*
+ * R5-02 (2026-10-26 remediation review, round 2): FOG alone in one lane of a vs_3_0 output or a
+ * ps_3_0 input. The parser narrowed every write to such an output to .x, so `mov o1.z, v0` was
+ * emitted `o1 = v0.x;` -- v0.x where FOG is v0.z -- and HLSL declared the pixel input a float
+ * member read as `input.m_v0.zzzz`, which does not compile. HLSL now treats the register as a
+ * packed one: a float4 whose FOG lane is copied to (or filled from) the float FOG member; Metal's
+ * member is a float4 in which the lane keeps its position.
+ */
+static void test_standalone_fog_lanes(void)
+{
+    static const struct { char lane; const uint32_t *vs; size_t vs_bytes;
+                          const uint32_t *ps; size_t ps_bytes; } lanes[] = {
+        { 'x', fog_alone_x_vs3, sizeof (fog_alone_x_vs3), fog_alone_x_ps3, sizeof (fog_alone_x_ps3) },
+        { 'y', fog_alone_y_vs3, sizeof (fog_alone_y_vs3), fog_alone_y_ps3, sizeof (fog_alone_y_ps3) },
+        { 'z', fog_alone_z_vs3, sizeof (fog_alone_z_vs3), fog_alone_z_ps3, sizeof (fog_alone_z_ps3) },
+        { 'w', fog_alone_w_vs3, sizeof (fog_alone_w_vs3), fog_alone_w_ps3, sizeof (fog_alone_w_ps3) },
+    };
+    size_t i, j;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        for (j = 0; j < sizeof (lanes) / sizeof (lanes[0]); j++)
+        {
+            const char c = lanes[j].lane;
+            const MOJOSHADER_parseData *pd;
+            char name[32], write[32], copy[48], fill[48], read[32];
+            snprintf(name, sizeof (name), "fog_alone_%c_vs", c);
+            snprintf(write, sizeof (write), "o1.%c = v0.%c;", c, c);
+            snprintf(copy, sizeof (copy), "output.m_o1_fog = o1.%c;", c);
+            pd = cna_translate(profile, lanes[j].vs, lanes[j].vs_bytes, name);
+            CNA_CHECK(pd->output != NULL, "there is source");
+            CNA_CHECK(cna_output_contains(pd, write), "the FOG write keeps its lane");
+            if (metal)
+                CNA_CHECK(cna_output_contains(pd, "float4 o1 [[user(fog)]];"),
+                          "the FOG member is a float4, its lanes in place");
+            else
+            {
+                CNA_CHECK(cna_output_contains(pd, "float m_o1_fog : FOG;"), "FOG is a float member");
+                CNA_CHECK(cna_output_contains(pd, "float4 o1 = float4(0.0, 0.0, 0.0, 0.0);"),
+                          "the register is a float4 local");
+                CNA_CHECK(cna_output_contains(pd, copy), "FOG is copied from its own lane");
+            } // else
+            cna_check_hlsl_compiles(pd, profile, name);
+            MOJOSHADER_freeParseData(pd);
+
+            snprintf(name, sizeof (name), "fog_alone_%c_ps", c);
+            snprintf(fill, sizeof (fill), "v0.%c = input.m_v0_fog;", c);
+            snprintf(read, sizeof (read), "oC0 = v0.%c%c%c%c;", c, c, c, c);
+            pd = cna_translate(profile, lanes[j].ps, lanes[j].ps_bytes, name);
+            CNA_CHECK(pd->output != NULL, "there is source");
+            CNA_CHECK(cna_output_contains(pd, read), "the FOG lane is read");
+            if (!metal)
+            {
+                CNA_CHECK(cna_output_contains(pd, "float m_v0_fog : FOG;"), "FOG is a float member");
+                CNA_CHECK(cna_output_contains(pd, "float4 v0 = float4(0.0, 0.0, 0.0, 1.0);"),
+                          "the register is a float4 local");
+                CNA_CHECK(cna_output_contains(pd, fill), "FOG fills its own lane");
+            } // if
+            cna_check_hlsl_compiles(pd, profile, name);
+            MOJOSHADER_freeParseData(pd);
+        } // for
+    } // for
+} // test_standalone_fog_lanes
+
 /* ps_3_0: TEXCOORD0 in v1.xy and TEXCOORD1 in v1.zw. */
 static const uint32_t packed_inputs_ps3[] = {
     CNA_PS(3, 0),
@@ -952,6 +1026,7 @@ int main(int argc, char **argv)
         { "loop_counts_iterations", test_loop_counts_iterations },
         { "packed_vertex_outputs", test_packed_vertex_outputs },
         { "packed_fog_output", test_packed_fog_output },
+        { "standalone_fog_lanes", test_standalone_fog_lanes },
         { "packed_pixel_inputs", test_packed_pixel_inputs },
         { "unpacked_shaders_unchanged", test_unpacked_shaders_unchanged },
         { "explicit_main_ret", test_explicit_main_ret },

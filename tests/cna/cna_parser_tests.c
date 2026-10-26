@@ -436,8 +436,8 @@ static const uint32_t psize_first_vs3[] = CNA_PSIZE_TEXCOORD_VS3(4, 0xF, 5, 0x2)
 static const uint32_t psize_last_vs3[] = CNA_PSIZE_TEXCOORD_VS3(5, 0x2, 4, 0xF);
 
 /*
- * R2-03 (2026-10-26 remediation review): a vs_3_0 output is scalar only when FOG or PSIZE is
- * its one semantic. Judged by its first semantic, FOG declared first narrowed the next DCL and
+ * R2-03 (2026-10-26 remediation review): judged by its first semantic, a vs_3_0 output on
+ * which FOG was declared first had the next DCL and
  * every write to the register to .x. The disassembly shows the parser's view: both DCLs and
  * both writes keep their masks. PSIZE, which needs a full mask, shares no register, and is
  * refused the same way in either order; so is any packed register by the ARB1 profile, which
@@ -473,6 +473,64 @@ static void test_packed_fog_dcl_masks(void)
     MOJOSHADER_freeParseData(first);
     MOJOSHADER_freeParseData(last);
 } // test_packed_fog_dcl_masks
+
+static const uint32_t fog_alone_x_vs3[] = CNA_FOG_ALONE_VS3(0x1);
+static const uint32_t fog_alone_y_vs3[] = CNA_FOG_ALONE_VS3(0x2);
+static const uint32_t fog_alone_z_vs3[] = CNA_FOG_ALONE_VS3(0x4);
+static const uint32_t fog_alone_w_vs3[] = CNA_FOG_ALONE_VS3(0x8);
+
+/*
+ * R5-02 (2026-10-26 remediation review, round 2): FOG alone in a vs_3_0 output made the
+ * register scalar, and the parser narrowed every write to it to .x: `mov o1.z, v0`, with FOG
+ * declared in o1.z, became a write of v0.x to o1.x, in every profile. The write keeps its lane
+ * (the disassembly shows the parser's view). The ARB1 profiles bind the register to
+ * result.fogcoord, whose fog coordinate is x, and refuse FOG declared in another lane rather
+ * than write it where it is not read.
+ */
+static void test_standalone_fog_masks(void)
+{
+    static const struct { char lane; const uint32_t *tokens; size_t bytes; } vs[] = {
+        { 'x', fog_alone_x_vs3, sizeof (fog_alone_x_vs3) },
+        { 'y', fog_alone_y_vs3, sizeof (fog_alone_y_vs3) },
+        { 'z', fog_alone_z_vs3, sizeof (fog_alone_z_vs3) },
+        { 'w', fog_alone_w_vs3, sizeof (fog_alone_w_vs3) },
+    };
+    static const char *const arb1_profiles[] = { "arb1", "nv2", "nv3", "nv4" };
+    size_t i, j;
+    for (i = 0; i < sizeof (vs) / sizeof (vs[0]); i++)
+    {
+        char dcl[32], write[32], arb1_write[32];
+        const MOJOSHADER_parseData *pd = cna_parse("d3d", vs[i].tokens, vs[i].bytes);
+        snprintf(dcl, sizeof (dcl), "dcl_fog o1.%c\n", vs[i].lane);
+        snprintf(write, sizeof (write), "mov o1.%c, v0\n", vs[i].lane);
+        CNA_CHECK(cna_report_errors("fog alone", pd) == 0, "FOG alone in one lane parses");
+        CNA_CHECK(cna_output_contains(pd, dcl), "FOG's DCL keeps its lane");
+        if (!cna_output_contains(pd, write))
+            fprintf(stderr, "  expected \"%.*s\" in:\n%s\n", (int) strlen(write) - 1, write,
+                    pd->output ? pd->output : "");
+        CNA_CHECK(cna_output_contains(pd, write), "the FOG write keeps its lane");
+        MOJOSHADER_freeParseData(pd);
+
+        snprintf(arb1_write, sizeof (arb1_write), "MOV o1.%c, v0;", vs[i].lane);
+        for (j = 0; j < sizeof (arb1_profiles) / sizeof (arb1_profiles[0]); j++)
+        {
+            pd = cna_parse(arb1_profiles[j], vs[i].tokens, vs[i].bytes);
+            if (vs[i].lane == 'x')
+            {
+                CNA_CHECK(cna_report_errors(arb1_profiles[j], pd) == 0,
+                          "ARB1 translates FOG alone in x");
+                CNA_CHECK(cna_output_contains(pd, "OUTPUT o1 = result.fogcoord;") &&
+                          cna_output_contains(pd, arb1_write),
+                          "... writing result.fogcoord's x");
+            } // if
+            else
+                CNA_CHECK((pd->error_count == 1) &&
+                          (strstr(pd->errors[0].error, "FOG in a lane other than x") != NULL),
+                          "ARB1 refuses FOG declared in another lane");
+            MOJOSHADER_freeParseData(pd);
+        } // for
+    } // for
+} // test_standalone_fog_masks
 
 /* R2-07: the FXLC operand loop checked the three base words of all its operands once, before the
  * loop; an INPUT operand with an array register consumes two extra words, so a later operand's
@@ -542,5 +600,6 @@ int main(void)
     cna_test_run("preshader_prsi_count_wraps", test_preshader_prsi_count_wraps);
     cna_test_run("shader_ctab_span_truncated", test_shader_ctab_span_truncated);
     cna_test_run("packed_fog_dcl_masks", test_packed_fog_dcl_masks);
+    cna_test_run("standalone_fog_masks", test_standalone_fog_masks);
     return cna_test_finish();
 } // main

@@ -576,14 +576,9 @@ static const uint32_t fog_alone_vs3[] = {
 };
 
 /* ps_3_0: dcl_fog v0.<lane>, its lane written to oC0. */
-#define FOG_LANE_PS3(mask, swizzle) { \
-    CNA_PS(3, 0), \
-    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_INPUT, 0, mask), \
-    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC_SWZ(CNA_INPUT, 0, swizzle), \
-    CNA_END }
-static const uint32_t fog_y_ps3[] = FOG_LANE_PS3(0x2, 0x55);
-static const uint32_t fog_z_ps3[] = FOG_LANE_PS3(0x4, 0xAA);
-static const uint32_t fog_w_ps3[] = FOG_LANE_PS3(0x8, 0xFF);
+static const uint32_t fog_y_ps3[] = CNA_FOG_ALONE_PS3(0x2, 0x55);
+static const uint32_t fog_z_ps3[] = CNA_FOG_ALONE_PS3(0x4, 0xAA);
+static const uint32_t fog_w_ps3[] = CNA_FOG_ALONE_PS3(0x8, 0xFF);
 
 /*
  * R5-01 (2026-10-26 remediation review, round 2): a pixel FOG input is a float Input, as the
@@ -635,6 +630,55 @@ static void test_fog_interface_types(void)
         } // for
     } // for
 } // test_fog_interface_types
+
+static const uint32_t fog_alone_x_vs3[] = CNA_FOG_ALONE_VS3(0x1);
+static const uint32_t fog_alone_y_vs3[] = CNA_FOG_ALONE_VS3(0x2);
+static const uint32_t fog_alone_z_vs3[] = CNA_FOG_ALONE_VS3(0x4);
+static const uint32_t fog_alone_w_vs3[] = CNA_FOG_ALONE_VS3(0x8);
+
+/*
+ * R5-02 (2026-10-26 remediation review, round 2): FOG alone in a vs_3_0 output lane other than
+ * x. The register was the float Output itself and the parser narrowed every write to it to .x,
+ * so `mov o1.z, v0` stored v0.x. FOG is now that register's z, stored to the float Output where
+ * main returns -- the same as FOG sharing a register -- and each pair links to a pixel FOG in
+ * the same lane with one type at one Location.
+ */
+static void test_standalone_fog_lanes(void)
+{
+    static const struct { const char *name; const uint32_t *vs; size_t vs_bytes;
+                          const uint32_t *ps; size_t ps_bytes; int lane; } cases[] = {
+        { "fog_alone_x", fog_alone_x_vs3, sizeof (fog_alone_x_vs3), fog_ps3, sizeof (fog_ps3), 0 },
+        { "fog_alone_y", fog_alone_y_vs3, sizeof (fog_alone_y_vs3), fog_y_ps3, sizeof (fog_y_ps3), 1 },
+        { "fog_alone_z", fog_alone_z_vs3, sizeof (fog_alone_z_vs3), fog_z_ps3, sizeof (fog_z_ps3), 2 },
+        { "fog_alone_w", fog_alone_w_vs3, sizeof (fog_alone_w_vs3), fog_w_ps3, sizeof (fog_w_ps3), 3 },
+    };
+    static const char *profiles[2] = { "spirv", "glspirv" };
+    char label[128];
+    size_t i;
+    int p;
+
+    for (i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    {
+        check_pair(cases[i].name, cases[i].vs, cases[i].vs_bytes, cases[i].ps, cases[i].ps_bytes, 1);
+        for (p = 0; p < 2; p++)
+        {
+            const MOJOSHADER_parseData *pd = cna_parse(profiles[p], cases[i].vs, cases[i].vs_bytes);
+            snprintf(label, sizeof (label), "%s %s", cases[i].name, profiles[p]);
+            CNA_CHECK(cna_report_errors(label, pd) == 0, "the vertex shader translates");
+            if (pd->error_count == 0)
+            {
+                const int lane = fog_output_lane(pd);
+                if (lane != cases[i].lane)
+                    fprintf(stderr, "  %s: FOG stored from lane %d, declared %d\n", label, lane,
+                            cases[i].lane);
+                CNA_CHECK(lane == cases[i].lane, "FOG is one float output, stored from its lane");
+                snprintf(label, sizeof (label), "%s_vs_%s", cases[i].name, profiles[p]);
+                CNA_CHECK(cna_spirv_validate(pd, label) != 0, "spirv-val accepts it");
+            } // if
+            MOJOSHADER_freeParseData(pd);
+        } // for
+    } // for
+} // test_standalone_fog_lanes
 
 /* Counts what MOJOSHADER_parse() allocates through the caller's allocator, and frees. */
 static int live_allocations = 0;
@@ -717,5 +761,6 @@ int main(void)
     cna_test_run("packed_fog", test_packed_fog);
     cna_test_run("rastout_semantics", test_rastout_semantics);
     cna_test_run("fog_interface_types", test_fog_interface_types);
+    cna_test_run("standalone_fog_lanes", test_standalone_fog_lanes);
     return cna_test_finish();
 } // main

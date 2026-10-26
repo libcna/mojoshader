@@ -118,8 +118,8 @@ const char *get_GLSL_srcarg_varname(Context *ctx, const size_t idx,
 
 // Under Shader Model 3 semantic packing a vertex output is a vec4 temporary, copied to its
 // semantic at the end of the shader (gl_PointSize as its .x). isscalar() still names a point-size
-// or fog output a scalar, which it is only below 3.0, and a write to it then lost its mask: the
-// XNA effect compiler writes a PSIZE output's x alone, emitted as a float assigned to a vec4.
+// output a scalar, which it is only below 3.0, and a write to it then lost its mask: the XNA
+// effect compiler writes a PSIZE output's x alone, emitted as a float assigned to a vec4.
 static int isscalar_GLSL(Context *ctx, const RegisterType rtype, const int rnum)
 {
     if (shader_version_atleast(ctx, 3, 0) && shader_is_vertex(ctx) &&
@@ -823,14 +823,12 @@ static void emit_GLSL_vertex_epilogue(Context *ctx)
                 get_GLSL_writemask_suffix(item->writemask, mask, sizeof (mask));
                 if ((item->usage == MOJOSHADER_USAGE_POINTSIZE) && (item->index == 0))
                     output_line(ctx, "%s = %s.x;", semantic, reg);
-                // gl_FogFragCoord is a float: FOG's one lane, which is x when FOG is the
-                //  register's only semantic (isscalar() narrowed every write to it), else the
-                //  first of its own lanes in the register it shares. -CNA
+                // gl_FogFragCoord is a float: FOG's one lane, the first it declares, whether
+                //  FOG is alone in the register or shares it. -CNA
                 else if ((item->usage == MOJOSHADER_USAGE_FOG) && builtin)
                 {
                     const int wm = item->writemask;
-                    const int lane = isscalar(ctx, ctx->shader_type, item->regtype, item->regnum)
-                        ? 0 : ((wm & 0x1) ? 0 : (wm & 0x2) ? 1 : (wm & 0x4) ? 2 : 3);
+                    const int lane = (wm & 0x1) ? 0 : (wm & 0x2) ? 1 : (wm & 0x4) ? 2 : 3;
                     output_line(ctx, "%s = %s.%c;", semantic, reg, swizzle_channels[lane]);
                 } // else if
                 else if (item->usage == MOJOSHADER_USAGE_COLOR)

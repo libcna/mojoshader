@@ -423,14 +423,18 @@ int isscalar(Context *ctx, const MOJOSHADER_shaderType shader_type,
              const RegisterType rtype, const int rnum)
 {
     const int uses_psize = ctx->uses_pointsize;
-    const int uses_fog = ctx->uses_fog;
-    if ( (rtype == REG_TYPE_OUTPUT) && ((uses_psize) || (uses_fog)) )
+    if ( (rtype == REG_TYPE_OUTPUT) && (uses_psize) )
     {
-        // A vs_3_0 output is scalar only when FOG or PSIZE is its one semantic. A DCL declares
-        //  its own lanes, whatever was declared before it, and since every DCL precedes the
-        //  first instruction, an instruction sees all of the register's semantics. Judged by
-        //  its first semantic alone, a register packing TEXCOORD after FOG had that DCL and
-        //  every write narrowed to .x. -CNA
+        // A vs_3_0 output is scalar only when PSIZE is its one semantic. A DCL declares its
+        //  own lanes, whatever was declared before it, and since every DCL precedes the first
+        //  instruction, an instruction sees all of the register's semantics. Judged by its
+        //  first semantic alone, a register packing TEXCOORD after FOG had that DCL and every
+        //  write narrowed to .x.
+        //
+        //  FOG never makes a register scalar: FOG declared alone in o1.z, say, is that
+        //  register's z, so `mov o1.z, v0` writes v0.z there -- narrowed to .x, it wrote v0.x
+        //  to a lane FOG is not read from. The profiles take FOG's declared lane where the
+        //  shader returns, as they do when FOG shares the register. -CNA
         if (ctx->current_opcode == OPCODE_DCL)
             return 0;
         const RegisterList *reg = reglist_find(&ctx->attributes, rtype, rnum);
@@ -441,8 +445,7 @@ int isscalar(Context *ctx, const MOJOSHADER_shaderType shader_type,
             if ((reg->next != NULL) && (reg->next->regtype == rtype) &&
                 (reg->next->regnum == rnum))
                 return 0;
-            return ( (uses_psize && (usage == MOJOSHADER_USAGE_POINTSIZE)) ||
-                     (uses_fog && (usage == MOJOSHADER_USAGE_FOG)) );
+            return (usage == MOJOSHADER_USAGE_POINTSIZE);
         } // if
     } // if
 

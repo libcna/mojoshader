@@ -1745,10 +1745,12 @@ static void spv_emit_func_lit(Context *ctx)
  * returns, a pixel shader assembles the register from its semantics' lanes, (0, 0, 0, 1) where
  * none supplies one, before main()'s first instruction.
  *
- * FOG is a float on both sides of the interface, as the vertex shader's FOG output is: a pixel
- * FOG input is a float Input whose value fills FOG's declared lanes of the register. So a pixel
- * register carrying FOG is assembled this way even when FOG is its one semantic; a vec4 Input
- * there did not match the vertex shader's float Output at the same Location. -CNA
+ * FOG is a float on both sides of the interface: a vertex FOG output is a float Output stored
+ * from FOG's first declared lane, a pixel FOG input a float Input whose value fills FOG's
+ * declared lanes of the register. So a register carrying FOG is treated this way even when FOG
+ * is its one semantic: a vec4 Input there did not match the vertex shader's float Output at the
+ * same Location, and a vertex register that was the float Output itself had every write
+ * narrowed to .x, losing FOG's own lane. -CNA
  */
 static int spv_register_is_packed(Context *ctx, const RegisterType regtype, const int regnum)
 {
@@ -1765,9 +1767,7 @@ static int spv_register_is_packed(Context *ctx, const RegisterType regtype, cons
     {
         if ((item->regtype != regtype) || (item->regnum != regnum))
             continue;
-        if (++count > 1)
-            return 1;
-        if (shader_is_pixel(ctx) && (item->usage == MOJOSHADER_USAGE_FOG))
+        if ((++count > 1) || (item->usage == MOJOSHADER_USAGE_FOG))
             return 1;
     } // for
     return 0;
@@ -2622,8 +2622,8 @@ static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterTyp
 
     if (shader_is_vertex(ctx))
     {
-        // FOG is a float output, as it is in a register of its own; spv_emit_packed_vs_outputs()
-        //  stores the first of its lanes to it. -CNA
+        // FOG is a float output; spv_emit_packed_vs_outputs() stores the first of its lanes
+        //  to it. -CNA
         push_output(ctx, &ctx->mainline_intro);
         tid = spv_get_type(ctx, (usage == MOJOSHADER_USAGE_FOG) ? STI_PTR_FLOAT_O : STI_PTR_VEC4_O);
         spv_emit(ctx, 4, SpvOpVariable, tid, item->spirv.iddecl, SpvStorageClassOutput);

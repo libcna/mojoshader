@@ -95,7 +95,9 @@ const char *get_HLSL_uniform_array_varname(Context *ctx,
 //  is translated as the GLSL profile translates it: a float4 local of main, one struct member
 //  per semantic, and copies of each semantic's lanes (lane positions kept) at the end of main
 //  for outputs and at its start for inputs. A register with one semantic keeps the usual
-//  macro for its struct member. -CNA
+//  macro for its struct member -- unless that semantic is FOG, a float member: the register
+//  is a float4 whose declared FOG lane is copied to the member (an output) or filled from it
+//  (an input), so `o1.z = v0.z;` or a read of v0.zzzz names a lane the float has not. -CNA
 static int is_HLSL_packed_register(Context *ctx, const RegisterType regtype,
                                    const int regnum)
 {
@@ -111,10 +113,12 @@ static int is_HLSL_packed_register(Context *ctx, const RegisterType regtype,
 
     for (item = ctx->attributes.next; item != NULL; item = item->next)
     {
-        if ((item->regtype == regtype) && (item->regnum == regnum))
-            semantics++;
+        if ((item->regtype != regtype) || (item->regnum != regnum))
+            continue;
+        if ((++semantics > 1) || (item->usage == MOJOSHADER_USAGE_FOG))
+            return 1;
     } // for
-    return (semantics > 1);
+    return 0;
 } // is_HLSL_packed_register
 
 static void get_HLSL_writemask_suffix(const int writemask, char *buf,

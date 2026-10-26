@@ -26,6 +26,26 @@ extern "C" {
 #define CNA_PS(major, minor) (0xffff0000u | ((uint32_t) (major) << 8) | (uint32_t) (minor))
 #define CNA_END 0x0000ffffu
 
+/*
+ * vs_3_0 with FOG alone in one output lane, `mask` (0x1 x ... 0x8 w): dcl_position v0,
+ * dcl_position o0, dcl_fog o1.<lane>; mov o0, v0; mov o1.<lane>, v0 -- so FOG is v0.<lane>.
+ */
+#define CNA_FOG_ALONE_VS3(mask) { \
+    CNA_VS(3, 0), \
+    CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(1, 0, 15), \
+    CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(6, 0, 15), \
+    CNA_OP(31, 2), CNA_DCL(11, 0), CNA_DST(6, 1, mask), \
+    CNA_OP(1, 2), CNA_DST(6, 0, 15), CNA_SRC(1, 0), \
+    CNA_OP(1, 2), CNA_DST(6, 1, mask), CNA_SRC(1, 0), \
+    CNA_END }
+
+/* ps_3_0 with FOG alone in one input lane: dcl_fog v0.<lane>; mov oC0, v0.<lane><lane>... */
+#define CNA_FOG_ALONE_PS3(mask, swizzle) { \
+    CNA_PS(3, 0), \
+    CNA_OP(31, 2), CNA_DCL(11, 0), CNA_DST(1, 0, mask), \
+    CNA_OP(1, 2), CNA_DST(8, 0, 15), CNA_SRC_SWZ(1, 0, swizzle), \
+    CNA_END }
+
 /* Register types (D3DSPR_*). */
 enum
 {

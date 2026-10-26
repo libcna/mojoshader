@@ -130,8 +130,6 @@ static void add_attribute_register(Context *ctx, const RegisterType rtype,
 
     if ((rtype == REG_TYPE_OUTPUT) && (usage == MOJOSHADER_USAGE_POINTSIZE))
         ctx->uses_pointsize = 1;  // note that we have to check this later.
-    else if ((rtype == REG_TYPE_OUTPUT) && (usage == MOJOSHADER_USAGE_FOG))
-        ctx->uses_fog = 1;  // note that we have to check this later.
 } // add_attribute_register
 
 static inline TextureType cvtMojoToD3DSamplerType(const MOJOSHADER_samplerType type)

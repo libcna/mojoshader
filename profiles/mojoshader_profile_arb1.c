@@ -943,6 +943,15 @@ void emit_ARB1_attribute(Context *ctx, RegisterType regtype, int regnum,
                         usage_str = "result.color.secondary";
                     break;
                 case MOJOSHADER_USAGE_FOG:
+                    // The register is bound to result.fogcoord, whose x is the fog
+                    //  coordinate; a vs_3_0 FOG declared in another lane would be written
+                    //  there and never read. -CNA
+                    if (shader_version_atleast(ctx, 3, 0) && ((wmask & 0x1) == 0))
+                    {
+                        failf(ctx, "FOG in a lane other than x unsupported in %s profile",
+                              ctx->profile->name);
+                        return;
+                    } // if
                     usage_str = "result.fogcoord";
                     break;
                 case MOJOSHADER_USAGE_TEXCOORD:
