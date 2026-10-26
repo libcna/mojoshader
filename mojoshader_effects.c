@@ -122,8 +122,12 @@ static void run_preshader(const MOJOSHADER_preshader *preshader,
                         arrIndex = regsi[base];
                         for (i = 0; i < operand->array_register_count; i++)
                         {
-                            const int next = (int) operand->array_registers[i] + arrIndex;
-                            if ((next < 0) || ((unsigned int) next >= inregs_count)) return;
+                            // Both terms come from content (the register table and a runtime
+                            // parameter value): add them where the sum cannot overflow, then
+                            // bound it. -CNA
+                            const long long next = (long long) operand->array_registers[i] +
+                                                   (long long) arrIndex;
+                            if ((next < 0) || (next >= (long long) inregs_count)) return;
                             arrIndex = regsi[next];
                         }
                         src[opiter][0] = arrIndex;
