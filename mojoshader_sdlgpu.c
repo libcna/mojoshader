@@ -54,6 +54,11 @@ static PFN_SDL_ShaderCross_GetSPIRVShaderFormats SDL_ShaderCross_GetSPIRVShaderF
 static PFN_SDL_ShaderCross_ReflectGraphicsSPIRV SDL_ShaderCross_ReflectGraphicsSPIRV = NULL;
 static PFN_SDL_ShaderCross_CompileGraphicsShaderFromSPIRV SDL_ShaderCross_CompileGraphicsShaderFromSPIRV = NULL;
 
+/* The library and its entry points are the process's, while each context decides whether to use
+ * them; every user holds a reference, and the last one to let go unloads it. -CNA */
+static int SDL_shadercross_refcount = 0;
+static SDL_SpinLock SDL_shadercross_lock = 0;
+
 #ifdef _WIN32
 #define SDL_SHADERCROSS_LIB_NAME "SDL3_shadercross.dll"
 #elif defined(__APPLE__)
@@ -61,6 +66,64 @@ static PFN_SDL_ShaderCross_CompileGraphicsShaderFromSPIRV SDL_ShaderCross_Compil
 #else
 #define SDL_SHADERCROSS_LIB_NAME "libSDL3_shadercross.so.0"
 #endif
+
+/* Takes a reference, loading the library and all three entry points with the first one. Returns
+ * 0, holding nothing, when the library or an entry point is missing. -CNA */
+static int shadercross_acquire(void)
+{
+    int result = 1;
+    SDL_LockSpinlock(&SDL_shadercross_lock);
+    if (SDL_shadercross_refcount == 0)
+    {
+        SDL_shadercross_lib = SDL_LoadObject(SDL_SHADERCROSS_LIB_NAME);
+        if (SDL_shadercross_lib != NULL)
+        {
+            SDL_ShaderCross_GetSPIRVShaderFormats = (PFN_SDL_ShaderCross_GetSPIRVShaderFormats) SDL_LoadFunction(
+                SDL_shadercross_lib,
+                "SDL_ShaderCross_GetSPIRVShaderFormats"
+            );
+            SDL_ShaderCross_ReflectGraphicsSPIRV = (PFN_SDL_ShaderCross_ReflectGraphicsSPIRV) SDL_LoadFunction(
+                SDL_shadercross_lib,
+                "SDL_ShaderCross_ReflectGraphicsSPIRV"
+            );
+            SDL_ShaderCross_CompileGraphicsShaderFromSPIRV = (PFN_SDL_ShaderCross_CompileGraphicsShaderFromSPIRV) SDL_LoadFunction(
+                SDL_shadercross_lib,
+                "SDL_ShaderCross_CompileGraphicsShaderFromSPIRV"
+            );
+        } // if
+        if (SDL_ShaderCross_GetSPIRVShaderFormats == NULL ||
+            SDL_ShaderCross_ReflectGraphicsSPIRV == NULL ||
+            SDL_ShaderCross_CompileGraphicsShaderFromSPIRV == NULL)
+        {
+            SDL_ShaderCross_GetSPIRVShaderFormats = NULL;
+            SDL_ShaderCross_ReflectGraphicsSPIRV = NULL;
+            SDL_ShaderCross_CompileGraphicsShaderFromSPIRV = NULL;
+            if (SDL_shadercross_lib != NULL)
+                SDL_UnloadObject(SDL_shadercross_lib);
+            SDL_shadercross_lib = NULL;
+            result = 0;
+        } // if
+    } // if
+    if (result)
+        SDL_shadercross_refcount++;
+    SDL_UnlockSpinlock(&SDL_shadercross_lock);
+    return result;
+} // shadercross_acquire
+
+/* Gives a reference back; the last one unloads the library. -CNA */
+static void shadercross_release(void)
+{
+    SDL_LockSpinlock(&SDL_shadercross_lock);
+    if ((SDL_shadercross_refcount > 0) && (--SDL_shadercross_refcount == 0))
+    {
+        SDL_ShaderCross_GetSPIRVShaderFormats = NULL;
+        SDL_ShaderCross_ReflectGraphicsSPIRV = NULL;
+        SDL_ShaderCross_CompileGraphicsShaderFromSPIRV = NULL;
+        SDL_UnloadObject(SDL_shadercross_lib);
+        SDL_shadercross_lib = NULL;
+    } // if
+    SDL_UnlockSpinlock(&SDL_shadercross_lock);
+} // shadercross_release
 #endif
 
 /* Max entries for each register file type */
@@ -97,6 +160,7 @@ struct MOJOSHADER_sdlContext
     SDL_GPUDevice *device;
     const char *profile;
     int use_shadercross;
+    int holds_shadercross;  /* a reference to the dynamic library (shadercross_acquire()) -CNA */
 
     MOJOSHADER_malloc malloc_fn;
     MOJOSHADER_free free_fn;
@@ -363,24 +427,13 @@ unsigned int MOJOSHADER_sdlGetShaderFormats(void)
 #if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
     ret |= SDL_ShaderCross_GetSPIRVShaderFormats();
 #else
-    if (SDL_ShaderCross_GetSPIRVShaderFormats != NULL)
-        ret |= SDL_ShaderCross_GetSPIRVShaderFormats();
-    else
+    // A reference of its own for the query, which therefore neither replaces nor unloads the
+    // library a context is using, and calls no entry point the library lacks. -CNA
+    if (shadercross_acquire())
     {
-        // We only care about this on Windows, hardcode the DLL name :shrug:
-        SDL_shadercross_lib = SDL_LoadObject(SDL_SHADERCROSS_LIB_NAME);
-        if (SDL_shadercross_lib != NULL)
-        {
-            SDL_ShaderCross_GetSPIRVShaderFormats = (PFN_SDL_ShaderCross_GetSPIRVShaderFormats) SDL_LoadFunction(
-                SDL_shadercross_lib,
-                "SDL_ShaderCross_GetSPIRVShaderFormats"
-            );
-            ret |= SDL_ShaderCross_GetSPIRVShaderFormats();
-            SDL_ShaderCross_GetSPIRVShaderFormats = NULL;
-            SDL_UnloadObject(SDL_shadercross_lib);
-            SDL_shadercross_lib = NULL;
-        } // if
-    } // else
+        ret |= SDL_ShaderCross_GetSPIRVShaderFormats();
+        shadercross_release();
+    } // if
 #endif
     return ret;
 } // MOJOSHADER_sdlGetShaderFormats
@@ -422,25 +475,12 @@ MOJOSHADER_sdlContext *MOJOSHADER_sdlCreateContext(
         } // if
         resultCtx->use_shadercross = 1;
 #else
-        SDL_shadercross_lib = SDL_LoadObject(SDL_SHADERCROSS_LIB_NAME);
-        if (SDL_shadercross_lib != NULL)
+        // The context keeps its reference until it is destroyed, so another context's
+        // teardown cannot take the entry points it calls away from it. -CNA
+        if (shadercross_acquire())
         {
-            SDL_ShaderCross_GetSPIRVShaderFormats = (PFN_SDL_ShaderCross_GetSPIRVShaderFormats) SDL_LoadFunction(
-                SDL_shadercross_lib,
-                "SDL_ShaderCross_GetSPIRVShaderFormats"
-            );
-            SDL_ShaderCross_ReflectGraphicsSPIRV = (PFN_SDL_ShaderCross_ReflectGraphicsSPIRV) SDL_LoadFunction(
-                SDL_shadercross_lib,
-                "SDL_ShaderCross_ReflectGraphicsSPIRV"
-            );
-            SDL_ShaderCross_CompileGraphicsShaderFromSPIRV = (PFN_SDL_ShaderCross_CompileGraphicsShaderFromSPIRV) SDL_LoadFunction(
-                SDL_shadercross_lib,
-                "SDL_ShaderCross_CompileGraphicsShaderFromSPIRV"
-            );
-            resultCtx->use_shadercross =
-                SDL_ShaderCross_GetSPIRVShaderFormats != NULL &&
-                SDL_ShaderCross_ReflectGraphicsSPIRV != NULL &&
-                SDL_ShaderCross_CompileGraphicsShaderFromSPIRV != NULL;
+            resultCtx->holds_shadercross = 1;
+            resultCtx->use_shadercross = 1;
         } // if
 #endif
     } // if
@@ -496,23 +536,17 @@ const char *MOJOSHADER_sdlGetError(
 void MOJOSHADER_sdlDestroyContext(
     MOJOSHADER_sdlContext *ctx
 ) {
-    uint32_t i;
-
-#if !defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
-    if (SDL_shadercross_lib != NULL)
-    {
-        SDL_ShaderCross_GetSPIRVShaderFormats = NULL;
-        SDL_ShaderCross_ReflectGraphicsSPIRV = NULL;
-        SDL_ShaderCross_CompileGraphicsShaderFromSPIRV = NULL;
-        SDL_UnloadObject(SDL_shadercross_lib);
-        SDL_shadercross_lib = NULL;
-    } // if
-#endif
-
     if (ctx->linker_cache)
         hash_destroy(ctx->linker_cache, ctx);
 
     ctx->free_fn(ctx->uniform_staging, ctx->malloc_data);
+
+#if !defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+    // Only this context's own reference: unloading the library whenever any context went,
+    // ShaderCross user or not, left another that still used it calling through NULL. -CNA
+    if (ctx->holds_shadercross)
+        shadercross_release();
+#endif
 
     ctx->free_fn(ctx, ctx->malloc_data);
 } // MOJOSHADER_sdlDestroyContext
@@ -534,9 +568,13 @@ int MOJOSHADER_sdlSetShaderCrossTestMode(
     ctx->use_shadercross = 1;
     return 1;
 #else
-    if (SDL_ShaderCross_ReflectGraphicsSPIRV == NULL ||
-        SDL_ShaderCross_CompileGraphicsShaderFromSPIRV == NULL)
-        return 0;
+    // A context whose device takes SPIR-V holds no reference yet; it takes its own. -CNA
+    if (!ctx->holds_shadercross)
+    {
+        if (!shadercross_acquire())
+            return 0;
+        ctx->holds_shadercross = 1;
+    } // if
     ctx->use_shadercross = 1;
     return 1;
 #endif

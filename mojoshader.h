@@ -2144,7 +2144,10 @@ DECLSPEC void MOJOSHADER_sdlSetLegacyBumpMapEnv(MOJOSHADER_sdlContext *context,
                                                 float mat01, float mat10, float mat11,
                                                 float lscale, float loffset);
 
-/* CNA test hook: force an available ShaderCross path on a SPIR-V-capable device. */
+/*
+ * CNA test hook: force an available ShaderCross path on a SPIR-V-capable device. Without a
+ * statically linked SDL_shadercross, the context loads the shared library for this if it has not.
+ */
 DECLSPEC int MOJOSHADER_sdlSetShaderCrossTestMode(MOJOSHADER_sdlContext *context,
                                                   int enabled);
 

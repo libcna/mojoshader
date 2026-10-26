@@ -27,6 +27,14 @@
 #include <stdio.h>
 #include "cna_test.h"
 
+#if defined(__linux__)
+#undef dlopen  /* mojoshader_internal.h maps these to SDL's, which has no RTLD_NOLOAD */
+#undef dlclose
+#undef dlsym
+#include <dlfcn.h>
+#define CNA_HAVE_RTLD_NOLOAD 1
+#endif
+
 #define CNA_TEXBEM 67  /* D3DSIO_TEXBEM */
 
 /* vs_2_0 writing only oPos. */
@@ -220,6 +228,94 @@ static void test_shader_identity_exhaustion(void)
     MOJOSHADER_sdlDestroyContext(ctx);
     CNA_CHECK(a.live == 0, "the context returned everything it allocated");
 } // test_shader_identity_exhaustion
+
+/*
+ * Links a pair in a context that uses ShaderCross and no device: the link fails, but only in
+ * ShaderCross's compiler, called through the context's pointers.
+ */
+static void check_link_reaches_shadercross(MOJOSHADER_sdlContext *ctx, const char *label)
+{
+    MOJOSHADER_sdlShaderData *vs = compile(ctx, position_vs2, sizeof (position_vs2));
+    MOJOSHADER_sdlShaderData *ps = compile(ctx, red_ps2, sizeof (red_ps2));
+    CNA_CHECK(vs && ps, label);
+    if (vs && ps)
+    {
+        CNA_CHECK(link_pair(ctx, vs, ps) == NULL, label);
+        if (shadercross_is_stub())
+            CNA_CHECK(error_contains("cna shadercross stub: compiled no vertex shader"), label);
+        else
+            printf("  (%s: %s)\n", label, MOJOSHADER_sdlGetError(NULL));
+    } // if
+    MOJOSHADER_sdlDeleteShader(ctx, vs);
+    MOJOSHADER_sdlDeleteShader(ctx, ps);
+} // check_link_reaches_shadercross
+
+/* True when the ShaderCross library is still loaded into the process (-1: cannot tell). */
+static int shadercross_loaded(void)
+{
+#ifdef CNA_HAVE_RTLD_NOLOAD
+    void *handle = dlopen(SDL_SHADERCROSS_LIB_NAME, RTLD_NOW | RTLD_NOLOAD);
+    if (handle == NULL)
+        return 0;
+    dlclose(handle);
+    return 1;
+#else
+    return -1;
+#endif
+} // shadercross_loaded
+
+/*
+ * A2v2 A-15: the dynamic ShaderCross library and its function pointers are the process's, the
+ * decision to use them each context's. Destroying one context that uses it must leave them to
+ * another that still does, and the last one to go unloads the library.
+ */
+static void test_shadercross_outlives_another_context(void)
+{
+    CountingAllocator a, b;
+    MOJOSHADER_sdlContext *ctx_a = make_context(NULL, &a);
+    MOJOSHADER_sdlContext *ctx_b = make_context(NULL, &b);
+    MOJOSHADER_sdlContext *ctx_c;
+
+    CNA_CHECK((ctx_a != NULL) && (ctx_b != NULL), "two contexts without a device");
+    if ((ctx_a == NULL) || (ctx_b == NULL))
+        goto done;
+    if (!MOJOSHADER_sdlSetShaderCrossTestMode(ctx_b, 1))
+    {
+        if (shadercross_is_stub())
+            CNA_CHECK(0, "the stand-in ShaderCross is loaded");
+        else
+            printf("  (no SDL3_shadercross library: not exercised)\n");
+        goto done;
+    } // if
+
+    MOJOSHADER_sdlDestroyContext(ctx_a);
+    ctx_a = NULL;
+    CNA_CHECK(a.live == 0, "the first context returned everything it allocated");
+    CNA_CHECK(shadercross_loaded() != 0, "the library stays loaded for the second context");
+    check_link_reaches_shadercross(ctx_b, "the second context still links through ShaderCross");
+
+    MOJOSHADER_sdlDestroyContext(ctx_b);
+    ctx_b = NULL;
+    CNA_CHECK(b.live == 0, "the second context returned everything it allocated");
+    CNA_CHECK(shadercross_loaded() != 1, "the last context unloads the library");
+
+    ctx_c = make_context(NULL, &a);
+    CNA_CHECK((ctx_c != NULL) && MOJOSHADER_sdlSetShaderCrossTestMode(ctx_c, 1),
+              "a new context loads it again");
+    if (ctx_c != NULL)
+    {
+        check_link_reaches_shadercross(ctx_c, "the new context links through ShaderCross");
+        MOJOSHADER_sdlDestroyContext(ctx_c);
+        CNA_CHECK(a.live == 0, "the new context returned everything it allocated");
+    } // if
+    CNA_CHECK(shadercross_loaded() != 1, "... and unloads it");
+
+done:
+    if (ctx_a != NULL)
+        MOJOSHADER_sdlDestroyContext(ctx_a);
+    if (ctx_b != NULL)
+        MOJOSHADER_sdlDestroyContext(ctx_b);
+} // test_shadercross_outlives_another_context
 
 /* -- Cases with a device ------------------------------------------------------------------- */
 
@@ -536,6 +632,38 @@ static void test_shader_identity_high_bits(void)
     CNA_CHECK(a.live == 0, "the context returned everything it allocated");
 } // test_shader_identity_high_bits
 
+/*
+ * A2v2 A-15: a context on a device that takes SPIR-V never loads ShaderCross, so destroying it
+ * must not unload the library from under a context that uses it.
+ */
+static void test_shadercross_outlives_native_context(void)
+{
+    CountingAllocator a, b;
+    MOJOSHADER_sdlContext *native = make_context(gpu_device, &a);
+    MOJOSHADER_sdlContext *cross = make_context(NULL, &b);
+
+    CNA_CHECK((native != NULL) && (cross != NULL), "a native and a ShaderCross context");
+    if ((native != NULL) && (cross != NULL))
+    {
+        CNA_CHECK(!native->use_shadercross, "the device's context compiles SPIR-V natively");
+        if (MOJOSHADER_sdlSetShaderCrossTestMode(cross, 1))
+        {
+            MOJOSHADER_sdlDestroyContext(native);
+            native = NULL;
+            check_link_reaches_shadercross(cross, "the ShaderCross context still links");
+        } // if
+        else if (shadercross_is_stub())
+            CNA_CHECK(0, "the stand-in ShaderCross is loaded");
+        else
+            printf("  (no SDL3_shadercross library: not exercised)\n");
+    } // if
+    if (native != NULL)
+        MOJOSHADER_sdlDestroyContext(native);
+    if (cross != NULL)
+        MOJOSHADER_sdlDestroyContext(cross);
+    CNA_CHECK((a.live == 0) && (b.live == 0), "both contexts returned everything they allocated");
+} // test_shadercross_outlives_native_context
+
 /* -- Driver -------------------------------------------------------------------------------- */
 
 static int open_device(void)
@@ -594,6 +722,7 @@ typedef struct TestCase
 static const TestCase test_cases[] = {
     { "context_without_device", test_context_without_device, 0 },
     { "shader_identity_exhaustion", test_shader_identity_exhaustion, 0 },
+    { "shadercross_outlives_another_context", test_shadercross_outlives_another_context, 0 },
     { "link_and_cache", test_link_and_cache, 1 },
     { "texbem_uniforms", test_texbem_uniforms, 1 },
     { "delete_program_then_relink", test_delete_program_then_relink, 1 },
@@ -601,6 +730,7 @@ static const TestCase test_cases[] = {
     { "delete_program_then_destroy_context", test_delete_program_then_destroy_context, 1 },
     { "shader_identity_after_65536_compiles", test_shader_identity_after_65536_compiles, 1 },
     { "shader_identity_high_bits", test_shader_identity_high_bits, 1 },
+    { "shadercross_outlives_native_context", test_shadercross_outlives_native_context, 1 },
 };
 
 /* Every case, or with arguments only the cases they name. */
