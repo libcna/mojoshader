@@ -131,7 +131,15 @@ if(TARGET SDL3::SDL3)
     target_link_libraries(cna_sdlgpu_tests PRIVATE mojoshader_cna_sdl)
     add_test(NAME cna_sdlgpu_tests COMMAND cna_sdlgpu_tests)
 
-    if(UNIX AND NOT APPLE)
+    # A real libSDL3_shadercross.so.0 replaces the stand-in on the test's library path when
+    # MOJOSHADER_CNA_SDL_SHADERCROSS_DIR names its directory; shadercross_links_on_device then
+    # links through it on the device.
+    set(MOJOSHADER_CNA_SDL_SHADERCROSS_DIR "" CACHE PATH
+        "Directory of a real libSDL3_shadercross.so.0 for cna_sdlgpu_tests (default: a stand-in)")
+    if(MOJOSHADER_CNA_SDL_SHADERCROSS_DIR)
+        set_tests_properties(cna_sdlgpu_tests PROPERTIES ENVIRONMENT
+            "LD_LIBRARY_PATH=${MOJOSHADER_CNA_SDL_SHADERCROSS_DIR}")
+    elseif(UNIX AND NOT APPLE)
         set(_cna_shadercross_stub_dir "${CMAKE_CURRENT_BINARY_DIR}/shadercross-stub")
         add_library(cna_sdlgpu_shadercross_stub SHARED cna_sdlgpu_shadercross_stub.c)
         set_target_properties(cna_sdlgpu_shadercross_stub PROPERTIES

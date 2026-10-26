@@ -26,3 +26,6 @@ belongs on a private display, not on a desktop someone is using; under AddressSa
 `ASAN_OPTIONS=detect_leaks=0`, since Vulkan drivers leave process allocations behind:
 
     MOJOSHADER_CNA_SDLGPU_DEVICE=1 ASAN_OPTIONS=detect_leaks=0 ctest --test-dir <build> -R sdlgpu
+
+`-DMOJOSHADER_CNA_SDL_SHADERCROSS_DIR=<dir>` puts a real `libSDL3_shadercross.so.0` there instead of
+the stand-in, and the device cases then also link a program through it.

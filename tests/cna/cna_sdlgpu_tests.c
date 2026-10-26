@@ -779,6 +779,50 @@ static void test_uniform_staging_allocation_failure(void)
     CNA_CHECK(a.live == 0, "the context returned everything it allocated");
 } // test_uniform_staging_allocation_failure
 
+/*
+ * With a real SDL3_shadercross on the library path, the test mode links a device's programs
+ * through it: reflection and compilation by ShaderCross, the shaders created on the device. With
+ * the stand-in, which compiles nothing, this is skipped.
+ */
+static void test_shadercross_links_on_device(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx;
+    MOJOSHADER_sdlShaderData *vs, *ps;
+    SDL_GPUShader *gvs = NULL, *gps = NULL;
+
+    if (shadercross_is_stub())
+    {
+        printf("  (the stand-in ShaderCross compiles nothing: skipped)\n");
+        return;
+    } // if
+    ctx = make_context(gpu_device, &a);
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    if (!MOJOSHADER_sdlSetShaderCrossTestMode(ctx, 1))
+        printf("  (no SDL3_shadercross library: skipped)\n");
+    else
+    {
+        vs = compile(ctx, uniform_vs2, sizeof (uniform_vs2));
+        ps = compile(ctx, red_ps2, sizeof (red_ps2));
+        CNA_CHECK(vs && ps, "the shaders compile");
+        if (vs && ps)
+        {
+            CNA_CHECK(link_pair(ctx, vs, ps) != NULL, "the pair links through ShaderCross");
+            MOJOSHADER_sdlGetShaders(ctx, &gvs, &gps);
+            CNA_CHECK((gvs != NULL) && (gps != NULL), "... into both GPU shaders");
+        } // if
+        MOJOSHADER_sdlDeleteShader(ctx, vs);
+        MOJOSHADER_sdlDeleteShader(ctx, ps);
+    } // else
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "the context returned everything it allocated");
+    CNA_CHECK(shadercross_loaded() != 1, "the context unloads the library it loaded");
+} // test_shadercross_links_on_device
+
 /* -- Driver -------------------------------------------------------------------------------- */
 
 static int open_device(void)
@@ -848,6 +892,7 @@ static const TestCase test_cases[] = {
     { "shadercross_outlives_native_context", test_shadercross_outlives_native_context, 1 },
     { "link_allocation_failures", test_link_allocation_failures, 1 },
     { "uniform_staging_allocation_failure", test_uniform_staging_allocation_failure, 1 },
+    { "shadercross_links_on_device", test_shadercross_links_on_device, 1 },
 };
 
 /* Every case, or with arguments only the cases they name. */
