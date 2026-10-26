@@ -713,16 +713,19 @@ static void spv_check_read_reg_id(Context *ctx, RegisterList *r)
     {
         // Register types come from parsed shader bytecode, so a sampler or texture register in a
         // shader model that cannot declare one is a parse error, not a programming mistake. -CNA
+        // ps_1_4 has no DCL either: its t# are implicit TEXCOORD inputs and its stages implicit
+        // samplers. emit_SPIRV_attribute() and emit_SPIRV_sampler() declare them, as they do
+        // the DCL'd ps_2_0 ones, under the id given out here. -CNA
         if (((r->regtype == REG_TYPE_SAMPLER) || (r->regtype == REG_TYPE_TEXTURE)) &&
-            !(shader_is_pixel(ctx) && !shader_version_atleast(ctx, 1, 4)))
+            !(shader_is_pixel(ctx) && !shader_version_atleast(ctx, 2, 0)))
         {
             fail(ctx, "Register type is not declarable in this shader model.");
             return;
         } // if
         switch (r->regtype)
         {
-            case REG_TYPE_SAMPLER: // s# (only ps_1_1)
-            case REG_TYPE_TEXTURE: // t# (only ps_1_1)
+            case REG_TYPE_SAMPLER: // s# (only ps_1_x)
+            case REG_TYPE_TEXTURE: // t# (only ps_1_x)
             case REG_TYPE_INPUT: // v#
             case REG_TYPE_TEMP: // r#
             case REG_TYPE_CONST: // c#
@@ -2205,7 +2208,16 @@ void emit_SPIRV_global(Context *ctx, RegisterType regtype, int regnum)
                     spv_output_regname(ctx, id_input_var, regtype, regnum);
                     return;
                 } // if
-                tid = spv_get_type(ctx, STI_PTR_VEC4_P);
+
+                /* ps_1_4's t0..t5 are read-only TEXCOORD inputs, not ps_1_1's mutable copies:
+                 * emit_SPIRV_attribute() declares each one -- an Input, or TEXCOORD0's
+                 * PointCoord-or-TexCoord0 pair -- exactly as for a ps_2_0 DCL, and the entry
+                 * point reaches it through ctx->attributes. A Private variable here as well was
+                 * a second definition of the same id. Nor does ps_1_4 use id_implicit_input[],
+                 * which holds ps_1_1..1_3's t0..t3 only. -CNA */
+                if (r->spirv.iddecl == 0)
+                    r->spirv.iddecl = spv_bumpid(ctx);
+                return;
             } // else if
             break;
 
