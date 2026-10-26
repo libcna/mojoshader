@@ -221,6 +221,7 @@ typedef struct Context
 
     // !!! FIXME: move these into SUPPORT_PROFILE sections.
     int glsl_generated_lit_helper;
+    int glsl_deferred_vertex_epilogue;  // main() calls cna_vs_epilogue(); finalize defines it. -CNA
     int glsl_generated_texlod_setup;
     int glsl_generated_texm3x3spec_helper;
     int arb1_wrote_position;

@@ -882,6 +882,8 @@ static void emit_GLSL_vertex_epilogue(Context *ctx)
     }
 } // emit_GLSL_vertex_epilogue
 
+static void emit_GLSL_close_function(Context *ctx, const int at_end_of_stream);
+
 void emit_GLSL_end(Context *ctx)
 {
     // ps_1_* writes color to r0 instead oC0. We move it to the right place.
@@ -896,7 +898,7 @@ void emit_GLSL_end(Context *ctx)
 
     // force a RET opcode if we're at the end of the stream without one.
     if (ctx->previous_opcode != OPCODE_RET)
-        emit_GLSL_RET(ctx);
+        emit_GLSL_close_function(ctx, 1);
 } // emit_GLSL_end
 
 void emit_GLSL_phase(Context *ctx)
@@ -933,6 +935,24 @@ void emit_GLSL_finalize(Context *ctx)
     push_output(ctx, &ctx->globals);
     output_blank_line(ctx);
     pop_output(ctx);
+
+    // See emit_GLSL_close_function(). The subroutines buffer precedes main() in the output, so
+    // the definition needs no prototype. -CNA
+    if (ctx->glsl_deferred_vertex_epilogue)
+    {
+        const int indent = ctx->indent;
+        push_output(ctx, &ctx->subroutines);
+        ctx->indent = 0;
+        output_line(ctx, "void cna_vs_epilogue()");
+        output_line(ctx, "{");
+        ctx->indent++;
+        emit_GLSL_vertex_epilogue(ctx);
+        ctx->indent--;
+        output_line(ctx, "}");
+        output_blank_line(ctx);
+        ctx->indent = indent;
+        pop_output(ctx);
+    } // if
 
     // GLSL cannot dynamically index independent attribute/varying variables.
     // Mirror D3D9's fixed input bank in a local-addressable array instead.
@@ -2053,17 +2073,35 @@ void emit_GLSL_LOOP(Context *ctx)
     ctx->indent++;
 } // emit_GLSL_LOOP
 
-void emit_GLSL_RET(Context *ctx)
+// Closes the current function. main()'s vertex epilogue clamps every colour output register
+// the shader writes, but an explicit RET ends main() before the forward subroutines after it are
+// parsed, and a register first written in one of those is not known yet. So at such a RET, main()
+// calls cna_vs_epilogue(), which emit_GLSL_finalize() writes once every register is known; at
+// the end of the stream nothing follows, and the epilogue stays inline as before. -CNA
+static void emit_GLSL_close_function(Context *ctx, const int at_end_of_stream)
 {
     // thankfully, the MSDN specs say a RET _has_ to end a function...no
     //  early returns. So if you hit one, you know you can safely close
     //  a high-level function.
     if (shader_is_vertex(ctx) && (ctx->output == ctx->mainline))
-        emit_GLSL_vertex_epilogue(ctx);
+    {
+        if (at_end_of_stream)
+            emit_GLSL_vertex_epilogue(ctx);
+        else
+        {
+            output_line(ctx, "cna_vs_epilogue();");
+            ctx->glsl_deferred_vertex_epilogue = 1;
+        } // else
+    } // if
     ctx->indent--;
     output_line(ctx, "}");
     output_blank_line(ctx);
     set_output(ctx, &ctx->subroutines);  // !!! FIXME: is this for LABEL? Maybe set it there so we don't allocate unnecessarily.
+} // emit_GLSL_close_function
+
+void emit_GLSL_RET(Context *ctx)
+{
+    emit_GLSL_close_function(ctx, 0);
 } // emit_GLSL_RET
 
 void emit_GLSL_ENDLOOP(Context *ctx)
