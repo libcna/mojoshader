@@ -91,3 +91,5 @@ if(MOJOSHADER_SHADERC_LIBRARY)
     set_property(TEST cna_hlsl_metal_tests APPEND PROPERTY
         ENVIRONMENT "MOJOSHADER_SHADERC=${MOJOSHADER_SHADERC_LIBRARY}")
 endif()
+
+mojoshader_cna_test(cna_printfloat_tests)

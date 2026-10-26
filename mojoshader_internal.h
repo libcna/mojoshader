@@ -246,6 +246,13 @@ typedef Uint64 uint64;
 typedef unsigned int uint;  // this is a printf() helper. don't use for code.
 
 // Locale-independent float printing replacement for snprintf
+/* It writes the shortest decimal, nine significant digits at most, that reads back as exactly
+ * `arg`: a digit on each side of a '.', and an exponent outside 0.0001 to 10^9 ("0.5", "-0.0",
+ * "1.0e-10", "3.4028235e38"); a non-finite value is "inf", "-inf" or "nan". Nothing exceeds 15
+ * characters. As with snprintf, at most maxlen - 1 characters and a NUL are written (nothing
+ * when maxlen is 0), and the full length is returned, so a result >= maxlen means truncation.
+ * -CNA
+ */
 size_t MOJOSHADER_printFloat(char *text, size_t maxlen, float arg);
 
 #ifdef _MSC_VER

@@ -188,36 +188,44 @@ void output_blank_line(Context *ctx)
         buffer_append(ctx->output, ctx->endline, ctx->endline_len);
 } // output_blank_line
 
-// !!! FIXME: this is sort of nasty.
+/* MOJOSHADER_printFloat already writes the C-locale literal the profiles want, with no
+ * redundant zeros ("0.5", "-0.0", "1.0e-10"). The old trimming here could append ".0" after an
+ * exponent and refused anything whose untrimmed length was within two of the buffer size. Now
+ * a ".0" fraction is dropped only for leavedecimal == 0 (the D3D disassembly's "1", "1e28"), and
+ * only a spelling that really does not fit fails. -CNA
+ */
 void floatstr(Context *ctx, char *buf, size_t bufsize, float f,
               int leavedecimal)
 {
     const size_t len = MOJOSHADER_printFloat(buf, bufsize, f);
-    if ((len+2) >= bufsize)
-        fail(ctx, "BUG: internal buffer is too small");
-    else
-    {
-        char *end = buf + len;
-        char *ptr = strchr(buf, '.');
-        if (ptr == NULL)
-        {
-            if (leavedecimal)
-                strcat(buf, ".0");
-            return;  // done.
-        } // if
+    char *dot;
+    char *exponent;
+    char *end;
 
-        while (--end != ptr)
+    if (len >= bufsize)
+    {
+        fail(ctx, "BUG: internal buffer is too small");
+        return;
+    } // if
+
+    dot = strchr(buf, '.');
+    if (dot == NULL)
+        return;  // "inf", "-inf" or "nan": no number to trim.
+
+    exponent = strchr(dot, 'e');
+    end = (exponent != NULL) ? exponent : (buf + len);
+    if ((!leavedecimal) && (end == dot + 2) && (dot[1] == '0'))
+    {
+        if (exponent == NULL)
+            *dot = '\0';
+        else
         {
-            if (*end != '0')
-            {
-                end++;
-                break;
-            } // if
-        } // while
-        if ((leavedecimal) && (end == ptr))
-            end += 2;
-        *end = '\0';  // chop extra '0' or all decimal places off.
-    } // else
+            size_t i;  // move the exponent over the ".0"
+            for (i = 0; exponent[i] != '\0'; i++)
+                dot[i] = exponent[i];
+            dot[i] = '\0';
+        } // else
+    } // if
 } // floatstr
 
 // Deal with register lists...

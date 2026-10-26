@@ -970,124 +970,351 @@ void buffer_patch(Buffer *buffer, const size_t start,
     } // while
 } // buffer_patch
 
-// Based on SDL_string.c's SDL_PrintFloat function
-size_t MOJOSHADER_printFloat(char *text, size_t maxlen, float arg)
+/* MOJOSHADER_printFloat converts with integer arithmetic only. The upstream version scaled the
+ * value with floating-point multiplies and printed nine *fractional* digits, so 1e-10 and every
+ * subnormal became 0, 0.9 came back as the next float up, -0.0 lost its sign and the digits
+ * depended on SSE versus x87 evaluation; its "%.1f" fallback past 2^64 followed LC_NUMERIC and
+ * needed more room than any caller gives it.
+ *
+ * A finite float is exactly m * 2^e with m < 2^24, and any decimal strictly between it and the
+ * midpoints to its two neighbours reads back as it. Over one integer denominator s, with
+ * r / s = v / 10^k in [1, 10), long division of r by s yields v's decimal digits one at a time,
+ * exactly. After each digit, the nearest decimal of that length is taken once it lies inside
+ * the midpoints: the shortest such spelling, never more than the nine digits that always
+ * suffice for binary32. -CNA
+ */
+
+// The largest intermediate value below needs 205 bits, whatever the exponent; the asserts
+// catch anything that would not fit.
+#define PRINTFLOAT_BIG_WORDS 8
+
+typedef struct PrintFloatBig
 {
-    size_t len;
-    size_t left = maxlen;
-    char *textstart = text;
-    /* The cursor is deliberately advanced past the end so the return value stays the length the
-     * caller would have needed -- that is how callers detect a too-small buffer. Once it is past,
-     * nothing may be written through it, so each formatting step below asks snprintf for the
-     * needed length instead of writing. -CNA
-     */
-    const char *textend = text + maxlen;
+    uint32 word[PRINTFLOAT_BIG_WORDS];  // least significant first
+} PrintFloatBig;
 
-    int precision = 9;
+static void printfloat_big_set(PrintFloatBig *big, const uint32 value)
+{
+    memset(big->word, '\0', sizeof (big->word));
+    big->word[0] = value;
+} // printfloat_big_set
 
-    if (isnan(arg))
+static int printfloat_big_bits(const PrintFloatBig *big)
+{
+    int i;
+    for (i = PRINTFLOAT_BIG_WORDS - 1; i >= 0; i--)
     {
-        if (left > 3)
+        if (big->word[i] != 0)
         {
-            snprintf(text, left, "NaN");
-            left -= 3;
+            int bits = i * 32;
+            uint32 word = big->word[i];
+            for (; word != 0; word >>= 1)
+                bits++;
+            return bits;
         } // if
-        text += 3;
-    } // if
-    else if (isinf(arg))
+    } // for
+    return 0;
+} // printfloat_big_bits
+
+static int printfloat_big_cmp(const PrintFloatBig *a, const PrintFloatBig *b)
+{
+    int i;
+    for (i = PRINTFLOAT_BIG_WORDS - 1; i >= 0; i--)
     {
-        if (left > 3)
-        {
-            snprintf(text, left, "inf");
-            left -= 3;
-        } // if
-        text += 3;
-    } // else if
-    else if (arg)
+        if (a->word[i] != b->word[i])
+            return (a->word[i] > b->word[i]) ? 1 : -1;
+    } // for
+    return 0;
+} // printfloat_big_cmp
+
+// a -= b; a must not be less than b.
+static void printfloat_big_sub(PrintFloatBig *a, const PrintFloatBig *b)
+{
+    uint32 borrow = 0;
+    int i;
+    for (i = 0; i < PRINTFLOAT_BIG_WORDS; i++)
     {
-        /* This isn't especially accurate, but hey, it's easy. :) */
-        /* `unsigned long` is 64 bits on LP64 and 32 on wasm32 and every other ILP32 target, so a
-         * perfectly ordinary shader constant -- ShipGame's Particle.fx says `Pos.xyz = 1e10` --
-         * converted out of range here. That is undefined behaviour; in practice the value
-         * saturated, the fractional loop below then printed nine more full-width numbers, and the
-         * caller's 32-byte buffer overflowed with "BUG: internal buffer is too small". The effect
-         * therefore compiled on x86-64 and failed under Emscripten. A fixed-width type makes the
-         * two agree; a magnitude no integer type can hold takes the plain decimal route below,
-         * which is defined and still carries the '.' floatstr() requires. -CNA
-         */
-        uint64 value;
+        const uint64 subtrahend = ((uint64) b->word[i]) + borrow;
+        borrow = (((uint64) a->word[i]) < subtrahend) ? 1 : 0;
+        a->word[i] = (uint32) (((uint64) a->word[i]) - subtrahend);
+    } // for
+    assert(borrow == 0);
+} // printfloat_big_sub
 
-        if (!(fabs((double) arg) < 18446744073709551616.0))  /* the sign is handled below */
-        {
-            if (arg < 0)
-            {
-                if (left > 1)
-                {
-                    *text = '-';
-                    --left;
-                } // if
-                ++text;
-                arg = -arg;
-            } // if
-            len = (text < textend) ? (size_t) snprintf(text, left, "%.1f", (double) arg)
-                                   : (size_t) snprintf(NULL, 0, "%.1f", (double) arg);
-            text += len;
-            return (text - textstart);
-        } // if
+static void printfloat_big_mul(PrintFloatBig *big, const uint32 factor)
+{
+    uint64 carry = 0;
+    int i;
+    for (i = 0; i < PRINTFLOAT_BIG_WORDS; i++)
+    {
+        carry += ((uint64) big->word[i]) * factor;
+        big->word[i] = (uint32) carry;
+        carry >>= 32;
+    } // for
+    assert(carry == 0);
+} // printfloat_big_mul
 
-        if (arg < 0)
-        {
-            if (left > 1)
-            {
-                *text = '-';
-                --left;
-            } // if
-            ++text;
-            arg = -arg;
-        } // if
-        value = (uint64) arg;
-        len = (text < textend) ? (size_t) snprintf(text, left, "%llu", (unsigned long long) value)
-                               : (size_t) snprintf(NULL, 0, "%llu", (unsigned long long) value);
-        text += len;
-        if (len >= left)
-            left = (left < 1) ? left : 1;
-        else
-            left -= len;
-        arg -= value;
+static void printfloat_big_mul_pow10(PrintFloatBig *big, int power)
+{
+    static const uint32 pow10[9] = {
+        1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000
+    };
+    for (; power >= 9; power -= 9)
+        printfloat_big_mul(big, 1000000000);
+    printfloat_big_mul(big, pow10[power]);
+} // printfloat_big_mul_pow10
 
-        long long mult = 10;
-        if (left > 1)
+static void printfloat_big_shl(PrintFloatBig *big, const int bits)
+{
+    const int words = bits / 32;
+    const int shift = bits % 32;
+    int i;
+    assert(printfloat_big_bits(big) + bits <= PRINTFLOAT_BIG_WORDS * 32);
+    for (i = PRINTFLOAT_BIG_WORDS - 1; i >= 0; i--)
+    {
+        uint32 value = 0;
+        if (i >= words)
         {
-            *text = '.';
-            --left;
+            value = big->word[i - words] << shift;
+            if ((shift != 0) && (i > words))
+                value |= big->word[i - words - 1] >> (32 - shift);
         } // if
-        ++text;
-        while (precision-- > 0)
-        {
-            value = (uint64) (arg * mult);
-            len = (text < textend) ? (size_t) snprintf(text, left, "%llu", (unsigned long long) value)
-                                   : (size_t) snprintf(NULL, 0, "%llu", (unsigned long long) value);
-            text += len;
-            if (len >= left)
-                left = (left < 1) ? left : 1;
-            else
-                left -= len;
-            arg -= (double) value / mult;
-            if (arg < 0) arg = -arg; // Sometimes that bit gets flipped...
-            mult *= 10;
-        } // while
+        big->word[i] = value;
+    } // for
+} // printfloat_big_shl
+
+/* The significant digits of a nonzero finite float and the decimal exponent of the first one;
+ * returns the digit count, 1 to 9, with no trailing zeros. */
+static int printfloat_digits(const uint32 biased, const uint32 fraction, char *digits,
+                             int *exponent10)
+{
+    static const uint32 pow10[10] = {
+        1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000
+    };
+    const uint32 m = (biased != 0) ? (fraction | 0x800000) : fraction;
+    const int e = (biased != 0) ? (((int) biased) - 150) : -149;
+    PrintFloatBig r, s, gap_up, gap_down, value_scaled, temp, distance, room;
+    uint32 value = 0;
+    int count = 0;
+    int round_up = 0;
+    int b = e - 1;
+    int k;
+    uint32 bitsleft;
+    int i;
+
+    // v = 4m * 2^(e-2); the midpoints are 2 units of 2^(e-2) away, except that the float below
+    // a power of two is half as far away, apart from the smallest normal one.
+    printfloat_big_set(&r, 4 * m);
+    printfloat_big_set(&gap_up, 2);
+    printfloat_big_set(&gap_down, ((fraction == 0) && (biased > 1)) ? 1 : 2);
+    printfloat_big_set(&s, 1);
+    if (e >= 2)
+    {
+        printfloat_big_shl(&r, e - 2);
+        printfloat_big_shl(&gap_up, e - 2);
+        printfloat_big_shl(&gap_down, e - 2);
     } // if
     else
     {
-        if (left > 3)
-        {
-            snprintf(text, left, "0.0");
-            left -= 3;
-        } // if
-        text += 3;
+        printfloat_big_shl(&s, 2 - e);
     } // else
 
-    return (text - textstart);
+    // v is in [2^b, 2^(b+1)), so k = floor(log10(v)) is floor(b * log10(2)) or one more;
+    // 1233 / 4096 approximates log10(2), and the loop below corrects either way.
+    for (bitsleft = m; bitsleft != 0; bitsleft >>= 1)
+        b++;
+    k = (b >= 0) ? ((b * 1233) / 4096) : -((((-b) * 1233) + 4095) / 4096);
+    if (k >= 0)
+        printfloat_big_mul_pow10(&s, k);
+    else
+    {
+        printfloat_big_mul_pow10(&r, -k);
+        printfloat_big_mul_pow10(&gap_up, -k);
+        printfloat_big_mul_pow10(&gap_down, -k);
+    } // else
+
+    for (;;)  // bring r / s into [1, 10)
+    {
+        temp = s;
+        printfloat_big_mul(&temp, 10);
+        if (printfloat_big_cmp(&r, &temp) >= 0)
+        {
+            s = temp;
+            k++;
+        } // if
+        else if (printfloat_big_cmp(&r, &s) < 0)
+        {
+            printfloat_big_mul(&r, 10);
+            printfloat_big_mul(&gap_up, 10);
+            printfloat_big_mul(&gap_down, 10);
+            k--;
+        } // else if
+        else
+        {
+            break;
+        } // else
+    } // for
+
+    // value_scaled is v itself at the current digit's scale, r the remainder below the digits.
+    value_scaled = r;
+    for (;;)
+    {
+        uint32 digit = 0;
+        int order;
+        while (printfloat_big_cmp(&r, &s) >= 0)
+        {
+            printfloat_big_sub(&r, &s);
+            digit++;
+        } // while
+        value = (value * 10) + digit;
+        count++;
+
+        // The nearest decimal of this length, ties to even.
+        temp = r;
+        printfloat_big_shl(&temp, 1);
+        order = printfloat_big_cmp(&temp, &s);
+        round_up = (order > 0) || ((order == 0) && ((value & 1) != 0));
+        if (round_up)
+        {
+            distance = s;
+            printfloat_big_sub(&distance, &r);
+            room = gap_up;
+        } // if
+        else
+        {
+            distance = r;
+            room = gap_down;
+        } // else
+
+        if (count == 9)
+            break;  // nine digits always land well inside the midpoints
+
+        /* Inside the midpoint, and by more than 2^-51 of v: many shader compilers read a
+         * literal as a double and then round that to float, and a decimal within a double's
+         * rounding error of a midpoint could land on it and round the other way. */
+        if (printfloat_big_cmp(&room, &distance) > 0)
+        {
+            printfloat_big_sub(&room, &distance);
+            printfloat_big_shl(&room, 51);
+            if (printfloat_big_cmp(&room, &value_scaled) > 0)
+                break;
+        } // if
+
+        printfloat_big_mul(&r, 10);
+        printfloat_big_mul(&gap_up, 10);
+        printfloat_big_mul(&gap_down, 10);
+        printfloat_big_mul(&value_scaled, 10);
+    } // for
+
+    if (round_up)
+        value++;
+    if (value == pow10[count])  // 9.99... rounded up to 10
+    {
+        value /= 10;
+        k++;
+    } // if
+
+    for (i = count - 1; i >= 0; i--)
+    {
+        digits[i] = (char) ('0' + (value % 10));
+        value /= 10;
+    } // for
+    while ((count > 1) && (digits[count - 1] == '0'))
+        count--;
+
+    *exponent10 = k;
+    return count;
+} // printfloat_digits
+
+size_t MOJOSHADER_printFloat(char *text, size_t maxlen, float arg)
+{
+    char spelling[32];  // no spelling is longer than 15 characters
+    size_t len = 0;
+    uint32 bits;
+    uint32 biased;
+    uint32 fraction;
+    int negative;
+
+    memcpy(&bits, &arg, sizeof (bits));
+    negative = ((bits >> 31) != 0);
+    biased = (bits >> 23) & 0xFF;
+    fraction = bits & 0x7FFFFF;
+
+    if (negative && !((biased == 0xFF) && (fraction != 0)))
+        spelling[len++] = '-';
+
+    if (biased == 0xFF)
+    {
+        // Not a number in any shader language; floatstr() spells these per profile.
+        const char *name = (fraction != 0) ? "nan" : "inf";
+        while (*name)
+            spelling[len++] = *(name++);
+    } // if
+    else if ((biased == 0) && (fraction == 0))
+    {
+        spelling[len++] = '0';
+        spelling[len++] = '.';
+        spelling[len++] = '0';
+    } // else if
+    else
+    {
+        char digits[9];
+        int exponent;
+        const int count = printfloat_digits(biased, fraction, digits, &exponent);
+        int i;
+
+        /* Plain from 0.0001 to below 10^9 and with an exponent outside that ("1.0e-10",
+         * "3.4028235e38"), so nothing exceeds 15 characters. A digit on each side of a '.'
+         * reads as a float in every text profile's language, where a bare "1" is an int in
+         * GLSL ES 1.00, which has no 'f' suffix. */
+        if ((exponent >= -4) && (exponent <= 8))
+        {
+            if (exponent < 0)
+            {
+                spelling[len++] = '0';
+                spelling[len++] = '.';
+                for (i = -1; i > exponent; i--)
+                    spelling[len++] = '0';
+                for (i = 0; i < count; i++)
+                    spelling[len++] = digits[i];
+            } // if
+            else
+            {
+                for (i = 0; i <= exponent; i++)
+                    spelling[len++] = (i < count) ? digits[i] : '0';
+                spelling[len++] = '.';
+                if (count <= exponent + 1)
+                    spelling[len++] = '0';
+                for (i = exponent + 1; i < count; i++)
+                    spelling[len++] = digits[i];
+            } // else
+        } // if
+        else
+        {
+            const int magnitude = (exponent < 0) ? -exponent : exponent;
+            spelling[len++] = digits[0];
+            spelling[len++] = '.';
+            if (count == 1)
+                spelling[len++] = '0';
+            for (i = 1; i < count; i++)
+                spelling[len++] = digits[i];
+            spelling[len++] = 'e';
+            if (exponent < 0)
+                spelling[len++] = '-';
+            if (magnitude >= 10)
+                spelling[len++] = (char) ('0' + (magnitude / 10));
+            spelling[len++] = (char) ('0' + (magnitude % 10));
+        } // else
+    } // else
+
+    assert(len < sizeof (spelling));
+    if (maxlen > 0)
+    {
+        const size_t kept = (len < maxlen) ? len : (maxlen - 1);
+        memcpy(text, spelling, kept);
+        text[kept] = '\0';
+    } // if
+    return len;
 } // MOJOSHADER_printFloat
 
 #if SUPPORT_PROFILE_SPIRV
