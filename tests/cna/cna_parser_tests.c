@@ -290,9 +290,84 @@ static void test_shader_ctab_span_truncated(void)
     cna_words_free(&w);
 } // test_shader_ctab_span_truncated
 
+/* A-06: parse_preshader() set instruction_count before the instruction array was allocated, so a
+ * failed allocation left the destructor walking a NULL array; its register allocation was zeroed
+ * unchecked. Fail each allocation of an otherwise valid preshader parse in turn: every run must
+ * return cleanly and free everything, whichever allocation failed. */
+static void test_preshader_allocation_failures(void)
+{
+    CnaWords w;
+    unsigned char *copy;
+    size_t bytes;
+    int fail_at;
+    int got_full_run = 0;
+
+    memset(&w, '\0', sizeof (w));
+    cna_push_preshader(&w, "Scale", NULL);
+    copy = (unsigned char *) cna_exact_copy(w.at, w.count * 4);
+    bytes = w.count * 4;
+
+    for (fail_at = 1; fail_at <= 64; fail_at++)
+    {
+        const MOJOSHADER_preshader *pre;
+        cna_alloc_reset(fail_at);
+        pre = MOJOSHADER_parsePreshader(copy, (unsigned int) bytes,
+                                        cna_alloc_malloc, cna_alloc_free, NULL);
+        MOJOSHADER_freePreshader(pre);
+        CNA_CHECK(cna_alloc_live() == 0, "no allocation outlives a preshader parse");
+        if (!cna_alloc_hit())
+        {
+            got_full_run = 1;   /* fewer allocations than fail_at: every point has been covered */
+            break;
+        } // if
+    } // for
+    CNA_CHECK(got_full_run, "the injection sweep reached a complete run");
+
+    free(copy);
+    cna_words_free(&w);
+} // test_preshader_allocation_failures
+
+/* A-06: the same, reaching parse_preshader() through a full vs_2_0 shader that carries one. */
+static void test_shader_with_preshader_allocation_failures(void)
+{
+    CnaWords w;
+    unsigned char *copy;
+    size_t bytes;
+    int fail_at;
+    int got_full_run = 0;
+
+    memset(&w, '\0', sizeof (w));
+    cna_push_vs_with_preshader(&w);
+    copy = (unsigned char *) cna_exact_copy(w.at, w.count * 4);
+    bytes = w.count * 4;
+
+    for (fail_at = 1; fail_at <= 128; fail_at++)
+    {
+        const MOJOSHADER_parseData *pd;
+        cna_alloc_reset(fail_at);
+        pd = MOJOSHADER_parse("glsl", "main", copy, (unsigned int) bytes,
+                              NULL, 0, NULL, 0, cna_alloc_malloc, cna_alloc_free, NULL);
+        CNA_CHECK(pd != NULL, "a parse result always comes back");
+        MOJOSHADER_freeParseData(pd);
+        CNA_CHECK(cna_alloc_live() == 0, "no allocation outlives a shader parse");
+        if (!cna_alloc_hit())
+        {
+            got_full_run = 1;
+            break;
+        } // if
+    } // for
+    CNA_CHECK(got_full_run, "the injection sweep reached a complete run");
+
+    free(copy);
+    cna_words_free(&w);
+} // test_shader_with_preshader_allocation_failures
+
 int main(void)
 {
     cna_test_run("ctab_struct_members_beyond_64k", test_ctab_struct_members_beyond_64k);
+    cna_test_run("preshader_allocation_failures", test_preshader_allocation_failures);
+    cna_test_run("shader_with_preshader_allocation_failures",
+                 test_shader_with_preshader_allocation_failures);
     cna_test_run("preshader_valid_still_parses", test_preshader_valid_still_parses);
     cna_test_run("preshader_empty_buffer", test_preshader_empty_buffer);
     cna_test_run("preshader_short_clit_block", test_preshader_short_clit_block);

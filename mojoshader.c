@@ -4721,11 +4721,13 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     } // if
 
     const size_t len = sizeof (MOJOSHADER_preshaderInstruction) * opcode_count;
-    preshader->instruction_count = (unsigned int) opcode_count;
     preshader->instructions = (MOJOSHADER_preshaderInstruction *) Malloc(ctx, len);
     if (preshader->instructions == NULL)
         return;
     memset(preshader->instructions, '\0', len);
+    // Publish the count only once the array behind it exists: the destructor walks
+    // instruction_count entries, and a count set before a failed Malloc pointed it at NULL. -CNA
+    preshader->instruction_count = (unsigned int) opcode_count;
 
     MOJOSHADER_preshaderInstruction *inst = preshader->instructions;
     while (opcode_count--)
@@ -4952,6 +4954,9 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     {
         const size_t len = largest * sizeof (float) * 4;
         preshader->registers = (float *) Malloc(ctx, len);
+        // A failed Malloc here was zeroed unchecked, writing through NULL. -CNA
+        if (preshader->registers == NULL)
+            return;
         memset(preshader->registers, '\0', len);
         preshader->register_count = largest;
     } // if
