@@ -410,7 +410,7 @@ void fail(Context *ctx, const char *reason);
 void output_line(Context *ctx, const char *fmt, ...);
 void output_blank_line(Context *ctx);
 
-void floatstr(Context *ctx, char *buf, size_t bufsize, float f,
+void floatstr(Context *ctx, char *buf, size_t bufsize, const float *f,
               int leavedecimal);
 
 RegisterList *reglist_insert(Context *ctx, RegisterList *prev,

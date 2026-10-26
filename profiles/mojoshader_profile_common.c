@@ -192,9 +192,11 @@ void output_blank_line(Context *ctx)
  * redundant zeros ("0.5", "-0.0", "1.0e-10"). The old trimming here could append ".0" after an
  * exponent and refused anything whose untrimmed length was within two of the buffer size. Now
  * a ".0" fraction is dropped only for leavedecimal == 0 (the D3D disassembly's "1", "1e28"), and
- * only a spelling that really does not fit fails. -CNA
+ * only a spelling that really does not fit fails. The constant comes by address: passed as a
+ * float by value, it travels through an x87 register on i386, which turns a signalling NaN into
+ * a quiet one before its bits can be written out. -CNA
  */
-void floatstr(Context *ctx, char *buf, size_t bufsize, float f,
+void floatstr(Context *ctx, char *buf, size_t bufsize, const float *f,
               int leavedecimal)
 {
     size_t len;
@@ -203,7 +205,7 @@ void floatstr(Context *ctx, char *buf, size_t bufsize, float f,
     char *end;
     uint32 bits;
 
-    memcpy(&bits, &f, sizeof (bits));
+    memcpy(&bits, f, sizeof (bits));
     if ((bits & 0x7F800000) == 0x7F800000)
     {
         // Infinity or NaN. These used to come out as "inf" (for either sign) or "NaN", which
@@ -235,7 +237,7 @@ void floatstr(Context *ctx, char *buf, size_t bufsize, float f,
         return;
     } // if
 
-    len = MOJOSHADER_printFloat(buf, bufsize, f);
+    len = MOJOSHADER_printFloat(buf, bufsize, *f);  // finite floats survive any FPU intact
     if (len >= bufsize)
     {
         fail(ctx, "BUG: internal buffer is too small");

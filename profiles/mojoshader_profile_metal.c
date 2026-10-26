@@ -1002,10 +1002,10 @@ void emit_METAL_const_array(Context *ctx, const ConstantsList *clist,
         char val1[32];
         char val2[32];
         char val3[32];
-        floatstr(ctx, val0, sizeof (val0), clist->constant.value.f[0], 1);
-        floatstr(ctx, val1, sizeof (val1), clist->constant.value.f[1], 1);
-        floatstr(ctx, val2, sizeof (val2), clist->constant.value.f[2], 1);
-        floatstr(ctx, val3, sizeof (val3), clist->constant.value.f[3], 1);
+        floatstr(ctx, val0, sizeof (val0), &clist->constant.value.f[0], 1);
+        floatstr(ctx, val1, sizeof (val1), &clist->constant.value.f[1], 1);
+        floatstr(ctx, val2, sizeof (val2), &clist->constant.value.f[2], 1);
+        floatstr(ctx, val3, sizeof (val3), &clist->constant.value.f[3], 1);
 
         output_line(ctx, "float4(%s, %s, %s, %s)%s", val0, val1, val2, val3,
                         (i < (size-1)) ? "," : "");
@@ -2561,10 +2561,10 @@ void emit_METAL_DEF(Context *ctx)
 {
     const float *val = (const float *) ctx->dwords; // !!! FIXME: could be int?
     char varname[64]; get_METAL_destarg_varname(ctx, varname, sizeof (varname));
-    char val0[32]; floatstr(ctx, val0, sizeof (val0), val[0], 1);
-    char val1[32]; floatstr(ctx, val1, sizeof (val1), val[1], 1);
-    char val2[32]; floatstr(ctx, val2, sizeof (val2), val[2], 1);
-    char val3[32]; floatstr(ctx, val3, sizeof (val3), val[3], 1);
+    char val0[32]; floatstr(ctx, val0, sizeof (val0), &val[0], 1);
+    char val1[32]; floatstr(ctx, val1, sizeof (val1), &val[1], 1);
+    char val2[32]; floatstr(ctx, val2, sizeof (val2), &val[2], 1);
+    char val3[32]; floatstr(ctx, val3, sizeof (val3), &val[3], 1);
 
     push_output(ctx, &ctx->mainline_top);
     ctx->indent++;

@@ -565,10 +565,10 @@ void emit_D3D_DEF(Context *ctx)
     char val1[32];
     char val2[32];
     char val3[32];
-    floatstr(ctx, val0, sizeof (val0), val[0], 0);
-    floatstr(ctx, val1, sizeof (val1), val[1], 0);
-    floatstr(ctx, val2, sizeof (val2), val[2], 0);
-    floatstr(ctx, val3, sizeof (val3), val[3], 0);
+    floatstr(ctx, val0, sizeof (val0), &val[0], 0);
+    floatstr(ctx, val1, sizeof (val1), &val[1], 0);
+    floatstr(ctx, val2, sizeof (val2), &val[2], 0);
+    floatstr(ctx, val3, sizeof (val3), &val[3], 0);
     output_line(ctx, "def%s, %s, %s, %s, %s", dst, val0, val1, val2, val3);
 } // emit_D3D_DEF
 
