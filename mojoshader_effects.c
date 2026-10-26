@@ -1775,25 +1775,25 @@ void MOJOSHADER_deleteEffect(const MOJOSHADER_effect *_effect)
 } // MOJOSHADER_freeEffect
 
 
-// A failed copy leaves the destination string NULL (as the caller memset it); the owning value is
-// freed either way, so the clone is short a name rather than crashing on strcpy(NULL). -CNA
+// The copy helpers below return 0 when an allocation failed, leaving the destination partial but
+// safe to free, and the clone gives up: a copy that quietly skipped a string or a value array
+// (as these did) handed back a "successful" clone missing a parameter's name or its data. -CNA
 #define COPY_STRING(location) \
     if (src->location != NULL) \
     { \
         siz = strlen(src->location) + 1; \
         stringcopy = (char *) m(siz, d); \
-        if (stringcopy != NULL) \
-        { \
-            strcpy(stringcopy, src->location); \
-            dst->location = stringcopy; \
-        } \
+        if (stringcopy == NULL) \
+            return 0; \
+        strcpy(stringcopy, src->location); \
+        dst->location = stringcopy; \
     } // if
 
 
-void copysymboltypeinfo(MOJOSHADER_symbolTypeInfo *dst,
-                        MOJOSHADER_symbolTypeInfo *src,
-                        MOJOSHADER_malloc m,
-                        void *d)
+int copysymboltypeinfo(MOJOSHADER_symbolTypeInfo *dst,
+                       MOJOSHADER_symbolTypeInfo *src,
+                       MOJOSHADER_malloc m,
+                       void *d)
 {
     int i;
     uint32 siz = 0;
@@ -1806,7 +1806,7 @@ void copysymboltypeinfo(MOJOSHADER_symbolTypeInfo *dst,
         if (dst->members == NULL)
         {
             dst->member_count = 0;
-            return;
+            return 0;
         } // if
         // COPY_STRING assigns nothing when the source string is NULL, which a member name
         // legitimately is, so without this the copy keeps whatever the heap held there. -CNA
@@ -1814,16 +1814,18 @@ void copysymboltypeinfo(MOJOSHADER_symbolTypeInfo *dst,
         for (i = 0; i < dst->member_count; i++)
         {
             COPY_STRING(members[i].name)
-            copysymboltypeinfo(&dst->members[i].info, &src->members[i].info, m, d);
+            if (!copysymboltypeinfo(&dst->members[i].info, &src->members[i].info, m, d))
+                return 0;
         } // for
     } // if
+    return 1;
 } // copysymboltypeinfo
 
 
-void copyvalue(MOJOSHADER_effectValue *dst,
-               MOJOSHADER_effectValue *src,
-               MOJOSHADER_malloc m,
-               void *d)
+int copyvalue(MOJOSHADER_effectValue *dst,
+              MOJOSHADER_effectValue *src,
+              MOJOSHADER_malloc m,
+              void *d)
 {
     int i;
     uint32 siz = 0;
@@ -1831,7 +1833,8 @@ void copyvalue(MOJOSHADER_effectValue *dst,
 
     COPY_STRING(name)
     COPY_STRING(semantic)
-    copysymboltypeinfo(&dst->type, &src->type, m, d);
+    if (!copysymboltypeinfo(&dst->type, &src->type, m, d))
+        return 0;
     dst->value_count = src->value_count;
 
     if (dst->type.parameter_class == MOJOSHADER_SYMCLASS_SCALAR
@@ -1847,7 +1850,7 @@ void copyvalue(MOJOSHADER_effectValue *dst,
         if (dst->values == NULL)
         {
             dst->value_count = 0;
-            return;
+            return 0;
         } // if
         if (siz > 0)
             memcpy(dst->values, src->values, siz);
@@ -1867,15 +1870,16 @@ void copyvalue(MOJOSHADER_effectValue *dst,
             if (dst->values == NULL)
             {
                 dst->value_count = 0;
-                return;
+                return 0;
             } // if
             memset(dst->values, '\0', siz);
             for (i = 0; i < (int) dst->value_count; i++)
             {
                 dst->valuesSS[i].type = src->valuesSS[i].type;
-                copyvalue(&dst->valuesSS[i].value,
-                          &src->valuesSS[i].value,
-                          m, d);
+                if (!copyvalue(&dst->valuesSS[i].value,
+                               &src->valuesSS[i].value,
+                               m, d))
+                    return 0;
             } // for
         } // if
         else
@@ -1885,23 +1889,24 @@ void copyvalue(MOJOSHADER_effectValue *dst,
             if (dst->values == NULL)
             {
                 dst->value_count = 0;
-                return;
+                return 0;
             } // if
             if (siz > 0)
                 memcpy(dst->values, src->values, siz);
         } // else
     } // else if
 
+    return 1;
 } // copyvalue
 
 
 #undef COPY_STRING
 
 
-void copysymbolinfo(MOJOSHADER_symbolTypeInfo *dst,
-                    MOJOSHADER_symbolTypeInfo *src,
-                    MOJOSHADER_malloc m,
-                    void *d)
+int copysymbolinfo(MOJOSHADER_symbolTypeInfo *dst,
+                   MOJOSHADER_symbolTypeInfo *src,
+                   MOJOSHADER_malloc m,
+                   void *d)
 {
     int i;
     uint32 siz;
@@ -1921,7 +1926,7 @@ void copysymbolinfo(MOJOSHADER_symbolTypeInfo *dst,
         if (dst->members == NULL)
         {
             dst->member_count = 0;
-            return;
+            return 0;
         } // if
         // Zero first, so a name or nested member a failed allocation below never reaches is a
         // NULL the destructor can free, not heap garbage it would dereference. -CNA
@@ -1932,22 +1937,23 @@ void copysymbolinfo(MOJOSHADER_symbolTypeInfo *dst,
             {
                 siz = strlen(src->members[i].name) + 1;
                 stringcopy = (char *) m(siz, d);
-                if (stringcopy != NULL)
-                {
-                    strcpy(stringcopy, src->members[i].name);
-                    dst->members[i].name = stringcopy;
-                } // if
+                if (stringcopy == NULL)
+                    return 0;
+                strcpy(stringcopy, src->members[i].name);
+                dst->members[i].name = stringcopy;
             } // if
-            copysymbolinfo(&dst->members[i].info, &src->members[i].info, m, d);
+            if (!copysymbolinfo(&dst->members[i].info, &src->members[i].info, m, d))
+                return 0;
         } // for
     } // if
+    return 1;
 } // copysymbolinfo
 
 
-void copysymbol(MOJOSHADER_symbol *dst,
-                MOJOSHADER_symbol *src,
-                MOJOSHADER_malloc m,
-                void *d)
+int copysymbol(MOJOSHADER_symbol *dst,
+               MOJOSHADER_symbol *src,
+               MOJOSHADER_malloc m,
+               void *d)
 {
     uint32 siz = strlen(src->name) + 1;
     char *stringcopy = (char *) m(siz, d);
@@ -1958,7 +1964,9 @@ void copysymbol(MOJOSHADER_symbol *dst,
     dst->register_set = src->register_set;
     dst->register_index = src->register_index;
     dst->register_count = src->register_count;
-    copysymbolinfo(&dst->info, &src->info, m, d);
+    if (stringcopy == NULL)
+        return 0;
+    return copysymbolinfo(&dst->info, &src->info, m, d);
 } // copysymbol
 
 
@@ -2006,7 +2014,11 @@ MOJOSHADER_preshader *copypreshader(const MOJOSHADER_preshader *src,
     retval->symbol_count = src->symbol_count;
 
     for (i = 0; i < (int) retval->symbol_count; i++)
-        copysymbol(&retval->symbols[i], &src->symbols[i], m, d);
+        if (!copysymbol(&retval->symbols[i], &src->symbols[i], m, d))
+        {
+            MOJOSHADER_freePreshader(retval);
+            return NULL;
+        } // if
 
     siz = sizeof (MOJOSHADER_preshaderInstruction) * src->instruction_count;
     retval->instructions = (MOJOSHADER_preshaderInstruction *) m(siz, d);
@@ -2119,7 +2131,8 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
     memset(clone->params, '\0', siz);
     for (i = 0; i < clone->param_count; i++)
     {
-        copyvalue(&clone->params[i].value, &effect->params[i].value, m, d);
+        if (!copyvalue(&clone->params[i].value, &effect->params[i].value, m, d))
+            goto cloneEffect_outOfMemory;
 
         /* Copy parameter annotations */
         siz = sizeof (MOJOSHADER_effectAnnotation) * effect->params[i].annotation_count;
@@ -2129,9 +2142,10 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
             goto cloneEffect_outOfMemory;
         memset(clone->params[i].annotations, '\0', siz);
         for (j = 0; j < clone->params[i].annotation_count; j++)
-            copyvalue(&clone->params[i].annotations[j],
-                      &effect->params[i].annotations[j],
-                      m, d);
+            if (!copyvalue(&clone->params[i].annotations[j],
+                           &effect->params[i].annotations[j],
+                           m, d))
+                goto cloneEffect_outOfMemory;
     } // for
 
     /* Copy techniques */
@@ -2189,9 +2203,10 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
                     memcpy(dststate->preshader_params,
                            srcstate->preshader_params, siz);
                 } // if
-                copyvalue(&dststate->value,
-                          &srcstate->value,
-                          m, d);
+                if (!copyvalue(&dststate->value,
+                               &srcstate->value,
+                               m, d))
+                    goto cloneEffect_outOfMemory;
             } // for
 
             /* Copy pass annotations */
@@ -2202,9 +2217,10 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
                 goto cloneEffect_outOfMemory;
             memset(clone->techniques[i].passes[j].annotations, '\0', siz);
             for (k = 0; k < clone->techniques[i].passes[j].annotation_count; k++)
-                copyvalue(&clone->techniques[i].passes[j].annotations[k],
-                          &effect->techniques[i].passes[j].annotations[k],
-                          m, d);
+                if (!copyvalue(&clone->techniques[i].passes[j].annotations[k],
+                               &effect->techniques[i].passes[j].annotations[k],
+                               m, d))
+                    goto cloneEffect_outOfMemory;
         } // for
 
         /* Copy technique annotations */
@@ -2215,9 +2231,10 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
             goto cloneEffect_outOfMemory;
         memset(clone->techniques[i].annotations, '\0', siz);
         for (j = 0; j < clone->techniques[i].annotation_count; j++)
-            copyvalue(&clone->techniques[i].annotations[j],
-                      &effect->techniques[i].annotations[j],
-                      m, d);
+            if (!copyvalue(&clone->techniques[i].annotations[j],
+                           &effect->techniques[i].annotations[j],
+                           m, d))
+                goto cloneEffect_outOfMemory;
     } // for
 
     /* Copy the current technique, but do NOT copy the pass, pass >= 0 just

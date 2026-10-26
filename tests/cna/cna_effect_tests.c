@@ -59,7 +59,7 @@ static MOJOSHADER_effectShaderContext backend(void)
 /* Little-endian words and strings into a byte image, as fxc lays an effect out. */
 typedef struct Image
 {
-    unsigned char bytes[1024];
+    unsigned char bytes[4096];
     unsigned int len;
 } Image;
 
@@ -393,6 +393,385 @@ static MOJOSHADER_effectShaderContext counting_backend(void)
     return ctx;
 } // counting_backend
 
+/* Deep comparison of two effects (or of the parts of them a clone copies), reporting the first
+ * difference. Pointers differ between a source and its clone; what they hold must not. */
+static int same_note(int same, const char *what)
+{
+    if (!same)
+        fprintf(stderr, "  effects differ: %s\n", what);
+    return same;
+} // same_note
+
+static int same_string(const char *a, const char *b)
+{
+    if ((a == NULL) || (b == NULL))
+        return a == b;
+    return strcmp(a, b) == 0;
+} // same_string
+
+static int same_bytes(const void *a, const void *b, size_t len)
+{
+    if (len == 0)
+        return 1;
+    if ((a == NULL) || (b == NULL))
+        return 0;
+    return memcmp(a, b, len) == 0;
+} // same_bytes
+
+static int same_typeinfo(const MOJOSHADER_symbolTypeInfo *a, const MOJOSHADER_symbolTypeInfo *b)
+{
+    unsigned int i;
+    if ((a->parameter_class != b->parameter_class) || (a->parameter_type != b->parameter_type) ||
+        (a->rows != b->rows) || (a->columns != b->columns) || (a->elements != b->elements) ||
+        (a->member_count != b->member_count))
+        return same_note(0, "type info");
+    if (a->member_count == 0)
+        return 1;
+    if ((a->members == NULL) || (b->members == NULL))
+        return same_note(0, "struct member array");
+    for (i = 0; i < a->member_count; i++)
+    {
+        if (!same_string(a->members[i].name, b->members[i].name))
+            return same_note(0, "struct member name");
+        if (!same_typeinfo(&a->members[i].info, &b->members[i].info))
+            return 0;
+    } // for
+    return 1;
+} // same_typeinfo
+
+static int is_sampler_value(const MOJOSHADER_effectValue *v)
+{
+    return (v->type.parameter_class == MOJOSHADER_SYMCLASS_OBJECT) &&
+           (v->type.parameter_type >= MOJOSHADER_SYMTYPE_SAMPLER) &&
+           (v->type.parameter_type <= MOJOSHADER_SYMTYPE_SAMPLERCUBE);
+} // is_sampler_value
+
+static int same_value(const MOJOSHADER_effectValue *a, const MOJOSHADER_effectValue *b)
+{
+    unsigned int i;
+    if (!same_string(a->name, b->name))
+        return same_note(0, "value name");
+    if (!same_string(a->semantic, b->semantic))
+        return same_note(0, "value semantic");
+    if (!same_typeinfo(&a->type, &b->type))
+        return 0;
+    if (a->value_count != b->value_count)
+        return same_note(0, "value count");
+    if (!is_sampler_value(a))
+        return same_note(same_bytes(a->values, b->values, (size_t) a->value_count * 4), "value data");
+    if ((a->value_count > 0) && ((a->values == NULL) || (b->values == NULL)))
+        return same_note(0, "sampler state array");
+    for (i = 0; i < a->value_count; i++)
+    {
+        if (a->valuesSS[i].type != b->valuesSS[i].type)
+            return same_note(0, "sampler state type");
+        if (!same_value(&a->valuesSS[i].value, &b->valuesSS[i].value))
+            return 0;
+    } // for
+    return 1;
+} // same_value
+
+static int same_values(const MOJOSHADER_effectValue *a, const MOJOSHADER_effectValue *b,
+                       unsigned int count)
+{
+    unsigned int i;
+    if ((count > 0) && ((a == NULL) || (b == NULL)))
+        return same_note(0, "annotation array");
+    for (i = 0; i < count; i++)
+        if (!same_value(&a[i], &b[i]))
+            return 0;
+    return 1;
+} // same_values
+
+static int same_symbols(const MOJOSHADER_symbol *a, const MOJOSHADER_symbol *b, unsigned int count)
+{
+    unsigned int i;
+    if ((count > 0) && ((a == NULL) || (b == NULL)))
+        return same_note(0, "symbol array");
+    for (i = 0; i < count; i++)
+    {
+        if (!same_string(a[i].name, b[i].name) || (a[i].register_set != b[i].register_set) ||
+            (a[i].register_index != b[i].register_index) ||
+            (a[i].register_count != b[i].register_count))
+            return same_note(0, "symbol");
+        if (!same_typeinfo(&a[i].info, &b[i].info))
+            return 0;
+    } // for
+    return 1;
+} // same_symbols
+
+static int same_preshader(const MOJOSHADER_preshader *a, const MOJOSHADER_preshader *b)
+{
+    unsigned int i, j;
+    if ((a == NULL) || (b == NULL))
+        return same_note(a == b, "preshader presence");
+    if ((a->literal_count != b->literal_count) || (a->temp_count != b->temp_count) ||
+        (a->symbol_count != b->symbol_count) || (a->instruction_count != b->instruction_count) ||
+        (a->register_count != b->register_count))
+        return same_note(0, "preshader counts");
+    if (!same_bytes(a->literals, b->literals, a->literal_count * sizeof (double)))
+        return same_note(0, "preshader literals");
+    if (!same_symbols(a->symbols, b->symbols, a->symbol_count))
+        return 0;
+    if ((a->instruction_count > 0) && ((a->instructions == NULL) || (b->instructions == NULL)))
+        return same_note(0, "preshader instruction array");
+    for (i = 0; i < a->instruction_count; i++)
+    {
+        const MOJOSHADER_preshaderInstruction *ia = &a->instructions[i];
+        const MOJOSHADER_preshaderInstruction *ib = &b->instructions[i];
+        if ((ia->opcode != ib->opcode) || (ia->element_count != ib->element_count) ||
+            (ia->operand_count != ib->operand_count))
+            return same_note(0, "preshader instruction");
+        for (j = 0; (j < ia->operand_count) && (j < 4); j++)
+        {
+            const MOJOSHADER_preshaderOperand *oa = &ia->operands[j];
+            const MOJOSHADER_preshaderOperand *ob = &ib->operands[j];
+            if ((oa->type != ob->type) || (oa->index != ob->index) ||
+                (oa->array_register_count != ob->array_register_count) ||
+                !same_bytes(oa->array_registers, ob->array_registers,
+                            oa->array_register_count * sizeof (unsigned int)))
+                return same_note(0, "preshader operand");
+        } // for
+    } // for
+    return same_note(same_bytes(a->registers, b->registers, a->register_count * 16),
+                     "preshader registers");
+} // same_preshader
+
+static int same_uints(const unsigned int *a, const unsigned int *b, unsigned int count)
+{
+    return same_bytes(a, b, count * sizeof (unsigned int));
+} // same_uints
+
+/* What a clone must reproduce of its source: every parameter, technique, pass, state and object,
+ * with the same names, types and data (the current pass is reset by design). */
+static int same_effect(const MOJOSHADER_effect *a, const MOJOSHADER_effect *b)
+{
+    int i;
+    unsigned int j, k;
+    if ((a->error_count != b->error_count) || (a->param_count != b->param_count) ||
+        (a->technique_count != b->technique_count) || (a->object_count != b->object_count))
+        return same_note(0, "effect counts");
+    for (i = 0; i < a->error_count; i++)
+        if (!same_string(a->errors[i].error, b->errors[i].error))
+            return same_note(0, "error text");
+    for (i = 0; i < a->param_count; i++)
+    {
+        if (!same_value(&a->params[i].value, &b->params[i].value))
+            return 0;
+        if (a->params[i].annotation_count != b->params[i].annotation_count)
+            return same_note(0, "parameter annotation count");
+        if (!same_values(a->params[i].annotations, b->params[i].annotations,
+                         a->params[i].annotation_count))
+            return 0;
+    } // for
+    if ((a->current_technique - a->techniques) != (b->current_technique - b->techniques))
+        return same_note(0, "current technique");
+    for (i = 0; i < a->technique_count; i++)
+    {
+        const MOJOSHADER_effectTechnique *ta = &a->techniques[i];
+        const MOJOSHADER_effectTechnique *tb = &b->techniques[i];
+        if (!same_string(ta->name, tb->name) || (ta->pass_count != tb->pass_count) ||
+            (ta->annotation_count != tb->annotation_count))
+            return same_note(0, "technique");
+        if (!same_values(ta->annotations, tb->annotations, ta->annotation_count))
+            return 0;
+        for (j = 0; j < ta->pass_count; j++)
+        {
+            const MOJOSHADER_effectPass *pa = &ta->passes[j];
+            const MOJOSHADER_effectPass *pb = &tb->passes[j];
+            if (!same_string(pa->name, pb->name) || (pa->state_count != pb->state_count) ||
+                (pa->annotation_count != pb->annotation_count))
+                return same_note(0, "pass");
+            if (!same_values(pa->annotations, pb->annotations, pa->annotation_count))
+                return 0;
+            for (k = 0; k < pa->state_count; k++)
+            {
+                const MOJOSHADER_effectState *sa = &pa->states[k];
+                const MOJOSHADER_effectState *sb = &pb->states[k];
+                if ((sa->type != sb->type) || (sa->index != sb->index) ||
+                    (sa->referenced_parameter != sb->referenced_parameter) ||
+                    (sa->preshader_param_count != sb->preshader_param_count) ||
+                    !same_uints(sa->preshader_params, sb->preshader_params,
+                                sa->preshader_param_count))
+                    return same_note(0, "pass state");
+                if (!same_preshader(sa->preshader, sb->preshader))
+                    return 0;
+                if (!same_value(&sa->value, &sb->value))
+                    return 0;
+            } // for
+        } // for
+    } // for
+    for (i = 0; i < a->object_count; i++)
+    {
+        const MOJOSHADER_effectObject *oa = &a->objects[i];
+        const MOJOSHADER_effectObject *ob = &b->objects[i];
+        if (oa->type != ob->type)
+            return same_note(0, "object type");
+        if ((oa->type == MOJOSHADER_SYMTYPE_PIXELSHADER) ||
+            (oa->type == MOJOSHADER_SYMTYPE_VERTEXSHADER))
+        {
+            if ((oa->shader.technique != ob->shader.technique) ||
+                (oa->shader.pass != ob->shader.pass) ||
+                (oa->shader.is_preshader != ob->shader.is_preshader) ||
+                (oa->shader.param_count != ob->shader.param_count) ||
+                !same_uints(oa->shader.params, ob->shader.params, oa->shader.param_count) ||
+                (oa->shader.preshader_param_count != ob->shader.preshader_param_count) ||
+                !same_uints(oa->shader.preshader_params, ob->shader.preshader_params,
+                            oa->shader.preshader_param_count))
+                return same_note(0, "shader object");
+            if (oa->shader.is_preshader && !same_preshader(oa->shader.preshader,
+                                                           ob->shader.preshader))
+                return 0;
+        } // if
+        else if ((oa->type >= MOJOSHADER_SYMTYPE_SAMPLER) &&
+                 (oa->type <= MOJOSHADER_SYMTYPE_SAMPLERCUBE))
+        {
+            if (!same_string(oa->mapping.name, ob->mapping.name))
+                return same_note(0, "sampler object name");
+        } // else if
+        else if (oa->type == MOJOSHADER_SYMTYPE_STRING)
+        {
+            if (!same_string(oa->string.string, ob->string.string))
+                return same_note(0, "string object");
+        } // else if
+    } // for
+    return 1;
+} // same_effect
+
+/*
+ * A valid effect that reaches every copy the clone makes: a float4 parameter with a semantic and
+ * two annotations, a struct parameter with named members and defaults, a sampler parameter whose
+ * states include a texture reference, a string parameter, and a technique and pass that carry
+ * annotations, an ordinary render state and a PIXELSHADERCONSTANT state with a preshader. The
+ * texture and string are object-table entries with their payloads in small-object blocks.
+ */
+static unsigned int clone_coverage_effect(unsigned char *out)
+{
+    Image base, file;
+    CnaWords pre;
+    uint32_t empty, scale, scalesem, gain, level, light, a, b, samp, tex, str, techname, passname;
+    uint32_t mode, depth;
+    uint32_t t_scale, v_scale, t_gain, v_gain, t_level, v_level, t_light;
+    uint32_t t_samp, v_samp, t_filter, v_filter, t_tex, v_tex, t_str, v_str;
+    uint32_t t_mode, v_mode, t_depth, v_depth, t_state, v_state;
+    unsigned int prelen;
+
+    memset(&pre, '\0', sizeof (pre));
+    cna_push_preshader(&pre, "Scale", NULL);
+    prelen = (unsigned int) (pre.count * 4);
+
+    memset(&base, '\0', sizeof (base));
+    empty = base.len; put_u32(&base, 0);
+    scale = put_string(&base, "Scale");
+    scalesem = put_string(&base, "SCALE");
+    gain = put_string(&base, "Gain");
+    level = put_string(&base, "Level");
+    light = put_string(&base, "Light");
+    a = put_string(&base, "A");
+    b = put_string(&base, "B");
+    samp = put_string(&base, "Samp");
+    tex = put_string(&base, "Tex");
+    str = put_string(&base, "Str");
+    techname = put_string(&base, "T");
+    passname = put_string(&base, "P");
+    mode = put_string(&base, "Mode");
+    depth = put_string(&base, "Depth");
+
+    /* float4 Scale : SCALE = { 1, 2, 3, 4 } */
+    t_scale = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, scale); put_u32(&base, scalesem); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
+    v_scale = base.len; put_f32(&base, 1.0f); put_f32(&base, 2.0f); put_f32(&base, 3.0f); put_f32(&base, 4.0f);
+    /* annotations: float Gain = 0.5; int Level = 3; */
+    t_gain = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_SCALAR);
+    put_u32(&base, gain); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 1); put_u32(&base, 1);
+    v_gain = base.len; put_f32(&base, 0.5f);
+    t_level = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_INT); put_u32(&base, MOJOSHADER_SYMCLASS_SCALAR);
+    put_u32(&base, level); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 1); put_u32(&base, 1);
+    v_level = base.len; put_u32(&base, 3);
+    /* struct { float A; float2 B; } Light = { 0.25, { 0.75, 1.25 } }; */
+    t_light = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_VOID); put_u32(&base, MOJOSHADER_SYMCLASS_STRUCT);
+    put_u32(&base, light); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 2);
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_SCALAR);
+    put_u32(&base, a); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 1); put_u32(&base, 1);
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, b); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 2); put_u32(&base, 1);
+    put_f32(&base, 0.25f); put_f32(&base, 0.75f); put_f32(&base, 1.25f);
+    /* sampler2D Samp { MagFilter = 2; Texture = <Tex>; }  -- Tex is object 0 */
+    t_filter = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_INT); put_u32(&base, MOJOSHADER_SYMCLASS_SCALAR);
+    put_u32(&base, empty); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 1); put_u32(&base, 1);
+    v_filter = base.len; put_u32(&base, 2);
+    t_tex = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_TEXTURE2D); put_u32(&base, MOJOSHADER_SYMCLASS_OBJECT);
+    put_u32(&base, tex); put_u32(&base, empty); put_u32(&base, 0);
+    v_tex = base.len; put_u32(&base, 0);
+    t_samp = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_SAMPLER2D); put_u32(&base, MOJOSHADER_SYMCLASS_OBJECT);
+    put_u32(&base, samp); put_u32(&base, empty); put_u32(&base, 0);
+    v_samp = base.len;
+    put_u32(&base, 2);                                    /* two sampler states */
+    put_u32(&base, MOJOSHADER_SAMP_MAGFILTER); put_u32(&base, 0); put_u32(&base, t_filter); put_u32(&base, v_filter);
+    put_u32(&base, MOJOSHADER_SAMP_TEXTURE); put_u32(&base, 0); put_u32(&base, t_tex); put_u32(&base, v_tex);
+    /* string Str = "hello";  -- object 1 */
+    t_str = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_STRING); put_u32(&base, MOJOSHADER_SYMCLASS_OBJECT);
+    put_u32(&base, str); put_u32(&base, empty); put_u32(&base, 0);
+    v_str = base.len; put_u32(&base, 1);
+    /* technique annotation: int Mode = 7; pass annotation: float Depth = 0.125; */
+    t_mode = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_INT); put_u32(&base, MOJOSHADER_SYMCLASS_SCALAR);
+    put_u32(&base, mode); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 1); put_u32(&base, 1);
+    v_mode = base.len; put_u32(&base, 7);
+    t_depth = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_SCALAR);
+    put_u32(&base, depth); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 1); put_u32(&base, 1);
+    v_depth = base.len; put_f32(&base, 0.125f);
+    /* the PIXELSHADERCONSTANT state's float4 value */
+    t_state = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, empty); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
+    v_state = base.len; put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0);
+
+    memset(&file, '\0', sizeof (file));
+    put_u32(&file, 0xFEFF0901);
+    put_u32(&file, base.len);
+    memcpy(file.bytes + file.len, base.bytes, base.len);
+    file.len += base.len;
+    put_u32(&file, 4);                   /* parameters */
+    put_u32(&file, 1);                   /* techniques */
+    put_u32(&file, 0);
+    put_u32(&file, 2);                   /* objects: the texture and the string */
+    put_u32(&file, t_scale); put_u32(&file, v_scale); put_u32(&file, 0); put_u32(&file, 2);
+    put_u32(&file, t_gain); put_u32(&file, v_gain);
+    put_u32(&file, t_level); put_u32(&file, v_level);
+    put_u32(&file, t_light); put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, t_samp); put_u32(&file, v_samp); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, t_str); put_u32(&file, v_str); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, techname); put_u32(&file, 1); put_u32(&file, 1);     /* technique */
+    put_u32(&file, t_mode); put_u32(&file, v_mode);
+    put_u32(&file, passname); put_u32(&file, 1); put_u32(&file, 2);     /* pass */
+    put_u32(&file, t_depth); put_u32(&file, v_depth);
+    put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, t_filter); put_u32(&file, v_filter); /* ZENABLE */
+    put_u32(&file, 160); put_u32(&file, 0); put_u32(&file, t_state); put_u32(&file, v_state);
+    put_u32(&file, 2);                   /* small objects */
+    put_u32(&file, 1);                   /* large objects */
+    put_u32(&file, 0); put_u32(&file, 4); memcpy(file.bytes + file.len, "Tex", 4); file.len += 4;
+    put_u32(&file, 1); put_u32(&file, 8); memcpy(file.bytes + file.len, "hello\0\0", 8); file.len += 8;
+    /* large object: technique 0, pass 0, FIXME, state 1, type 0, length; then the preshader */
+    put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 1); put_u32(&file, 0);
+    put_u32(&file, prelen);
+    memcpy(file.bytes + file.len, pre.at, prelen);
+    file.len += prelen;
+
+    memcpy(out, file.bytes, file.len);
+    cna_words_free(&pre);
+    return file.len;
+} // clone_coverage_effect
+
 /* A-06: failing each allocation of a valid effect's load in turn must return a deletable result
  * and free everything -- never crash on a half-built array or leak. */
 static void inject_load(const unsigned char *bytes, unsigned int len, const char *what)
@@ -419,7 +798,9 @@ static void inject_load(const unsigned char *bytes, unsigned int len, const char
 } // inject_load
 
 /* A-06: the same for cloning a cleanly loaded effect -- copyvalue, the symbol/type copies and
- * copypreshader must each fail cleanly. */
+ * copypreshader must each fail cleanly. R2-04: and a clone is either complete, equal to its
+ * source in every part, or NULL -- MOJOSHADER_cloneEffect's out-of-memory result -- never a
+ * "successful" clone missing a name or a value array whose allocation failed. */
 static void inject_clone(const unsigned char *bytes, unsigned int len, const char *what)
 {
     unsigned char *copy = (unsigned char *) cna_exact_copy(bytes, len);
@@ -432,6 +813,12 @@ static void inject_clone(const unsigned char *bytes, unsigned int len, const cha
     cna_alloc_reset(0);
     e = MOJOSHADER_compileEffect(copy, len, NULL, 0, NULL, 0, &ctx);
     CNA_CHECK((e != NULL) && (e->error_count == 0), "the clone source loads cleanly");
+    if ((e == NULL) || (e->error_count != 0))
+    {
+        MOJOSHADER_deleteEffect(e);
+        free(copy);
+        return;
+    } // if
     base_live = cna_alloc_live();
 
     for (fail_at = 1; fail_at <= 512; fail_at++)
@@ -439,8 +826,21 @@ static void inject_clone(const unsigned char *bytes, unsigned int len, const cha
         MOJOSHADER_effect *clone;
         cna_alloc_arm(cna_alloc_attempts() + fail_at);
         clone = MOJOSHADER_cloneEffect(e);
-        if (clone != NULL)
+        if (clone == NULL)
+        {
+            if (!cna_alloc_hit())
+                fprintf(stderr, "  %s: NULL clone with no allocation failure\n", what);
+            CNA_CHECK(cna_alloc_hit(), "a clone fails only when an allocation failed");
+        } // if
+        else
+        {
+            const int same = same_effect(e, clone);
+            if (!same)
+                fprintf(stderr, "  %s: allocation %d failed, and the clone came back partial\n",
+                        what, fail_at);
+            CNA_CHECK(same, "a clone that comes back is complete and equal to its source");
             MOJOSHADER_deleteEffect(clone);
+        } // else
         CNA_CHECK(cna_alloc_live() == base_live, what);
         if (!cna_alloc_hit())
         {
@@ -472,10 +872,49 @@ static void test_effect_clone_allocation_failures(void)
      * technique so clone reaches its object table. struct_effect has no technique, which
      * MOJOSHADER_cloneEffect does not support (an unrelated pre-existing assert), so it is loaded
      * above but not cloned here. */
-    unsigned char bytes[2048];
+    unsigned char bytes[4096];
     unsigned int len = preshader_effect(bytes);
     inject_clone(bytes, len, "a preshader effect clone frees everything under allocation failure");
+    len = clone_coverage_effect(bytes);
+    inject_clone(bytes, len, "a clone of every value kind frees everything under allocation failure");
 } // test_effect_clone_allocation_failures
+
+/* The clone sweep's richer fixture is itself a valid effect: it loads without errors, and a clone
+ * of it is complete and equal to it. */
+static void test_clone_coverage_effect_loads_and_clones(void)
+{
+    unsigned char bytes[4096];
+    const unsigned int len = clone_coverage_effect(bytes);
+    MOJOSHADER_effectShaderContext ctx = backend();
+    const MOJOSHADER_effect *effect = MOJOSHADER_compileEffect(bytes, len, NULL, 0, NULL, 0, &ctx);
+    MOJOSHADER_effect *clone;
+    CNA_CHECK((effect != NULL) && (effect->error_count == 0), "the fixture loads cleanly");
+    if ((effect == NULL) || (effect->error_count != 0))
+    {
+        if ((effect != NULL) && (effect->error_count > 0))
+            fprintf(stderr, "  first error: %s\n", effect->errors[0].error);
+        MOJOSHADER_deleteEffect(effect);
+        return;
+    } // if
+    CNA_CHECK(effect->param_count == 4, "four parameters");
+    CNA_CHECK(effect->object_count == 2, "two objects");
+    if ((effect->param_count == 4) && (effect->object_count == 2))
+    {
+        CNA_CHECK(same_string(effect->params[0].value.semantic, "SCALE"), "Scale's semantic");
+        CNA_CHECK(effect->params[0].annotation_count == 2, "Scale's two annotations");
+        CNA_CHECK(effect->params[1].value.type.member_count == 2, "Light's two members");
+        CNA_CHECK(effect->params[2].value.value_count == 2, "Samp's two states");
+        CNA_CHECK(effect->objects[0].type == MOJOSHADER_SYMTYPE_SAMPLER2D, "Tex is a sampler object");
+        CNA_CHECK(same_string(effect->objects[0].mapping.name, "Tex"), "Tex's name");
+        CNA_CHECK(effect->objects[1].type == MOJOSHADER_SYMTYPE_STRING, "Str is a string object");
+        CNA_CHECK(same_string(effect->objects[1].string.string, "hello"), "Str's text");
+        CNA_CHECK(effect->techniques[0].passes[0].states[1].preshader != NULL, "the pass preshader");
+    } // if
+    clone = MOJOSHADER_cloneEffect(effect);
+    CNA_CHECK((clone != NULL) && same_effect(effect, clone), "the clone equals its source");
+    MOJOSHADER_deleteEffect(clone);
+    MOJOSHADER_deleteEffect(effect);
+} // test_clone_coverage_effect_loads_and_clones
 
 /* A-04: the XNA4 wrapper read a second version token after skipping its header without checking
  * four bytes remained. */
@@ -503,6 +942,7 @@ int main(void)
     cna_test_run("value_struct_member_count_out_of_range", test_value_struct_member_count_out_of_range);
     cna_test_run("xna4_wrapper_truncated_after_skip", test_xna4_wrapper_truncated_after_skip);
     cna_test_run("effect_load_allocation_failures", test_effect_load_allocation_failures);
+    cna_test_run("clone_coverage_effect_loads_and_clones", test_clone_coverage_effect_loads_and_clones);
     cna_test_run("effect_clone_allocation_failures", test_effect_clone_allocation_failures);
     return cna_test_finish();
 } // main
