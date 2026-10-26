@@ -124,6 +124,7 @@ struct MOJOSHADER_sdlContext
     MOJOSHADER_sdlProgram *bound_program;
     HashTable *linker_cache;
     unsigned long long next_program_identity;
+    unsigned long long next_shader_tag;  /* the last tag given to a shader of this context -CNA */
     MOJOSHADER_sdlSpirvTransform spirv_transform;
     void *spirv_transform_data;
     unsigned int color_target_count;
@@ -132,7 +133,7 @@ struct MOJOSHADER_sdlContext
 struct MOJOSHADER_sdlShaderData
 {
     const MOJOSHADER_parseData *parseData;
-    uint16_t tag;
+    unsigned long long tag;  /* never reused within its context; 0 is no shader -CNA */
     uint32_t refcount;
     uint32_t samplerSlots;
     int32_t uniformBufferSize;
@@ -187,8 +188,10 @@ static uint32_t hash_shaders(const void *sym, void *data)
         hash = hash * HASH_FACTOR + s->vertexAttributes[i].usageIndex;
         hash = hash * HASH_FACTOR + s->vertexAttributes[i].vertexElementFormat;
     }
-    hash = hash * HASH_FACTOR + s->vertex->tag;
-    hash = hash * HASH_FACTOR + s->fragment->tag;
+    hash = hash * HASH_FACTOR + (uint32_t) s->vertex->tag;
+    hash = hash * HASH_FACTOR + (uint32_t) (s->vertex->tag >> 32);
+    hash = hash * HASH_FACTOR + (uint32_t) s->fragment->tag;
+    hash = hash * HASH_FACTOR + (uint32_t) (s->fragment->tag >> 32);
     hash = hash * HASH_FACTOR + s->colorTargetCount;
     return hash;
 } // hash_shaders
@@ -199,13 +202,13 @@ static int match_shaders(const void *_a, const void *_b, void *data)
     const LinkedShaderData *a = (const LinkedShaderData *) _a;
     const LinkedShaderData *b = (const LinkedShaderData *) _b;
 
-    const uint16_t av = (a->vertex) ? a->vertex->tag : 0;
-    const uint16_t bv = (b->vertex) ? b->vertex->tag : 0;
+    const unsigned long long av = (a->vertex) ? a->vertex->tag : 0;
+    const unsigned long long bv = (b->vertex) ? b->vertex->tag : 0;
     if (av != bv)
         return 0;
 
-    const uint16_t af = (a->fragment) ? a->fragment->tag : 0;
-    const uint16_t bf = (b->fragment) ? b->fragment->tag : 0;
+    const unsigned long long af = (a->fragment) ? a->fragment->tag : 0;
+    const unsigned long long bf = (b->fragment) ? b->fragment->tag : 0;
     if (af != bf)
         return 0;
 
@@ -539,8 +542,6 @@ int MOJOSHADER_sdlSetShaderCrossTestMode(
 #endif
 } // MOJOSHADER_sdlSetShaderCrossTestMode
 
-static uint16_t shaderTagCounter = 1;
-
 MOJOSHADER_sdlShaderData *MOJOSHADER_sdlCompileShader(
     MOJOSHADER_sdlContext *ctx,
     const char *mainfn,
@@ -554,6 +555,15 @@ MOJOSHADER_sdlShaderData *MOJOSHADER_sdlCompileShader(
     MOJOSHADER_sdlShaderData *shader = NULL;;
     int maxSamplerIndex = 0;
     int i;
+
+    /* The linker cache tells shaders apart by tag. A process-wide 16-bit counter wrapped every
+     * 65536 compilations, and the cache then handed one shader's program to another; a
+     * context's own 64-bit serial is refused, rather than reused, at its end. -CNA */
+    if (ctx->next_shader_tag == ~0ULL)
+    {
+        set_error("SDL_gpu shader identity space exhausted");
+        return NULL;
+    } // if
 
     const MOJOSHADER_parseData *pd = MOJOSHADER_parse(
         ctx->profile, mainfn,
@@ -580,7 +590,7 @@ MOJOSHADER_sdlShaderData *MOJOSHADER_sdlCompileShader(
 
     shader->parseData = pd;
     shader->refcount = 1;
-    shader->tag = shaderTagCounter++;
+    shader->tag = ++ctx->next_shader_tag;
 
     /* XNA allows empty shader slots in the middle, so we have to find the actual max binding index */
     for (i = 0; i < pd->sampler_count; i += 1)

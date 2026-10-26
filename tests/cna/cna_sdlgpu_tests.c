@@ -194,6 +194,33 @@ static void test_context_without_device(void)
     CNA_CHECK(a.live == 0, "the context returned everything it allocated");
 } // test_context_without_device
 
+/* A2v2 A-14: a context's last shader tag is refused at the end of the space, not wrapped. */
+static void test_shader_identity_exhaustion(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(NULL, &a);
+    MOJOSHADER_sdlShaderData *last, *refused;
+    long live;
+
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    ctx->next_shader_tag = ~0ULL - 1;  // the white-box way to the end of the space
+    last = compile(ctx, red_ps2, sizeof (red_ps2));
+    CNA_CHECK((last != NULL) && (last->tag == ~0ULL), "the last tag is given out");
+    live = a.live;
+    refused = MOJOSHADER_sdlCompileShader(ctx, "main", (const unsigned char *) red_ps2,
+                                          sizeof (red_ps2), NULL, 0, NULL, 0);
+    CNA_CHECK(refused == NULL, "no shader once the tags are exhausted");
+    CNA_CHECK(error_contains("shader identity space exhausted"), "... with the reason");
+    CNA_CHECK(a.live == live, "... allocating nothing");
+    MOJOSHADER_sdlDeleteShader(ctx, last);
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "the context returned everything it allocated");
+} // test_shader_identity_exhaustion
+
 /* -- Cases with a device ------------------------------------------------------------------- */
 
 /* Linking caches by pair; the identity and the GPU shaders come from the bound program. */
@@ -402,6 +429,113 @@ static void test_delete_program_then_destroy_context(void)
     CNA_CHECK(a.live == 0, "everything allocated was returned");
 } // test_delete_program_then_destroy_context
 
+/*
+ * A2v2 A-14: a shader compiled 65536 shaders after another is a different shader, whatever a
+ * 16-bit tag says. Linking it must not return the other's cached program.
+ */
+static void test_shader_identity_after_65536_compiles(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(gpu_device, &a);
+    MOJOSHADER_sdlShaderData *vs, *red, *green, *other;
+    MOJOSHADER_sdlProgram *p_red, *p_green;
+    SDL_GPUShader *g_red = NULL, *g_green = NULL;
+    unsigned long long id_red, id_green;
+    int i, compiled = 0;
+
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    vs = compile(ctx, position_vs2, sizeof (position_vs2));
+    red = compile(ctx, red_ps2, sizeof (red_ps2));
+    CNA_CHECK(vs && red, "the shaders compile");
+    if (vs && red)
+    {
+        p_red = link_pair(ctx, vs, red);
+        CNA_CHECK(p_red != NULL, "vs + red links");
+        id_red = MOJOSHADER_sdlGetProgramIdentity(ctx);
+        MOJOSHADER_sdlGetShaders(ctx, NULL, &g_red);
+
+        /* 65535 shaders more, so that green is the 65536th compiled after red. */
+        for (i = 0; i < 65535; i++)
+        {
+            other = MOJOSHADER_sdlCompileShader(ctx, "main", (const unsigned char *) green_ps2,
+                                                sizeof (green_ps2), NULL, 0, NULL, 0);
+            if (other == NULL)
+                break;
+            compiled++;
+            MOJOSHADER_sdlDeleteShader(ctx, other);
+        } // for
+        CNA_CHECK(compiled == 65535, "65535 shaders compile");
+        green = compile(ctx, green_ps2, sizeof (green_ps2));
+        CNA_CHECK(green != NULL, "green compiles");
+        if (green != NULL)
+        {
+            p_green = link_pair(ctx, vs, green);
+            id_green = MOJOSHADER_sdlGetProgramIdentity(ctx);
+            CNA_CHECK((p_green != NULL) && (p_green != p_red),
+                      "vs + green links its own program, not vs + red's");
+            CNA_CHECK(id_green != id_red, "... with its own identity");
+            MOJOSHADER_sdlGetShaders(ctx, NULL, &g_green);
+            CNA_CHECK(g_green != g_red, "... and its own GPU pixel shader");
+
+            MOJOSHADER_sdlDeleteShader(ctx, red);
+            red = NULL;
+            CNA_CHECK((link_pair(ctx, vs, green) == p_green) &&
+                      (MOJOSHADER_sdlGetProgramIdentity(ctx) == id_green),
+                      "deleting red leaves vs + green's program cached");
+            MOJOSHADER_sdlDeleteShader(ctx, green);
+        } // if
+    } // if
+
+    MOJOSHADER_sdlDeleteShader(ctx, vs);
+    MOJOSHADER_sdlDeleteShader(ctx, red);
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "the context returned everything it allocated");
+} // test_shader_identity_after_65536_compiles
+
+/* A2v2 A-14: tags that differ only above bit 32 are different shaders too. */
+static void test_shader_identity_high_bits(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(gpu_device, &a);
+    MOJOSHADER_sdlShaderData *vs, *red, *green;
+    MOJOSHADER_sdlProgram *p_red, *p_green;
+
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    vs = compile(ctx, position_vs2, sizeof (position_vs2));
+    red = compile(ctx, red_ps2, sizeof (red_ps2));
+    CNA_CHECK(vs && red, "the shaders compile");
+    if (vs && red)
+    {
+        p_red = link_pair(ctx, vs, red);
+        CNA_CHECK(p_red != NULL, "vs + red links");
+        ctx->next_shader_tag = red->tag + 0x100000000ULL - 1;  // white box, as above
+        green = compile(ctx, green_ps2, sizeof (green_ps2));
+        CNA_CHECK((green != NULL) && (green->tag == red->tag + 0x100000000ULL),
+                  "green's tag differs from red's above bit 32 only");
+        if (green != NULL)
+        {
+            p_green = link_pair(ctx, vs, green);
+            CNA_CHECK((p_green != NULL) && (p_green != p_red),
+                      "vs + green links its own program");
+            CNA_CHECK(link_pair(ctx, vs, red) == p_red, "vs + red's stays cached");
+            MOJOSHADER_sdlDeleteShader(ctx, green);
+        } // if
+    } // if
+
+    MOJOSHADER_sdlDeleteShader(ctx, vs);
+    MOJOSHADER_sdlDeleteShader(ctx, red);
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "the context returned everything it allocated");
+} // test_shader_identity_high_bits
+
 /* -- Driver -------------------------------------------------------------------------------- */
 
 static int open_device(void)
@@ -459,11 +593,14 @@ typedef struct TestCase
 
 static const TestCase test_cases[] = {
     { "context_without_device", test_context_without_device, 0 },
+    { "shader_identity_exhaustion", test_shader_identity_exhaustion, 0 },
     { "link_and_cache", test_link_and_cache, 1 },
     { "texbem_uniforms", test_texbem_uniforms, 1 },
     { "delete_program_then_relink", test_delete_program_then_relink, 1 },
     { "delete_program_then_delete_shaders", test_delete_program_then_delete_shaders, 1 },
     { "delete_program_then_destroy_context", test_delete_program_then_destroy_context, 1 },
+    { "shader_identity_after_65536_compiles", test_shader_identity_after_65536_compiles, 1 },
+    { "shader_identity_high_bits", test_shader_identity_high_bits, 1 },
 };
 
 /* Every case, or with arguments only the cases they name. */
