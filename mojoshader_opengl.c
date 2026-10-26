@@ -259,9 +259,9 @@ struct MOJOSHADER_glContext
     PFNGLUNIFORM1IPROC glUniform1i;
     PFNGLUNIFORM1IVPROC glUniform1iv;
     PFNGLUNIFORM2FPROC glUniform2f;
-#ifdef MOJOSHADER_FLIP_RENDERTARGET
+    // MOJOSHADER_glProgramVFaceFlipInfo() sets a float uniform in every build, not only one
+    // with MOJOSHADER_FLIP_RENDERTARGET. -CNA
     PFNGLUNIFORM1FPROC glUniform1f;
-#endif
     PFNGLUNIFORM4FVPROC glUniform4fv;
     PFNGLUNIFORM4IVPROC glUniform4iv;
     PFNGLUSEPROGRAMPROC glUseProgram;
@@ -1599,9 +1599,7 @@ static void lookup_entry_points(MOJOSHADER_glGetProcAddress lookup, void *d)
     DO_LOOKUP(opengl_2, PFNGLUNIFORM1IPROC, glUniform1i);
     DO_LOOKUP(opengl_2, PFNGLUNIFORM1IVPROC, glUniform1iv);
     DO_LOOKUP(opengl_2, PFNGLUNIFORM2FPROC, glUniform2f);
-#ifdef MOJOSHADER_FLIP_RENDERTARGET
     DO_LOOKUP(opengl_2, PFNGLUNIFORM1FPROC, glUniform1f);
-#endif
     DO_LOOKUP(opengl_2, PFNGLUNIFORM4FVPROC, glUniform4fv);
     DO_LOOKUP(opengl_2, PFNGLUNIFORM4IVPROC, glUniform4iv);
     DO_LOOKUP(opengl_2, PFNGLUSEPROGRAMPROC, glUseProgram);
