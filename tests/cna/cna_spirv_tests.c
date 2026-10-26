@@ -11,7 +11,13 @@
 #include "cna_test.h"
 #include "spirv/spirv.h"
 
+#define __MOJOSHADER_INTERNAL__ 1
+#include "mojoshader_internal.h"  /* MOJOSHADER_spirv_link_attributes(), as the GL glue links */
+
 #define MAX_IDS 4096
+
+/* A scalar or vector type: its component type (SHAPE_*) times 16 plus its component count. */
+enum { SHAPE_FLOAT = 1, SHAPE_INT = 2, SHAPE_UINT = 3, SHAPE_BOOL = 4 };
 
 /* What the tests need to know about a module, read from its words. */
 typedef struct SpirvFacts
@@ -21,9 +27,22 @@ typedef struct SpirvFacts
     int storage[MAX_IDS];       /* -1: not a variable */
     int location[MAX_IDS];      /* -1: no Location decoration */
     int builtin[MAX_IDS];       /* -1: no BuiltIn decoration */
+    int var_type[MAX_IDS];      /* a variable's pointer type, -1 when not a variable */
+    int pointee[MAX_IDS];       /* a pointer type's pointee type, -1 when not a pointer */
+    int shape[MAX_IDS];         /* a scalar or vector type's shape, 0 when neither */
     int interface_ids[64];
     int interface_count;
 } SpirvFacts;
+
+/* The shape of the type a variable points to; 0 when it is not a scalar or vector. */
+static int variable_shape(const SpirvFacts *facts, int id)
+{
+    int ptr, pointee;
+    if ((id < 0) || (id >= MAX_IDS) || ((ptr = facts->var_type[id]) < 0) || (ptr >= MAX_IDS) ||
+        ((pointee = facts->pointee[ptr]) < 0) || (pointee >= MAX_IDS))
+        return 0;
+    return facts->shape[pointee];
+} // variable_shape
 
 static void read_facts(const MOJOSHADER_parseData *pd, SpirvFacts *facts)
 {
@@ -38,6 +57,8 @@ static void read_facts(const MOJOSHADER_parseData *pd, SpirvFacts *facts)
         facts->storage[i] = -1;
         facts->location[i] = -1;
         facts->builtin[i] = -1;
+        facts->var_type[i] = -1;
+        facts->pointee[i] = -1;
     } // for
 
     while (at < count)
@@ -51,8 +72,20 @@ static void read_facts(const MOJOSHADER_parseData *pd, SpirvFacts *facts)
             if (facts->storage[words[at + 2]] != -1)
                 facts->duplicate_variables++;
             facts->storage[words[at + 2]] = (int) words[at + 3];
+            facts->var_type[words[at + 2]] = (int) words[at + 1];
             facts->variables++;
         } // if
+        else if ((opcode == SpvOpTypeFloat) && (length == 3) && (words[at + 1] < MAX_IDS))
+            facts->shape[words[at + 1]] = SHAPE_FLOAT * 16 + 1;
+        else if ((opcode == SpvOpTypeInt) && (length == 4) && (words[at + 1] < MAX_IDS))
+            facts->shape[words[at + 1]] = (words[at + 3] ? SHAPE_INT : SHAPE_UINT) * 16 + 1;
+        else if ((opcode == SpvOpTypeBool) && (length == 2) && (words[at + 1] < MAX_IDS))
+            facts->shape[words[at + 1]] = SHAPE_BOOL * 16 + 1;
+        else if ((opcode == SpvOpTypeVector) && (length == 4) && (words[at + 1] < MAX_IDS) &&
+                 (words[at + 2] < MAX_IDS))
+            facts->shape[words[at + 1]] = (facts->shape[words[at + 2]] & ~15) + (int) words[at + 3];
+        else if ((opcode == SpvOpTypePointer) && (length == 4) && (words[at + 1] < MAX_IDS))
+            facts->pointee[words[at + 1]] = (int) words[at + 3];
         else if ((opcode == SpvOpDecorate) && (length >= 4) && (words[at + 1] < MAX_IDS))
         {
             if (words[at + 2] == SpvDecorationLocation)
@@ -73,8 +106,11 @@ static void read_facts(const MOJOSHADER_parseData *pd, SpirvFacts *facts)
     } // while
 } // read_facts
 
-/* Locations of the user (non-builtin) interface variables of one storage class, sorted. */
-static int user_locations(const SpirvFacts *facts, int storage, int *out, int max)
+/*
+ * Locations of the user (non-builtin) interface variables of one storage class, sorted, and the
+ * shape of each variable's type in `shapes`, in the same order.
+ */
+static int user_locations(const SpirvFacts *facts, int storage, int *out, int *shapes, int max)
 {
     int i, j, n = 0;
     for (i = 0; i < facts->interface_count; i++)
@@ -85,14 +121,20 @@ static int user_locations(const SpirvFacts *facts, int storage, int *out, int ma
         if (facts->builtin[id] != -1)
             continue;
         if (n < max)
+        {
+            shapes[n] = variable_shape(facts, id);
             out[n++] = facts->location[id];
+        } // if
     } // for
     for (i = 1; i < n; i++)
         for (j = i; (j > 0) && (out[j - 1] > out[j]); j--)
         {
             const int t = out[j];
+            const int u = shapes[j];
             out[j] = out[j - 1];
+            shapes[j] = shapes[j - 1];
             out[j - 1] = t;
+            shapes[j - 1] = u;
         } // for
     return n;
 } // user_locations
@@ -175,63 +217,92 @@ static const uint32_t fog_ps3[] = {
     CNA_END
 };
 
-/* Translates, links and checks one vertex/pixel pair. */
-static void check_pair(const char *name, const uint32_t *vs, size_t vs_bytes,
-                       const uint32_t *ps, size_t ps_bytes, int expected_user_varyings)
+/*
+ * Translates, links and checks one vertex/pixel pair, in the Vulkan SPIR-V profile (linked by
+ * MOJOSHADER_linkSPIRVShaders(), as the SDL_GPU glue links) and the GLSPIRV one (linked as the GL
+ * glue links). Each varying must link to one Location, and its vertex Output and pixel Input
+ * there must have the same type: the Location sets alone matched for FOG while the vertex side
+ * was a float and the pixel side a vec4 (R5-01, 2026-10-26 remediation review, round 2).
+ */
+static void check_pair_profile(const char *name, const char *profile,
+                               const uint32_t *vs, size_t vs_bytes,
+                               const uint32_t *ps, size_t ps_bytes, int expected_user_varyings)
 {
     MOJOSHADER_vertexAttribute position;
-    const MOJOSHADER_parseData *v = cna_parse("spirv", vs, vs_bytes);
-    const MOJOSHADER_parseData *p = cna_parse("spirv", ps, ps_bytes);
-    char label[128];
+    const int glspirv = (strcmp(profile, "glspirv") == 0);
+    const MOJOSHADER_parseData *v = cna_parse(profile, vs, vs_bytes);
+    const MOJOSHADER_parseData *p = cna_parse(profile, ps, ps_bytes);
+    char label[160];
     SpirvFacts vf, pf;
-    int vlocs[16], plocs[16];
+    int vlocs[16], plocs[16], vshapes[16], pshapes[16];
     int vn, pn, i;
 
-    snprintf(label, sizeof (label), "%s: vertex shader translates", name);
+    snprintf(label, sizeof (label), "%s %s: vertex shader translates", name, profile);
     CNA_CHECK(cna_report_errors(label, v) == 0, label);
-    snprintf(label, sizeof (label), "%s: pixel shader translates", name);
+    snprintf(label, sizeof (label), "%s %s: pixel shader translates", name, profile);
     CNA_CHECK(cna_report_errors(label, p) == 0, label);
     if ((v == NULL) || (p == NULL) || v->error_count || p->error_count)
         goto done;
 
-    memset(&position, '\0', sizeof (position));
-    position.usage = MOJOSHADER_USAGE_POSITION;
-    position.vertexElementFormat = MOJOSHADER_VERTEXELEMENTFORMAT_VECTOR4;
-    MOJOSHADER_linkSPIRVShaders(v, p, &position, 1);
+    if (glspirv)
+        MOJOSHADER_spirv_link_attributes(v, p, 1);
+    else
+    {
+        memset(&position, '\0', sizeof (position));
+        position.usage = MOJOSHADER_USAGE_POSITION;
+        position.vertexElementFormat = MOJOSHADER_VERTEXELEMENTFORMAT_VECTOR4;
+        MOJOSHADER_linkSPIRVShaders(v, p, &position, 1);
+    } // else
 
     read_facts(v, &vf);
     read_facts(p, &pf);
-    snprintf(label, sizeof (label), "%s: vertex interface", name);
+    snprintf(label, sizeof (label), "%s %s: vertex interface", name, profile);
     check_interface(&vf, label);
-    snprintf(label, sizeof (label), "%s: pixel interface", name);
+    snprintf(label, sizeof (label), "%s %s: pixel interface", name, profile);
     check_interface(&pf, label);
 
-    vn = user_locations(&vf, SpvStorageClassOutput, vlocs, 16);
-    pn = user_locations(&pf, SpvStorageClassInput, plocs, 16);
-    snprintf(label, sizeof (label), "%s: one vertex output per varying semantic", name);
+    vn = user_locations(&vf, SpvStorageClassOutput, vlocs, vshapes, 16);
+    pn = user_locations(&pf, SpvStorageClassInput, plocs, pshapes, 16);
+    snprintf(label, sizeof (label), "%s %s: one vertex output per varying semantic", name, profile);
     CNA_CHECK(vn == expected_user_varyings, label);
-    snprintf(label, sizeof (label), "%s: one pixel input per varying semantic", name);
+    snprintf(label, sizeof (label), "%s %s: one pixel input per varying semantic", name, profile);
     CNA_CHECK(pn == expected_user_varyings, label);
     if ((vn == pn) && (vn == expected_user_varyings))
         for (i = 0; i < vn; i++)
         {
-            snprintf(label, sizeof (label), "%s: varying %d links to the same Location", name, i);
+            snprintf(label, sizeof (label), "%s %s: varying %d links to the same Location",
+                     name, profile, i);
             CNA_CHECK((vlocs[i] == plocs[i]) && (vlocs[i] >= 0), label);
+            snprintf(label, sizeof (label),
+                     "%s %s: the Output and the Input at Location %d have one type", name,
+                     profile, vlocs[i]);
+            if (vshapes[i] != pshapes[i])
+                fprintf(stderr, "  %s: vertex type %d components (base %d), pixel %d (base %d)\n",
+                        label, vshapes[i] & 15, vshapes[i] >> 4, pshapes[i] & 15, pshapes[i] >> 4);
+            CNA_CHECK((vshapes[i] == pshapes[i]) && (vshapes[i] != 0), label);
             if (i > 0)
             {
-                snprintf(label, sizeof (label), "%s: varying Locations are distinct", name);
+                snprintf(label, sizeof (label), "%s %s: varying Locations are distinct",
+                         name, profile);
                 CNA_CHECK(vlocs[i] != vlocs[i - 1], label);
             } // if
         } // for
 
-    snprintf(label, sizeof (label), "%s_vs", name);
+    snprintf(label, sizeof (label), "%s_%s_vs", name, profile);
     CNA_CHECK(cna_spirv_validate(v, label) != 0, "spirv-val accepts the vertex shader");
-    snprintf(label, sizeof (label), "%s_ps", name);
+    snprintf(label, sizeof (label), "%s_%s_ps", name, profile);
     CNA_CHECK(cna_spirv_validate(p, label) != 0, "spirv-val accepts the pixel shader");
 
 done:
     MOJOSHADER_freeParseData(v);
     MOJOSHADER_freeParseData(p);
+} // check_pair_profile
+
+static void check_pair(const char *name, const uint32_t *vs, size_t vs_bytes,
+                       const uint32_t *ps, size_t ps_bytes, int expected_user_varyings)
+{
+    check_pair_profile(name, "spirv", vs, vs_bytes, ps, ps_bytes, expected_user_varyings);
+    check_pair_profile(name, "glspirv", vs, vs_bytes, ps, ps_bytes, expected_user_varyings);
 } // check_pair
 
 /* A pre-vs_3_0 oFog is FOG0 and pairs with the pixel shader's FOG0 input, and oPts is the
@@ -439,6 +510,132 @@ static void test_packed_fog(void)
     } // for
 } // test_packed_fog
 
+/*
+ * The lanes of the register a pixel module fills from its one Location-decorated float Input
+ * (FOG): those an OpVectorShuffle takes from an OpCompositeConstruct of four loads of that
+ * Input. -1 when there is no such Input or more than one.
+ */
+static int fog_input_lanes(const MOJOSHADER_parseData *pd)
+{
+    static unsigned char loaded[MAX_IDS], splat[MAX_IDS];
+    const uint32_t *words = (const uint32_t *) pd->output;
+    const size_t count = cna_spirv_module_words(pd);
+    int fog = -1, fogs = 0, lanes = 0, id, i;
+    size_t at;
+    SpirvFacts facts;
+
+    read_facts(pd, &facts);
+    for (id = 0; id < MAX_IDS; id++)
+        if ((facts.storage[id] == SpvStorageClassInput) && (facts.location[id] != -1) &&
+            (variable_shape(&facts, id) == SHAPE_FLOAT * 16 + 1))
+        {
+            fog = id;
+            fogs++;
+        } // if
+    if (fogs != 1)
+        return -1;
+
+    memset(loaded, '\0', sizeof (loaded));
+    memset(splat, '\0', sizeof (splat));
+    for (at = 5; at < count; at += words[at] >> 16)
+    {
+        const uint32_t length = words[at] >> 16;
+        const uint32_t opcode = words[at] & 0xFFFF;
+        if ((length == 0) || (at + length > count))
+            return -1;
+        if ((opcode == SpvOpLoad) && (length == 4) && (words[at + 3] == (uint32_t) fog) &&
+            (words[at + 2] < MAX_IDS))
+            loaded[words[at + 2]] = 1;
+        else if ((opcode == SpvOpCompositeConstruct) && (length == 7) && (words[at + 2] < MAX_IDS))
+        {
+            int all = 1;
+            for (i = 0; i < 4; i++)
+                all = all && (words[at + 3 + i] < MAX_IDS) && loaded[words[at + 3 + i]];
+            splat[words[at + 2]] = (unsigned char) all;
+        } // else if
+        else if ((opcode == SpvOpVectorShuffle) && (length == 9) && (words[at + 3] < MAX_IDS) &&
+                 splat[words[at + 3]])
+        {
+            for (i = 0; i < 4; i++)
+                if (words[at + 5 + i] < 4)
+                    lanes |= 1 << i;
+        } // else if
+    } // for
+    return lanes;
+} // fog_input_lanes
+
+/* vs_3_0: FOG alone in o1.x, written from v0.w. */
+static const uint32_t fog_alone_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+/* ps_3_0: dcl_fog v0.<lane>, its lane written to oC0. */
+#define FOG_LANE_PS3(mask, swizzle) { \
+    CNA_PS(3, 0), \
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_INPUT, 0, mask), \
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC_SWZ(CNA_INPUT, 0, swizzle), \
+    CNA_END }
+static const uint32_t fog_y_ps3[] = FOG_LANE_PS3(0x2, 0x55);
+static const uint32_t fog_z_ps3[] = FOG_LANE_PS3(0x4, 0xAA);
+static const uint32_t fog_w_ps3[] = FOG_LANE_PS3(0x8, 0xFF);
+
+/*
+ * R5-01 (2026-10-26 remediation review, round 2): a pixel FOG input is a float Input, as the
+ * vertex shader's FOG output is, at the same Location, and its value fills the register's
+ * declared FOG lane -- FOG alone in a register (x, y, z or w), FOG packed with TEXCOORD0 in
+ * either declaration order, and the vs_2_0 oFog. Before, the pixel side was a vec4 Input: a
+ * type-incompatible stage interface in Vulkan SPIR-V and GLSPIRV alike.
+ */
+static void test_fog_interface_types(void)
+{
+    static const struct { const char *name; const uint32_t *tokens; size_t bytes; int mask; } ps[] = {
+        { "fog_x_ps", fog_ps3, sizeof (fog_ps3), 0x1 },
+        { "fog_y_ps", fog_y_ps3, sizeof (fog_y_ps3), 0x2 },
+        { "fog_z_ps", fog_z_ps3, sizeof (fog_z_ps3), 0x4 },
+        { "fog_w_ps", fog_w_ps3, sizeof (fog_w_ps3), 0x8 },
+        { "fog_first_ps", fog_first_ps3, sizeof (fog_first_ps3), 0x1 },
+        { "fog_last_ps", fog_last_ps3, sizeof (fog_last_ps3), 0x1 },
+    };
+    static const char *profiles[2] = { "spirv", "glspirv" };
+    char label[128];
+    size_t i;
+    int p;
+
+    for (i = 0; i < sizeof (ps) / sizeof (ps[0]); i++)
+    {
+        /* The packed pixel shaders' pairs, with TEXCOORD0 on both sides, are test_packed_fog's. */
+        if ((ps[i].tokens != fog_first_ps3) && (ps[i].tokens != fog_last_ps3))
+        {
+            snprintf(label, sizeof (label), "fog_alone_vs_%s", ps[i].name);
+            check_pair(label, fog_alone_vs3, sizeof (fog_alone_vs3), ps[i].tokens, ps[i].bytes, 1);
+            snprintf(label, sizeof (label), "rastout_vs_%s", ps[i].name);
+            check_pair(label, rastout_vs2, sizeof (rastout_vs2), ps[i].tokens, ps[i].bytes, 1);
+        } // if
+        for (p = 0; p < 2; p++)
+        {
+            const MOJOSHADER_parseData *pd = cna_parse(profiles[p], ps[i].tokens, ps[i].bytes);
+            snprintf(label, sizeof (label), "%s %s", ps[i].name, profiles[p]);
+            CNA_CHECK(cna_report_errors(label, pd) == 0, "the pixel shader translates");
+            if (pd->error_count == 0)
+            {
+                const int lanes = fog_input_lanes(pd);
+                if (lanes != ps[i].mask)
+                    fprintf(stderr, "  %s: FOG fills lanes 0x%x, declared 0x%x\n", label,
+                            lanes, ps[i].mask);
+                CNA_CHECK(lanes == ps[i].mask,
+                          "one float FOG input fills exactly the register's declared FOG lane");
+            } // if
+            MOJOSHADER_freeParseData(pd);
+        } // for
+    } // for
+} // test_fog_interface_types
+
 /* Counts what MOJOSHADER_parse() allocates through the caller's allocator, and frees. */
 static int live_allocations = 0;
 
@@ -519,5 +716,6 @@ int main(void)
     cna_test_run("packed_both", test_packed_both);
     cna_test_run("packed_fog", test_packed_fog);
     cna_test_run("rastout_semantics", test_rastout_semantics);
+    cna_test_run("fog_interface_types", test_fog_interface_types);
     return cna_test_finish();
 } // main

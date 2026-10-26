@@ -1743,7 +1743,12 @@ static void spv_emit_func_lit(Context *ctx)
  * spirv.iddecl. Lanes keep their positions, which is how Direct3D 9 links them and how the GLSL
  * profile copies them: a vertex shader copies the register to each of its semantics where main()
  * returns, a pixel shader assembles the register from its semantics' lanes, (0, 0, 0, 1) where
- * none supplies one, before main()'s first instruction. -CNA
+ * none supplies one, before main()'s first instruction.
+ *
+ * FOG is a float on both sides of the interface, as the vertex shader's FOG output is: a pixel
+ * FOG input is a float Input whose value fills FOG's declared lanes of the register. So a pixel
+ * register carrying FOG is assembled this way even when FOG is its one semantic; a vec4 Input
+ * there did not match the vertex shader's float Output at the same Location. -CNA
  */
 static int spv_register_is_packed(Context *ctx, const RegisterType regtype, const int regnum)
 {
@@ -1758,7 +1763,11 @@ static int spv_register_is_packed(Context *ctx, const RegisterType regtype, cons
 
     for (item = ctx->attributes.next; item != NULL; item = item->next)
     {
-        if ((item->regtype == regtype) && (item->regnum == regnum) && (++count > 1))
+        if ((item->regtype != regtype) || (item->regnum != regnum))
+            continue;
+        if (++count > 1)
+            return 1;
+        if (shader_is_pixel(ctx) && (item->usage == MOJOSHADER_USAGE_FOG))
             return 1;
     } // for
     return 0;
@@ -2625,6 +2634,7 @@ static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterTyp
     {
         SpirvPatchTable *table = &ctx->spirv.patch_table;
         const int pointcoord = (usage == MOJOSHADER_USAGE_TEXCOORD) && (index == 0);
+        const int fog = (usage == MOJOSHADER_USAGE_FOG);
         uint32 tid_vec4 = spv_get_type(ctx, STI_VEC4);
         uint32 tid_pvec4i = spv_get_type(ctx, STI_PTR_VEC4_I);
         uint32 id_loaded = spv_bumpid(ctx);
@@ -2645,14 +2655,23 @@ static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterTyp
         push_output(ctx, &ctx->mainline_intro);
         if (pointcoord)
             table->pointcoord_var_offset = buffer_size(ctx->mainline_intro) >> 2;
-        spv_emit(ctx, 4, SpvOpVariable, tid_pvec4i, item->spirv.iddecl, SpvStorageClassInput);
+        spv_emit(ctx, 4, SpvOpVariable, fog ? spv_get_type(ctx, STI_PTR_FLOAT_I) : tid_pvec4i,
+                 item->spirv.iddecl, SpvStorageClassInput);
         pop_output(ctx);
         spv_link_ps_attributes(ctx, item->spirv.iddecl, regtype, usage, index);
 
         push_output(ctx, &ctx->mainline_top);
         if (pointcoord)
             table->pointcoord_load_offset = buffer_size(ctx->mainline_top) >> 2;
-        spv_emit(ctx, 4, SpvOpLoad, tid_vec4, id_loaded, item->spirv.iddecl);
+        if (fog)  // the float, in each of the four lanes; the shuffle keeps FOG's own. -CNA
+        {
+            uint32 id_fog = spv_bumpid(ctx);
+            spv_emit(ctx, 4, SpvOpLoad, spv_get_type(ctx, STI_FLOAT), id_fog, item->spirv.iddecl);
+            spv_emit(ctx, 3 + 4, SpvOpCompositeConstruct, tid_vec4, id_loaded,
+                     id_fog, id_fog, id_fog, id_fog);
+        } // if
+        else
+            spv_emit(ctx, 4, SpvOpLoad, tid_vec4, id_loaded, item->spirv.iddecl);
         if (pointcoord)
         {
             uint32 id_widened = spv_bumpid(ctx);
