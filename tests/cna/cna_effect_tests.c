@@ -1088,6 +1088,175 @@ static void test_clone_coverage_effect_loads_and_clones(void)
     MOJOSHADER_deleteEffect(effect);
 } // test_clone_coverage_effect_loads_and_clones
 
+/* A backend that can run a pass: effectBeginPass/effectCommitChanges evaluate a pass's
+ * PIXELSHADERCONSTANT preshader, so the context needs working bind/getBound and uniform-buffer
+ * hooks. No shader objects are involved, so compileShader is never called. */
+static void *commit_bound_v, *commit_bound_p;
+static float commit_vsf[256 * 4], commit_psf[256 * 4];
+static int commit_vsi[64 * 4], commit_psi[64 * 4];
+static unsigned char commit_vsb[64], commit_psb[64];
+static void MOJOSHADERCALL commit_bind(const void *ctx, void *v, void *p)
+{
+    (void) ctx; commit_bound_v = v; commit_bound_p = p;
+} // commit_bind
+static void MOJOSHADERCALL commit_get_bound(const void *ctx, void **v, void **p)
+{
+    (void) ctx; *v = commit_bound_v; *p = commit_bound_p;
+} // commit_get_bound
+static void MOJOSHADERCALL commit_map(const void *ctx, float **vsf, int **vsi, unsigned char **vsb,
+                                      float **psf, int **psi, unsigned char **psb)
+{
+    (void) ctx;
+    *vsf = commit_vsf; *vsi = commit_vsi; *vsb = commit_vsb;
+    *psf = commit_psf; *psi = commit_psi; *psb = commit_psb;
+} // commit_map
+static void MOJOSHADERCALL commit_unmap(const void *ctx) { (void) ctx; } // commit_unmap
+static MOJOSHADER_effectShaderContext commit_backend(void)
+{
+    MOJOSHADER_effectShaderContext ctx = backend();
+    ctx.bindShaders = commit_bind;
+    ctx.getBoundShaders = commit_get_bound;
+    ctx.mapUniformBufferMemory = commit_map;
+    ctx.unmapUniformBufferMemory = commit_unmap;
+    return ctx;
+} // commit_backend
+
+/*
+ * A valid effect with one float4 parameter "X" and a technique/pass whose single
+ * PIXELSHADERCONSTANT state carries a preshader. The preshader's one instruction reads an INPUT
+ * operand with one array register (array_registers[0] == 1), so run_preshader() forms
+ * array_registers[0] + regsi[base], where regsi[base] is the first word of X's register data.
+ * `input_bits` is written as X's first value word, i.e. that register word. Returns the file
+ * length. With input_bits = 0 the index stays in range; with 0x7FFFFFFF the addition reaches
+ * 0x80000000, which the signed form of the sum could not represent.
+ */
+static unsigned int array_index_effect(unsigned char *out, uint32_t input_bits)
+{
+    Image base, file;
+    CnaWords pre, ctab;
+    uint32_t empty, xname, techname, passname, xtype, xval, stype, sval;
+    unsigned int prelen;
+
+    memset(&pre, '\0', sizeof (pre));
+    cna_words_push(&pre, CNA_PRESHADER_VERSION);
+    cna_words_push(&pre, CNA_COMMENT(4));                 /* CLIT: one literal (1.0) */
+    cna_words_push(&pre, CNA_CLIT_ID); cna_words_push(&pre, 1);
+    cna_words_push(&pre, 0); cna_words_push(&pre, 0x3FF00000u);
+    cna_words_push(&pre, CNA_COMMENT(12));                /* FXLC: one MOV, two operands */
+    cna_words_push(&pre, CNA_FXLC_ID);
+    cna_words_push(&pre, 1);                              /* instruction count */
+    cna_words_push(&pre, 0x10000001u);                   /* MOV, one element */
+    cna_words_push(&pre, 1);                              /* operand count token -> two operands */
+    cna_words_push(&pre, 1);                              /* op0: one array register */
+    cna_words_push(&pre, 2);                              /* op0: INPUT */
+    cna_words_push(&pre, 0);                              /* op0: item (register c0) */
+    cna_words_push(&pre, 0);                              /* op0: pad */
+    cna_words_push(&pre, 4);                              /* op0: jmp -> array_registers[0] == 1 */
+    cna_words_push(&pre, 0);                              /* op1: no array registers */
+    cna_words_push(&pre, 4);                              /* op1: OUTPUT */
+    cna_words_push(&pre, 0);                              /* op1: item */
+    cna_words_push(&pre, CNA_COMMENT(12));                /* PRSI: output register 0, one register */
+    cna_words_push(&pre, CNA_PRSI_ID);
+    cna_words_push(&pre, 0); cna_words_push(&pre, 0); cna_words_push(&pre, 0);
+    cna_words_push(&pre, 1); cna_words_push(&pre, 0); cna_words_push(&pre, 0);
+    cna_words_push(&pre, 1);
+    cna_words_push(&pre, 0); cna_words_push(&pre, 1);
+    cna_words_push(&pre, 0); cna_words_push(&pre, 0);
+    memset(&ctab, '\0', sizeof (ctab));                  /* CTAB: X as a float4 in c0 */
+    cna_push_ctab(&ctab, CNA_PRESHADER_VERSION, "X");
+    cna_words_push(&pre, CNA_COMMENT(ctab.count));
+    cna_words_append(&pre, &ctab); cna_words_free(&ctab);
+    cna_words_push(&pre, 0x0000FFFFu);                   /* end token */
+    prelen = (unsigned int) (pre.count * 4);
+
+    memset(&base, '\0', sizeof (base));
+    empty = base.len; put_u32(&base, 0);
+    xname = put_string(&base, "X");
+    techname = put_string(&base, "T");
+    passname = put_string(&base, "P");
+    xtype = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, xname); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
+    xval = base.len; put_u32(&base, input_bits); put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0);
+    stype = base.len;
+    put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
+    put_u32(&base, empty); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
+    sval = base.len; put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0);
+
+    memset(&file, '\0', sizeof (file));
+    put_u32(&file, 0xFEFF0901);
+    put_u32(&file, base.len);
+    memcpy(file.bytes + file.len, base.bytes, base.len);
+    file.len += base.len;
+    put_u32(&file, 1); put_u32(&file, 1); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, xtype); put_u32(&file, xval); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, techname); put_u32(&file, 0); put_u32(&file, 1);
+    put_u32(&file, passname); put_u32(&file, 0); put_u32(&file, 1);
+    put_u32(&file, 160); put_u32(&file, 0); put_u32(&file, stype); put_u32(&file, sval);
+    put_u32(&file, 0); put_u32(&file, 1);
+    put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0); put_u32(&file, 0);
+    put_u32(&file, prelen);
+    memcpy(file.bytes + file.len, pre.at, prelen);
+    file.len += prelen;
+
+    memcpy(out, file.bytes, file.len);
+    cna_words_free(&pre);
+    return file.len;
+} // array_index_effect
+
+/* Loads the array-index effect and runs its one pass, so run_preshader() evaluates the indirect
+ * array index. Returns the error count (0 when it loads and commits). */
+static int run_array_index_effect(uint32_t input_bits, int *had_array_operand)
+{
+    unsigned char bytes[2048];
+    const unsigned int len = array_index_effect(bytes, input_bits);
+    MOJOSHADER_effectShaderContext ctx = commit_backend();
+    MOJOSHADER_effect *effect = MOJOSHADER_compileEffect(bytes, len, NULL, 0, NULL, 0, &ctx);
+    int errors;
+    *had_array_operand = 0;
+    if ((effect != NULL) && (effect->error_count == 0) && (effect->technique_count == 1) &&
+        (effect->techniques[0].pass_count == 1) && (effect->techniques[0].passes[0].state_count == 1))
+    {
+        const MOJOSHADER_preshader *pre = effect->techniques[0].passes[0].states[0].preshader;
+        if ((pre != NULL) && (pre->instruction_count == 1) &&
+            (pre->instructions[0].operand_count >= 1) &&
+            (pre->instructions[0].operands[0].array_register_count == 1))
+            *had_array_operand = 1;
+        unsigned int passes = 0;
+        MOJOSHADER_effectStateChanges changes;
+        memset(&changes, '\0', sizeof (changes));
+        MOJOSHADER_effectBegin(effect, &passes, 0, &changes);
+        if (passes == 1)
+        {
+            MOJOSHADER_effectBeginPass(effect, 0);  /* runs run_preshader() on the array index */
+            MOJOSHADER_effectEndPass(effect);
+        } // if
+        MOJOSHADER_effectEnd(effect);
+    } // if
+    errors = (effect != NULL) ? effect->error_count : -1;
+    MOJOSHADER_deleteEffect(effect);
+    return errors;
+} // run_array_index_effect
+
+/* A2v2 A-16 / R4-05: run_preshader() forms array_registers[i] + arrIndex to index the input
+ * register file indirectly. arrIndex is a register word -- runtime content -- so the signed
+ * addition could overflow (undefined behaviour) before the range check that follows it. The fix
+ * adds in a wider type. This drives the real evaluation path (effectBeginPass ->
+ * effectCommitChanges -> run_preshader): an in-range index as a control, then the word the guard
+ * exists for, 0x7FFFFFFF, whose plus-one overflows a signed int. Under UndefinedBehaviorSanitizer
+ * the second case reports a signed-integer-overflow without the fix; with it, both are clean. */
+static void test_preshader_indirect_array_index(void)
+{
+    int had_array_operand = 0;
+    int errors = run_array_index_effect(0u, &had_array_operand);
+    CNA_CHECK(errors == 0, "the in-range array-index effect loads and commits");
+    CNA_CHECK(had_array_operand, "its preshader carries an array-register input operand");
+
+    errors = run_array_index_effect(0x7FFFFFFFu, &had_array_operand);
+    CNA_CHECK(errors == 0, "the boundary array-index effect loads and commits without overflow");
+    CNA_CHECK(had_array_operand, "its preshader carries an array-register input operand");
+} // test_preshader_indirect_array_index
+
 /* A-04: the XNA4 wrapper read a second version token after skipping its header without checking
  * four bytes remained. */
 static void test_xna4_wrapper_truncated_after_skip(void)
@@ -1122,6 +1291,7 @@ int main(void)
     cna_test_run("pass_count_wraps_its_array", test_pass_count_wraps_its_array);
     cna_test_run("state_count_wraps_its_array", test_state_count_wraps_its_array);
     cna_test_run("xna4_wrapper_truncated_after_skip", test_xna4_wrapper_truncated_after_skip);
+    cna_test_run("preshader_indirect_array_index", test_preshader_indirect_array_index);
     cna_test_run("effect_load_allocation_failures", test_effect_load_allocation_failures);
     cna_test_run("clone_coverage_effect_loads_and_clones", test_clone_coverage_effect_loads_and_clones);
     cna_test_run("effect_clone_allocation_failures", test_effect_clone_allocation_failures);
