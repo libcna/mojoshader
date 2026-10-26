@@ -289,6 +289,16 @@ static MOJOSHADER_effect MOJOSHADER_not_an_effect_effect = {
     1, &MOJOSHADER_not_an_effect_error, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
+// MOJOSHADER_compileEffect() returns these four statically allocated effects for its errors. They
+// own nothing and have no allocator, so freeing or cloning one must be a no-op. -CNA
+static int effect_is_static_error(const MOJOSHADER_effect *effect)
+{
+    return ((effect == &MOJOSHADER_out_of_mem_effect) ||
+            (effect == &MOJOSHADER_need_a_backend_effect) ||
+            (effect == &MOJOSHADER_unexpected_eof_effect) ||
+            (effect == &MOJOSHADER_not_an_effect_effect));
+} // effect_is_static_error
+
 static void push_errors(ErrorList *list, MOJOSHADER_error *errors, int len)
 {
     int i;
@@ -1476,7 +1486,7 @@ void freevalue(MOJOSHADER_effectValue *value, MOJOSHADER_free f, void *d)
 void MOJOSHADER_deleteEffect(const MOJOSHADER_effect *_effect)
 {
     MOJOSHADER_effect *effect = (MOJOSHADER_effect *) _effect;
-    if ((effect == NULL) || (effect == &MOJOSHADER_out_of_mem_effect))
+    if ((effect == NULL) || effect_is_static_error(effect))
         return;  // no-op.
 
     MOJOSHADER_free f = effect->ctx.f;
@@ -1784,14 +1794,18 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
     int i, j, k;
     MOJOSHADER_parseData *pd;
     MOJOSHADER_effect *clone;
-    MOJOSHADER_malloc m = effect->ctx.m;
-    void *d = effect->ctx.malloc_data;
+    MOJOSHADER_malloc m;
+    void *d;
     uint32 siz = 0;
     char *stringcopy = NULL;
     uint32 curSampler;
 
-    if ((effect == NULL) || (effect == &MOJOSHADER_out_of_mem_effect))
+    // The allocator is read only once the effect is known to be a real one: NULL and the static
+    // error effects have none. -CNA
+    if ((effect == NULL) || effect_is_static_error(effect))
         return NULL;  // no-op.
+    m = effect->ctx.m;
+    d = effect->ctx.malloc_data;
 
     clone = (MOJOSHADER_effect *) m(sizeof (MOJOSHADER_effect), d);
     if (clone == NULL)
