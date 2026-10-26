@@ -49,7 +49,10 @@ void cna_test_fail(const char *file, int line, const char *expression, const cha
 #define CNA_CHECK(condition, message) \
     do { if (!(condition)) cna_test_fail(__FILE__, __LINE__, #condition, (message)); } while (0)
 
-/* Runs one named test case and reports it. */
+/*
+ * Runs one named test case and reports it. When $MOJOSHADER_CNA_TEST_CASE is set, only the case
+ * of that name runs, so a sanitizer report can be told apart from the other cases'.
+ */
 void cna_test_run(const char *name, void (*test)(void));
 
 /* 0 when every check passed, 1 otherwise; prints a summary. */
@@ -77,6 +80,77 @@ int cna_spirv_validate(const MOJOSHADER_parseData *pd, const char *name);
 
 /* Number of SPIR-V words of the module proper, excluding the appended patch table. */
 size_t cna_spirv_module_words(const MOJOSHADER_parseData *pd);
+
+/*
+ * A copy of `bytes` bytes in an allocation of exactly that size, so that AddressSanitizer reports
+ * a read even one byte past the end. Release it with free().
+ */
+void *cna_exact_copy(const void *data, size_t bytes);
+
+/*
+ * An allocator for the MOJOSHADER_* entry points that fails one chosen allocation and counts what
+ * is still live. cna_alloc_reset(n) makes the n-th allocation from then on fail (1 is the first;
+ * 0 fails none).
+ */
+void cna_alloc_reset(int fail_at);
+int cna_alloc_attempts(void);   /* allocations asked for since the reset */
+int cna_alloc_live(void);       /* allocations handed out and not yet freed */
+int cna_alloc_hit(void);        /* whether the chosen allocation was reached and failed */
+void *MOJOSHADERCALL cna_alloc_malloc(int bytes, void *data);
+void MOJOSHADERCALL cna_alloc_free(void *ptr, void *data);
+
+/* A growable array of 32-bit words, for laying out bytecode. */
+typedef struct CnaWords
+{
+    uint32_t *at;
+    size_t count;
+    size_t capacity;
+} CnaWords;
+
+void cna_words_push(CnaWords *w, uint32_t value);
+void cna_words_append(CnaWords *w, const CnaWords *other);
+/* A NUL-terminated string padded to a word; returns its byte offset in `w`. */
+uint32_t cna_words_string(CnaWords *w, const char *text);
+void cna_words_free(CnaWords *w);
+
+/* Comment-block identifiers (little-endian FOURCCs) and a comment token of `words` words. */
+#define CNA_CTAB_ID 0x42415443u
+#define CNA_PRES_ID 0x53455250u
+#define CNA_PRSI_ID 0x49535250u
+#define CNA_CLIT_ID 0x54494C43u
+#define CNA_FXLC_ID 0x434C5846u
+#define CNA_COMMENT(words) (0x0000FFFEu | ((uint32_t) (words) << 16))
+#define CNA_PRESHADER_VERSION 0x46580201u
+
+/*
+ * Appends a constant table from its CTAB identifier on (no comment token): a header for `version`
+ * and one float4 constant named `name` in register c0.
+ */
+void cna_push_ctab(CnaWords *w, uint32_t version, const char *name);
+
+/* Word positions inside a preshader cna_push_preshader() laid out, relative to its start. */
+typedef struct CnaPreshaderLayout
+{
+    size_t clit;    /* the CLIT block's comment token */
+    size_t fxlc;    /* the FXLC block's comment token */
+    size_t prsi;    /* the PRSI block's comment token */
+    size_t ctab;    /* the CTAB block's comment token */
+    size_t end;     /* the trailing end token */
+} CnaPreshaderLayout;
+
+/*
+ * Appends a valid preshader as MOJOSHADER_parsePreshader() takes it: the version token, then
+ * CLIT (four literals of 2.0), FXLC (one instruction, output c0 = input `input` * literals),
+ * PRSI (an output map) and CTAB (`input` as a float4 in c0) blocks, each in its own comment
+ * token, then an end token. `layout` may be NULL.
+ */
+void cna_push_preshader(CnaWords *w, const char *input, CnaPreshaderLayout *layout);
+
+/*
+ * Appends a valid vs_2_0 shader that carries a preshader (computing c0 from the float4 "Scale")
+ * and a constant table declaring "Scale" in c0: dcl_position v0; add oPos, v0, c0; end.
+ */
+void cna_push_vs_with_preshader(CnaWords *w);
 
 #ifdef __cplusplus
 }

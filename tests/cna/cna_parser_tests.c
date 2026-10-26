@@ -136,8 +136,169 @@ static void test_ctab_struct_members_beyond_64k(void)
     free(shader.at);
 } // test_ctab_struct_members_beyond_64k
 
+/* Runs a preshader token stream through MOJOSHADER_parsePreshader from an exact-size allocation,
+ * so AddressSanitizer reports any read even one byte past the declared blocks. */
+static const MOJOSHADER_preshader *parse_preshader_exact(const CnaWords *w)
+{
+    unsigned char *copy = (unsigned char *) cna_exact_copy(w->at, w->count * 4);
+    const MOJOSHADER_preshader *pre =
+        MOJOSHADER_parsePreshader(copy, (unsigned int) (w->count * 4), NULL, NULL, NULL);
+    free(copy);
+    return pre;
+} // parse_preshader_exact
+
+/* A CTAB comment block the preshader section scanner records as "seen". */
+static void push_ctab_block(CnaWords *w, const char *name)
+{
+    CnaWords c;
+    memset(&c, '\0', sizeof (c));
+    cna_push_ctab(&c, CNA_PRESHADER_VERSION, name);
+    cna_words_push(w, CNA_COMMENT(c.count));
+    cna_words_append(w, &c);
+    cna_words_free(&c);
+} // push_ctab_block
+
+/* A-05: a valid standalone preshader still parses after the section-length checks are tightened. */
+static void test_preshader_valid_still_parses(void)
+{
+    CnaWords w;
+    const MOJOSHADER_preshader *pre;
+    memset(&w, '\0', sizeof (w));
+    cna_push_preshader(&w, "Scale", NULL);
+    pre = parse_preshader_exact(&w);
+    CNA_CHECK(pre != NULL, "the valid preshader parses");
+    if (pre != NULL)
+    {
+        CNA_CHECK(pre->literal_count == 4, "its four literals");
+        CNA_CHECK(pre->instruction_count == 1, "its one instruction");
+        CNA_CHECK(pre->symbol_count == 1, "its one symbol");
+    } // if
+    MOJOSHADER_freePreshader(pre);
+    cna_words_free(&w);
+} // test_preshader_valid_still_parses
+
+/* A-05: parse_preshader read its version token before checking the buffer held one. */
+static void test_preshader_empty_buffer(void)
+{
+    unsigned char *copy = (unsigned char *) cna_exact_copy("", 0);
+    const MOJOSHADER_preshader *pre = MOJOSHADER_parsePreshader(copy, 0, NULL, NULL, NULL);
+    CNA_CHECK(pre == NULL, "an empty preshader buffer is refused, not read");
+    MOJOSHADER_freePreshader(pre);
+    free(copy);
+} // test_preshader_empty_buffer
+
+/* A-05: a one-word CLIT block has no literal-count word to read. */
+static void test_preshader_short_clit_block(void)
+{
+    CnaWords w;
+    const MOJOSHADER_preshader *pre;
+    memset(&w, '\0', sizeof (w));
+    cna_words_push(&w, CNA_PRESHADER_VERSION);
+    cna_words_push(&w, CNA_COMMENT(3));
+    cna_words_push(&w, CNA_FXLC_ID); cna_words_push(&w, 0); cna_words_push(&w, 0);
+    cna_words_push(&w, CNA_COMMENT(1));   /* CLIT: identifier only */
+    cna_words_push(&w, CNA_CLIT_ID);
+    pre = parse_preshader_exact(&w);
+    CNA_CHECK(pre == NULL, "a one-word CLIT block is refused");
+    MOJOSHADER_freePreshader(pre);
+    cna_words_free(&w);
+} // test_preshader_short_clit_block
+
+/* A-05: a one-word FXLC block has no instruction-count word to read. */
+static void test_preshader_short_fxlc_block(void)
+{
+    CnaWords w;
+    const MOJOSHADER_preshader *pre;
+    memset(&w, '\0', sizeof (w));
+    cna_words_push(&w, CNA_PRESHADER_VERSION);
+    cna_words_push(&w, CNA_COMMENT(4));
+    cna_words_push(&w, CNA_CLIT_ID); cna_words_push(&w, 0); cna_words_push(&w, 0); cna_words_push(&w, 0);
+    cna_words_push(&w, CNA_COMMENT(1));   /* FXLC: identifier only */
+    cna_words_push(&w, CNA_FXLC_ID);
+    pre = parse_preshader_exact(&w);
+    CNA_CHECK(pre == NULL, "a one-word FXLC block is refused");
+    MOJOSHADER_freePreshader(pre);
+    cna_words_free(&w);
+} // test_preshader_short_fxlc_block
+
+/* A-05: a comment block whose declared length swallowed its own header token underflowed the
+ * remaining-token counter to four billion and the scan walked off the buffer. */
+static void test_preshader_comment_block_exceeds_stream(void)
+{
+    CnaWords w;
+    const MOJOSHADER_preshader *pre;
+    memset(&w, '\0', sizeof (w));
+    cna_words_push(&w, CNA_PRESHADER_VERSION);
+    cna_words_push(&w, CNA_COMMENT(2));   /* claims two words, but only one follows */
+    cna_words_push(&w, CNA_CLIT_ID);
+    pre = parse_preshader_exact(&w);
+    CNA_CHECK(pre == NULL, "an over-long comment block is refused");
+    MOJOSHADER_freePreshader(pre);
+    cna_words_free(&w);
+} // test_preshader_comment_block_exceeds_stream
+
+/* A-05: the FXLC instruction header was bounded once, not before each instruction, so variable
+ * operands could leave the next instruction's header past the block end. */
+static void test_preshader_fxlc_instruction_truncated(void)
+{
+    CnaWords w;
+    const MOJOSHADER_preshader *pre;
+    memset(&w, '\0', sizeof (w));
+    cna_words_push(&w, CNA_PRESHADER_VERSION);
+    cna_words_push(&w, CNA_COMMENT(2));
+    cna_words_push(&w, CNA_CLIT_ID); cna_words_push(&w, 0);
+    push_ctab_block(&w, "Scale");
+    cna_words_push(&w, CNA_COMMENT(7));   /* FXLC claims two instructions, holds one */
+    cna_words_push(&w, CNA_FXLC_ID);
+    cna_words_push(&w, 2);                /* instruction count */
+    cna_words_push(&w, 0x10000004u);      /* MOV, four elements */
+    cna_words_push(&w, 0);                /* one operand */
+    cna_words_push(&w, 0);                /* operand: no arrays */
+    cna_words_push(&w, 4);                /* operand: OUTPUT */
+    cna_words_push(&w, 0);                /* operand: index */
+    pre = parse_preshader_exact(&w);
+    CNA_CHECK(pre == NULL, "a truncated FXLC instruction stream is refused");
+    MOJOSHADER_freePreshader(pre);
+    cna_words_free(&w);
+} // test_preshader_fxlc_instruction_truncated
+
+/* A-05: a shader's CTAB comment was handed commenttoks * 4 bytes although its data begins after
+ * the CTAB identifier, so a truncated CTAB could be read four bytes past the comment. */
+static void test_shader_ctab_span_truncated(void)
+{
+    CnaWords w;
+    unsigned char *copy;
+    const MOJOSHADER_parseData *pd;
+    memset(&w, '\0', sizeof (w));
+    cna_words_push(&w, CNA_VS(2, 0));
+    cna_words_push(&w, CNA_COMMENT(8));   /* comment payload is eight words */
+    cna_words_push(&w, CNA_CTAB_ID);
+    cna_words_push(&w, 28);               /* Size */
+    cna_words_push(&w, 0);                /* Creator */
+    cna_words_push(&w, CNA_VS(2, 0));     /* Version == the shader's version token */
+    cna_words_push(&w, 0);                /* Constants */
+    cna_words_push(&w, 0);                /* ConstantInfo */
+    cna_words_push(&w, 0);                /* Flags */
+    cna_words_push(&w, 28);               /* Target string, in the spurious trailing word */
+    copy = (unsigned char *) cna_exact_copy(w.at, w.count * 4);
+    pd = MOJOSHADER_parse("glsl", "main", copy, (unsigned int) (w.count * 4),
+                          NULL, 0, NULL, 0, NULL, NULL, NULL);
+    CNA_CHECK(pd != NULL, "a parse result comes back");
+    CNA_CHECK((pd == NULL) || (pd->error_count > 0), "the truncated CTAB is rejected");
+    MOJOSHADER_freeParseData(pd);
+    free(copy);
+    cna_words_free(&w);
+} // test_shader_ctab_span_truncated
+
 int main(void)
 {
     cna_test_run("ctab_struct_members_beyond_64k", test_ctab_struct_members_beyond_64k);
+    cna_test_run("preshader_valid_still_parses", test_preshader_valid_still_parses);
+    cna_test_run("preshader_empty_buffer", test_preshader_empty_buffer);
+    cna_test_run("preshader_short_clit_block", test_preshader_short_clit_block);
+    cna_test_run("preshader_short_fxlc_block", test_preshader_short_fxlc_block);
+    cna_test_run("preshader_comment_block_exceeds_stream", test_preshader_comment_block_exceeds_stream);
+    cna_test_run("preshader_fxlc_instruction_truncated", test_preshader_fxlc_instruction_truncated);
+    cna_test_run("shader_ctab_span_truncated", test_shader_ctab_span_truncated);
     return cna_test_finish();
 } // main

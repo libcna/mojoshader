@@ -4523,6 +4523,13 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     const uint32 version_magic = 0x46580000;
     const uint32 min_version = 0x00000200 | version_magic;
     const uint32 max_version = 0x00000201 | version_magic;
+    // The version is the preshader's first word; a buffer too short to hold even it (a standalone
+    // MOJOSHADER_parsePreshader() may be handed one) must be refused, not read. -CNA
+    if (tokcount == 0)
+    {
+        fail(ctx, "Preshader is empty.");
+        return;
+    } // if
     const uint32 version = SWAP32(tokens[0]);
     if (version < min_version || version > max_version)
     {
@@ -4544,8 +4551,11 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     while (tokcount > 0)
     {
         uint32 subtokcount = 0;
+        // The comment token itself is one of the tokcount words, and is consumed just below
+        // before subtokcount more are taken; comparing against tokcount without that header
+        // let subtokcount == tokcount through and underflowed nexttokcount to four billion. -CNA
         if ( (!is_comment_token(ctx, *tokens, &subtokcount)) ||
-             (subtokcount > tokcount) )
+             (subtokcount >= tokcount) )
         {
             // !!! FIXME: Standalone preshaders have this EOS-looking token,
             // !!! FIXME:  sometimes followed by tokens that don't appear to
@@ -4610,7 +4620,9 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     ctx->preshader = preshader;
 
     // Let's set up the constant literals first...
-    if (clit.tokcount == 0)
+    // The block must carry its identifier and the literal count before that count is read:
+    // a one-word CLIT block has no second word. -CNA
+    if (clit.tokcount < 2)
         fail(ctx, "Bogus CLIT block in preshader.");
     else
     {
@@ -4670,8 +4682,11 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     } // if
 
     // Now we'll figure out the CTAB...
+    // parse_constant_table reads from &(ctab.tokens - 1)[2], i.e. ctab.tokens[1], so the span it
+    // may read is the block without its leading identifier word -- one word fewer than tokcount.
+    // -CNA
     CtabData ctabdata = { 0, 0, 0 };
-    parse_constant_table(ctx, ctab.tokens - 1, ctab.tokcount * 4,
+    parse_constant_table(ctx, ctab.tokens - 1, (ctab.tokcount - 1) * 4,
                          version, 0, &ctabdata);
 
     // preshader owns this now. Don't free it in this function.
@@ -4685,6 +4700,13 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     } // if
 
     // The FXLC block has the actual instructions...
+    // Its identifier and instruction count are two words; a shorter block has no second word
+    // (and subtracting two from it below would wrap tokcount). -CNA
+    if (fxlc.tokcount < 2)
+    {
+        fail(ctx, "Bogus FXLC block in preshader.");
+        return;
+    } // if
     uint32 opcode_count = SWAP32(fxlc.tokens[1]);
 
     fxlc.tokens += 2;
@@ -4708,6 +4730,14 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
     MOJOSHADER_preshaderInstruction *inst = preshader->instructions;
     while (opcode_count--)
     {
+        // Each instruction opens with a two-word header. Variable-size operands consumed the
+        // block above, so the count checked once before the loop no longer bounds this read: the
+        // words left have to be rechecked before every instruction. -CNA
+        if (fxlc.tokcount < 2)
+        {
+            fail(ctx, "Bogus preshader FXLC block.");
+            return;
+        } // if
         const uint32 opcodetok = SWAP32(fxlc.tokens[0]);
         MOJOSHADER_preshaderOpcode opcode = MOJOSHADER_PRESHADEROP_NOP;
         switch ((opcodetok >> 16) & 0xFFFF)
@@ -4940,7 +4970,10 @@ static int parse_comment_token(Context *ctx)
                 parse_preshader(ctx, ctx->tokens + 2, commenttoks - 2);
             else if (id == CTAB_ID)
             {
-                parse_constant_table(ctx, ctx->tokens, commenttoks * 4,
+                // parse_constant_table's base is &ctx->tokens[2], past the comment token and the
+                // CTAB identifier, so the span it may read is commenttoks less that identifier
+                // word -- handing it commenttoks * 4 reached four bytes past the comment. -CNA
+                parse_constant_table(ctx, ctx->tokens, (commenttoks - 1) * 4,
                                      ctx->version_token, 1, &ctx->ctab);
             } // else if
         } // if
@@ -6169,6 +6202,13 @@ const MOJOSHADER_preshader *MOJOSHADER_parsePreshader(const unsigned char *buf,
     {
         return retval; // !!! FIXME: Out of memory struct for MOJOSHADER_preshader
     }
+    // build_context() reads a zero length as "size unknown" and reports four billion tokens; a
+    // preshader always has a known size, and no bytes hold no version token. -CNA
+    if (buflen < sizeof (uint32))
+    {
+        destroy_context(ctx);
+        return retval;
+    } // if
     parse_preshader(ctx, ctx->tokens, ctx->tokencount);
     if (!isfail(ctx))
     {
