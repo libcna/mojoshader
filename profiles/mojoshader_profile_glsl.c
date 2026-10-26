@@ -1346,6 +1346,10 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
     if (shader_is_vertex(ctx))
     {
+        // oFog is a scalar register, written as a float; a vec4 varying standing for it takes
+        //  the float in its x, which a ps_3_0 FOG input reads. -CNA
+        const char *scalar_lane = isscalar_GLSL(ctx, regtype, regnum) ? ".x" : "";
+
         if (support_glsles3(ctx))
         {
             qualifier_in = "in";
@@ -1516,7 +1520,7 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
                 else
 #endif
                     output_line(ctx, "centroid varying vec4 %s;", centroid_name);
-                output_line(ctx, "#define %s %s", var, centroid_name);
+                output_line(ctx, "#define %s %s%s", var, centroid_name, scalar_lane);
                 output_line(ctx, "#else");
             } // if
             // no mapping to built-in var? Just make it a regular global, pray.
@@ -1528,7 +1532,7 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
                 else
 #endif
                 output_line(ctx, "varying vec4 io_%i_%i;", usage, index);
-                output_line(ctx, "#define %s io_%i_%i", var, usage, index);
+                output_line(ctx, "#define %s io_%i_%i%s", var, usage, index, scalar_lane);
             } // if
             else
             {

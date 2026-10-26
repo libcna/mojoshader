@@ -271,6 +271,35 @@ static void test_standalone_fog_lanes(void)
     } // block
 } // test_standalone_fog_lanes
 
+/* vs_2_0: oPos = v0, oFog = v0.z. */
+static const uint32_t ofog_vs2[] = {
+    CNA_VS(2, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 1, 15), CNA_SRC_SWZ(CNA_INPUT, 0, 0xAA),
+    CNA_END
+};
+
+/*
+ * R5-01 (2026-10-26 remediation review, round 2), the GLSL varyings: a vs_2_0 oFog is a scalar
+ * register, written `vs_oFog = vs_v0.z;`, but GLSL ES (and every profile's centroid variant)
+ * stood it for a vec4 varying, `#define vs_oFog io_11_0` -- a float assigned to a vec4, which no
+ * GLSL compiles. The varying stays a vec4, as a ps_3_0 FOG input declares it, and takes the
+ * float in its x.
+ */
+static void test_vs2_fog_varying(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (glsl_profiles) / sizeof (glsl_profiles[0]); i++)
+    {
+        const int is_es = (strncmp(glsl_profiles[i], "glsles", 6) == 0);
+        const char *const expected[] = {
+            "vs_oFog = vs_v0.z;", "#define vs_oFog cna_centroid_11_0.x\n",
+            is_es ? "#define vs_oFog io_11_0.x\n" : "#define vs_oFog gl_FogFragCoord\n" };
+        check_glsl("vs_2_0 oFog", glsl_profiles[i], ofog_vs2, sizeof (ofog_vs2), expected, 3);
+    } // for
+} // test_vs2_fog_varying
+
 int main(void)
 {
     cna_test_run("color_written_in_subroutine_is_clamped",
@@ -279,5 +308,6 @@ int main(void)
                  test_epilogue_stays_inline_without_subroutines);
     cna_test_run("packed_fog", test_packed_fog);
     cna_test_run("standalone_fog_lanes", test_standalone_fog_lanes);
+    cna_test_run("vs2_fog_varying", test_vs2_fog_varying);
     return cna_test_finish();
 } // main
