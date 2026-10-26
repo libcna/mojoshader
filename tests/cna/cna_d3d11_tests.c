@@ -467,6 +467,48 @@ static void test_vface_pair_rewrite(void)
     free(ctx);
 } // test_vface_pair_rewrite
 
+/* vs_3_0: dcl_position v0; dcl_depth v1; mov o0, v0; mov o1 (TEXCOORD0), v1 */
+static const uint32_t depth_input_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(12, 0), CNA_DST(CNA_INPUT, 1, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 15),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 15), CNA_SRC(CNA_INPUT, 1),
+    CNA_END
+};
+
+/*
+ * A3a2 A-04, the Direct3D 11 half (2026-10-26 remediation review, round 2): FNA3D's Direct3D 11
+ * driver compiles a vertex shader through MojoShader's glue and asks it where each vertex
+ * element goes; a shader declaring a DEPTH input (VertexElementUsage.Depth) failed to compile
+ * ("Unknown vertex input semantic type!"). It must compile, list DEPTH0 at its own input
+ * location, and declare it under the DEPTH0 semantic the driver's input layout names it with.
+ */
+static void test_depth_vertex_input(void)
+{
+    MOJOSHADER_d3d11Context *ctx;
+    MOJOSHADER_d3d11Shader *vs;
+
+    cna_alloc_reset(0);
+    ctx = make_context();
+    vs = (ctx != NULL) ? compile(ctx, depth_input_vs3, sizeof (depth_input_vs3)) : NULL;
+    CNA_CHECK(vs != NULL, "a vertex shader with a DEPTH input compiles");
+    if (vs != NULL)
+    {
+        const int position = MOJOSHADER_d3d11GetVertexAttribLocation(vs, MOJOSHADER_USAGE_POSITION, 0);
+        const int depth = MOJOSHADER_d3d11GetVertexAttribLocation(vs, MOJOSHADER_USAGE_DEPTH, 0);
+        CNA_CHECK((position >= 0) && (depth >= 0) && (depth != position),
+                  "DEPTH0 has an input location of its own");
+        CNA_CHECK(strstr(vs->parseData->output, "float4 m_v1 : DEPTH0;") != NULL,
+                  "the input-layout semantic is DEPTH0");
+        MOJOSHADER_d3d11DeleteShader(ctx, vs);
+    } // if
+    CNA_CHECK((buffers_live == 0) && (cna_alloc_live() == 0), "everything is released");
+    free(ctx);
+} // test_depth_vertex_input
+
 int main(void)
 {
     cna_test_run("texbem_zero_state", test_texbem_zero_state);
@@ -475,5 +517,6 @@ int main(void)
     cna_test_run("compile_allocation_failures", test_compile_allocation_failures);
     cna_test_run("fog_pair_rewrite", test_fog_pair_rewrite);
     cna_test_run("vface_pair_rewrite", test_vface_pair_rewrite);
+    cna_test_run("depth_vertex_input", test_depth_vertex_input);
     return cna_test_finish();
 } // main

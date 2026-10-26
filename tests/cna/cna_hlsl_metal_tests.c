@@ -23,7 +23,7 @@
 #define CNA_FHALF 0x3f000000u  /* 0.5f */
 
 /* D3DDECLUSAGE_* values a DCL token carries. */
-enum { CNA_POSITION = 0, CNA_TEXCOORD = 5, CNA_COLOR = 10, CNA_FOG = 11 };
+enum { CNA_POSITION = 0, CNA_TEXCOORD = 5, CNA_COLOR = 10, CNA_FOG = 11, CNA_DEPTH = 12 };
 
 #define CNA_MOVA 46  /* D3DSIO_MOVA */
 #define CNA_TEXBEML 68  /* D3DSIO_TEXBEML */
@@ -512,6 +512,68 @@ static void test_standalone_fog_lanes(void)
         } // for
     } // for
 } // test_standalone_fog_lanes
+
+/* vs_3_0: dcl_position v0; dcl_depth v1; mov o0, v0; mov o1 (TEXCOORD0), v1 */
+static const uint32_t depth_input_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_DEPTH, 0), CNA_DST(CNA_INPUT, 1, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 1, 0xF),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xF), CNA_SRC(CNA_INPUT, 1),
+    CNA_END
+};
+
+/* vs_2_0: dcl_position v0; dcl_depth1 v1; mov oPos, v0; mov oT0, v1 */
+static const uint32_t depth_input_vs2[] = {
+    CNA_VS(2, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_DEPTH, 1), CNA_DST(CNA_INPUT, 1, 0xF),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_TEXCRDOUT, 0, 0xF), CNA_SRC(CNA_INPUT, 1),
+    CNA_END
+};
+
+/*
+ * A3a2 A-04, the Direct3D 11 half (2026-10-26 remediation review, round 2): a vertex shader
+ * input declared with XNA's VertexElementUsage.Depth (dcl_depth) was refused by the HLSL profile
+ * ("Unknown vertex input semantic type!"), so FNA3D's Direct3D 11 driver could not draw a shader
+ * that reads one. It is the input-layout semantic DEPTH<n>, with its index -- not SV_Depth, a
+ * pixel shader output -- in vs_3_0 and vs_2_0 alike; Metal binds inputs by attribute number and
+ * already took it.
+ */
+static void test_depth_vertex_input(void)
+{
+    static const struct { const char *name; const uint32_t *tokens; size_t bytes;
+                          const char *member; } shaders[] = {
+        { "depth_input_vs3", depth_input_vs3, sizeof (depth_input_vs3), "float4 m_v1 : DEPTH0;" },
+        { "depth_input_vs2", depth_input_vs2, sizeof (depth_input_vs2), "float4 m_v1 : DEPTH1;" },
+    };
+    size_t i, j;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        for (j = 0; j < sizeof (shaders) / sizeof (shaders[0]); j++)
+        {
+            const MOJOSHADER_parseData *pd = cna_translate(profile, shaders[j].tokens,
+                                                           shaders[j].bytes, shaders[j].name);
+            CNA_CHECK(pd->output != NULL, "a DEPTH vertex input translates");
+            if (metal)
+                CNA_CHECK(cna_output_contains(pd, "float4 v1 [[attribute(1)]];"),
+                          "Metal binds it by its attribute number");
+            else
+            {
+                CNA_CHECK(cna_output_contains(pd, shaders[j].member),
+                          "HLSL gives it the DEPTH semantic with its index");
+                CNA_CHECK(!cna_output_contains(pd, "SV_Depth"), "not the pixel output SV_Depth");
+            } // else
+            cna_check_hlsl_compiles(pd, profile, shaders[j].name);
+            MOJOSHADER_freeParseData(pd);
+        } // for
+    } // for
+} // test_depth_vertex_input
 
 /* ps_3_0: TEXCOORD0 in v1.xy and TEXCOORD1 in v1.zw. */
 static const uint32_t packed_inputs_ps3[] = {
@@ -1027,6 +1089,7 @@ int main(int argc, char **argv)
         { "packed_vertex_outputs", test_packed_vertex_outputs },
         { "packed_fog_output", test_packed_fog_output },
         { "standalone_fog_lanes", test_standalone_fog_lanes },
+        { "depth_vertex_input", test_depth_vertex_input },
         { "packed_pixel_inputs", test_packed_pixel_inputs },
         { "unpacked_shaders_unchanged", test_unpacked_shaders_unchanged },
         { "explicit_main_ret", test_explicit_main_ret },

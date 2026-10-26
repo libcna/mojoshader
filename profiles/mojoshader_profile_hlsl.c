@@ -1250,6 +1250,12 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
                 case MOJOSHADER_USAGE_COLOR:
                     output_line(ctx, "float4 m_%s : COLOR%d;", var, index);
                     break;
+                // XNA's VertexElementUsage.Depth. A vertex input's semantic is the
+                //  application's, matched by name and index against its input layout:
+                //  DEPTH<n>, not the pixel-shader output SV_Depth. -CNA
+                case MOJOSHADER_USAGE_DEPTH:
+                    output_line(ctx, "float4 m_%s : DEPTH%d;", var, index);
+                    break;
                 case MOJOSHADER_USAGE_NORMAL:
                     output_line(ctx, "float4 m_%s : NORMAL%d;", var, index);
                     break;
