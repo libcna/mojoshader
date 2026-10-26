@@ -1158,13 +1158,19 @@ static MOJOSHADER_effectShaderContext commit_backend(void)
 
 /*
  * A valid effect with one float4 parameter "X" and a technique/pass whose single
- * PIXELSHADERCONSTANT state carries a preshader. The preshader's one instruction reads an INPUT
- * operand with one array register (array_registers[0] == 1), so run_preshader() forms
- * array_registers[0] + regsi[base], where regsi[base] is the first word of X's register data.
- * `input_bits` is written as X's first value word, i.e. that register word. Returns the file
- * length. With input_bits = 0 the index stays in range; with 0x7FFFFFFF the addition reaches
- * 0x80000000, which the signed form of the sum could not represent.
+ * PIXELSHADERCONSTANT state (register c0) carries a preshader. The preshader's one instruction,
+ * a one-element MOV to its output, reads an INPUT operand with one array register
+ * (array_registers[0] == 1), so run_preshader() forms next = array_registers[0] + regsi[0],
+ * where regsi[] are X's four value words read as integers, and -- when 0 <= next < 4 -- moves
+ * regsi[next], converted to a float, to the state's c0.x. `input_bits` is X's first word, the
+ * index; X's other words are ARRAY_INDEX_WORDS. The state's value starts out as
+ * ARRAY_INDEX_SENTINEL in every cell, so a refused index leaves c0.x at the sentinel. Returns the
+ * file length. With input_bits = 0x7FFFFFFF the addition reaches 0x80000000, which the signed
+ * form of the sum could not represent.
  */
+#define ARRAY_INDEX_SENTINEL 42.0f
+static const uint32_t ARRAY_INDEX_WORDS[3] = { 5, 6, 7 };  /* regsi[1], regsi[2], regsi[3] */
+
 static unsigned int array_index_effect(unsigned char *out, uint32_t input_bits)
 {
     Image base, file;
@@ -1212,11 +1218,15 @@ static unsigned int array_index_effect(unsigned char *out, uint32_t input_bits)
     xtype = base.len;
     put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
     put_u32(&base, xname); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
-    xval = base.len; put_u32(&base, input_bits); put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0);
+    xval = base.len; put_u32(&base, input_bits);
+    put_u32(&base, ARRAY_INDEX_WORDS[0]); put_u32(&base, ARRAY_INDEX_WORDS[1]);
+    put_u32(&base, ARRAY_INDEX_WORDS[2]);
     stype = base.len;
     put_u32(&base, MOJOSHADER_SYMTYPE_FLOAT); put_u32(&base, MOJOSHADER_SYMCLASS_VECTOR);
     put_u32(&base, empty); put_u32(&base, empty); put_u32(&base, 0); put_u32(&base, 4); put_u32(&base, 1);
-    sval = base.len; put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0); put_u32(&base, 0);
+    sval = base.len;
+    put_f32(&base, ARRAY_INDEX_SENTINEL); put_f32(&base, ARRAY_INDEX_SENTINEL);
+    put_f32(&base, ARRAY_INDEX_SENTINEL); put_f32(&base, ARRAY_INDEX_SENTINEL);
 
     memset(&file, '\0', sizeof (file));
     put_u32(&file, 0xFEFF0901);
@@ -1240,15 +1250,18 @@ static unsigned int array_index_effect(unsigned char *out, uint32_t input_bits)
 } // array_index_effect
 
 /* Loads the array-index effect and runs its one pass, so run_preshader() evaluates the indirect
- * array index. Returns the error count (0 when it loads and commits). */
-static int run_array_index_effect(uint32_t input_bits, int *had_array_operand)
+ * array index, and copies the pixel shader register c0 the commit wrote to `c0` (left at -1
+ * when nothing is committed). Returns the error count (0 when it loads and commits). */
+static int run_array_index_effect(uint32_t input_bits, int *had_array_operand, float c0[4])
 {
     unsigned char bytes[2048];
     const unsigned int len = array_index_effect(bytes, input_bits);
     MOJOSHADER_effectShaderContext ctx = commit_backend();
     MOJOSHADER_effect *effect = MOJOSHADER_compileEffect(bytes, len, NULL, 0, NULL, 0, &ctx);
-    int errors;
+    int errors, i;
     *had_array_operand = 0;
+    for (i = 0; i < 4; i++)
+        commit_psf[i] = c0[i] = -1.0f;
     if ((effect != NULL) && (effect->error_count == 0) && (effect->technique_count == 1) &&
         (effect->techniques[0].pass_count == 1) && (effect->techniques[0].passes[0].state_count == 1))
     {
@@ -1264,6 +1277,8 @@ static int run_array_index_effect(uint32_t input_bits, int *had_array_operand)
         if (passes == 1)
         {
             MOJOSHADER_effectBeginPass(effect, 0);  /* runs run_preshader() on the array index */
+            for (i = 0; i < 4; i++)
+                c0[i] = commit_psf[i];
             MOJOSHADER_effectEndPass(effect);
         } // if
         MOJOSHADER_effectEnd(effect);
@@ -1273,23 +1288,48 @@ static int run_array_index_effect(uint32_t input_bits, int *had_array_operand)
     return errors;
 } // run_array_index_effect
 
+/* Runs the array-index effect with `index` and checks what its commit wrote to c0. */
+static void check_array_index(uint32_t index, float expected_x, const char *what)
+{
+    int had_array_operand = 0;
+    float c0[4];
+    char label[160];
+    const int errors = run_array_index_effect(index, &had_array_operand, c0);
+
+    snprintf(label, sizeof (label), "%s: the effect loads and commits", what);
+    CNA_CHECK(errors == 0, label);
+    snprintf(label, sizeof (label), "%s: its preshader carries an array-register input operand", what);
+    CNA_CHECK(had_array_operand, label);
+    snprintf(label, sizeof (label), "%s: c0.x is %g", what, (double) expected_x);
+    if (c0[0] != expected_x)
+        fprintf(stderr, "  %s, but it is %g\n", label, (double) c0[0]);
+    CNA_CHECK(c0[0] == expected_x, label);
+    snprintf(label, sizeof (label), "%s: the MOV leaves c0.yzw at the state's value", what);
+    CNA_CHECK((c0[1] == ARRAY_INDEX_SENTINEL) && (c0[2] == ARRAY_INDEX_SENTINEL) &&
+              (c0[3] == ARRAY_INDEX_SENTINEL), label);
+} // check_array_index
+
 /* A2v2 A-16 / R4-05: run_preshader() forms array_registers[i] + arrIndex to index the input
  * register file indirectly. arrIndex is a register word -- runtime content -- so the signed
  * addition could overflow (undefined behaviour) before the range check that follows it. The fix
  * adds in a wider type. This drives the real evaluation path (effectBeginPass ->
  * effectCommitChanges -> run_preshader): an in-range index as a control, then the word the guard
  * exists for, 0x7FFFFFFF, whose plus-one overflows a signed int. Under UndefinedBehaviorSanitizer
- * the second case reports a signed-integer-overflow without the fix; with it, both are clean. */
+ * the boundary case reports a signed-integer-overflow without the fix; with it, both are clean.
+ *
+ * R6-03 (2026-10-26 remediation review, round 2): the cases checked only that the effect loaded,
+ * so a run_preshader() that returned at once passed them. Each accepted index must now move its
+ * own register word to c0.x -- index 0 reads word 1 (5), index 2 word 3 (7), and -1 word 0, the
+ * index itself -- and each refused one (past the end, before the start, the overflowing
+ * 0x7FFFFFFF) must leave c0.x at the state's preloaded value. */
 static void test_preshader_indirect_array_index(void)
 {
-    int had_array_operand = 0;
-    int errors = run_array_index_effect(0u, &had_array_operand);
-    CNA_CHECK(errors == 0, "the in-range array-index effect loads and commits");
-    CNA_CHECK(had_array_operand, "its preshader carries an array-register input operand");
-
-    errors = run_array_index_effect(0x7FFFFFFFu, &had_array_operand);
-    CNA_CHECK(errors == 0, "the boundary array-index effect loads and commits without overflow");
-    CNA_CHECK(had_array_operand, "its preshader carries an array-register input operand");
+    check_array_index(0u, (float) ARRAY_INDEX_WORDS[0], "index 0");
+    check_array_index(2u, (float) ARRAY_INDEX_WORDS[2], "index 2");
+    check_array_index(0xFFFFFFFFu, -1.0f, "index -1");
+    check_array_index(3u, ARRAY_INDEX_SENTINEL, "index 3, past the register");
+    check_array_index(0xFFFFFFFEu, ARRAY_INDEX_SENTINEL, "index -2, before the register");
+    check_array_index(0x7FFFFFFFu, ARRAY_INDEX_SENTINEL, "index 0x7FFFFFFF, whose sum overflows an int");
 } // test_preshader_indirect_array_index
 
 /* A-04: the XNA4 wrapper read a second version token after skipping its header without checking
