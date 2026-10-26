@@ -4674,7 +4674,11 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
         prsi.tokcount -= 8;
         prsi.tokens += 8;
 
-        if (prsi.tokcount < ((output_map_count + 1) * 2))
+        // (output_map_count + 1) * 2 is computed from a content count in 32 bits, so a large one
+        // wraps to a small product (0xFFFFFFFF wraps it to 0), passes this bound, and then runs
+        // the output-operand loop below output_map_count times over output_map. Widen before
+        // multiplying. -CNA
+        if ((uint64) prsi.tokcount < (((uint64) output_map_count + 1) * 2))
         {
             fail(ctx, "Bogus preshader PRSI data");
             return;
@@ -4808,6 +4812,15 @@ static void parse_preshader(Context *ctx, const uint32 *tokens, uint32 tokcount)
         MOJOSHADER_preshaderOperand *operand = inst->operands;
         while (operand_count--)
         {
+            // Each operand's three base words were bounded once, before the loop, by
+            // (operand_count * 3) > fxlc.tokcount. An earlier INPUT operand with array registers
+            // consumes two words apiece beyond its three, so by a later operand that one check no
+            // longer holds: the three words have to be confirmed present before they are read. -CNA
+            if (fxlc.tokcount < 3)
+            {
+                fail(ctx, "Bogus preshader FXLC block.");
+                return;
+            } // if
             const unsigned int item = (unsigned int) SWAP32(fxlc.tokens[2]);
 
             // !!! FIXME: Is this used anywhere other than INPUT? -flibit

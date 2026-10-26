@@ -440,6 +440,58 @@ static void test_packed_fog_dcl_masks(void)
     MOJOSHADER_freeParseData(last);
 } // test_packed_fog_dcl_masks
 
+/* R2-07: the FXLC operand loop checked the three base words of all its operands once, before the
+ * loop; an INPUT operand with an array register consumes two extra words, so a later operand's
+ * base read ran past the block -- and, with FXLC last in the buffer, past the buffer. */
+static void test_preshader_fxlc_operand_past_block(void)
+{
+    CnaWords w, ctab;
+    const MOJOSHADER_preshader *pre;
+    memset(&w, '\0', sizeof (w));
+    cna_words_push(&w, CNA_PRESHADER_VERSION);
+    cna_words_push(&w, CNA_COMMENT(10));              /* CLIT: four literals */
+    cna_words_push(&w, CNA_CLIT_ID); cna_words_push(&w, 4);
+    { int i; for (i = 0; i < 4; i++) { cna_words_push(&w, 0); cna_words_push(&w, 0x40000000u); } }
+    memset(&ctab, '\0', sizeof (ctab));              /* CTAB: Scale as float4 c0 */
+    cna_push_ctab(&ctab, CNA_PRESHADER_VERSION, "Scale");
+    cna_words_push(&w, CNA_COMMENT(ctab.count));
+    cna_words_append(&w, &ctab); cna_words_free(&ctab);
+    cna_words_push(&w, CNA_COMMENT(11));              /* FXLC last: 11 words */
+    cna_words_push(&w, CNA_FXLC_ID);
+    cna_words_push(&w, 1);                            /* one instruction */
+    cna_words_push(&w, 0x20500004u);                 /* MUL, four elements */
+    cna_words_push(&w, 1);                            /* operand count token -> two operands */
+    cna_words_push(&w, 1);                            /* operand 0: one array register */
+    cna_words_push(&w, 2);                            /* operand 0: INPUT */
+    cna_words_push(&w, 0);                            /* operand 0: item c0 */
+    cna_words_push(&w, 0);
+    cna_words_push(&w, 0);                            /* the array register's jmp word */
+    cna_words_push(&w, 0);
+    cna_words_push(&w, 0);                            /* operand 1 has no 3-word room left */
+    pre = parse_preshader_exact(&w);
+    CNA_CHECK(pre == NULL, "an FXLC operand past the block is refused");
+    MOJOSHADER_freePreshader(pre);
+    cna_words_free(&w);
+} // test_preshader_fxlc_operand_past_block
+
+/* R2-07: the PRSI output-map bound, (output_map_count + 1) * 2, is computed in 32 bits, so a
+ * count near UINT32_MAX wraps it to a small product and passes; the preshader must be refused,
+ * not accepted to iterate output_map_count times over the map later. */
+static void test_preshader_prsi_count_wraps(void)
+{
+    CnaWords w;
+    CnaPreshaderLayout layout;
+    const MOJOSHADER_preshader *pre;
+    memset(&w, '\0', sizeof (w));
+    cna_push_preshader(&w, "Scale", &layout);
+    /* output_map_count is the eighth word after PRSI_ID (itself one past the comment token). */
+    w.at[layout.prsi + 1 + 7] = 0xFFFFFFFFu;
+    pre = parse_preshader_exact(&w);
+    CNA_CHECK(pre == NULL, "a wrapping PRSI output-map count is refused");
+    MOJOSHADER_freePreshader(pre);
+    cna_words_free(&w);
+} // test_preshader_prsi_count_wraps
+
 int main(void)
 {
     cna_test_run("ctab_struct_members_beyond_64k", test_ctab_struct_members_beyond_64k);
@@ -452,6 +504,8 @@ int main(void)
     cna_test_run("preshader_short_fxlc_block", test_preshader_short_fxlc_block);
     cna_test_run("preshader_comment_block_exceeds_stream", test_preshader_comment_block_exceeds_stream);
     cna_test_run("preshader_fxlc_instruction_truncated", test_preshader_fxlc_instruction_truncated);
+    cna_test_run("preshader_fxlc_operand_past_block", test_preshader_fxlc_operand_past_block);
+    cna_test_run("preshader_prsi_count_wraps", test_preshader_prsi_count_wraps);
     cna_test_run("shader_ctab_span_truncated", test_shader_ctab_span_truncated);
     cna_test_run("packed_fog_dcl_masks", test_packed_fog_dcl_masks);
     return cna_test_finish();
