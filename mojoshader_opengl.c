@@ -479,6 +479,8 @@ static int spv_CompileShader(const MOJOSHADER_parseData *pd, int32 base_location
         const SpirvPatchTable *table = &tableCopy;
         MOJOSHADER_spirv_get_patch_table(pd, &tableCopy);
         if (table->vpflip.offset)      patched_data[table->vpflip.offset]      += base_location;
+        if (table->pixelcenter.offset) patched_data[table->pixelcenter.offset] += base_location;
+        if (table->vfaceflip.offset)   patched_data[table->vfaceflip.offset]   += base_location;
         if (table->array_vec4.offset)  patched_data[table->array_vec4.offset]  += base_location;
         if (table->array_ivec4.offset) patched_data[table->array_ivec4.offset] += base_location;
         if (table->array_bool.offset)  patched_data[table->array_bool.offset]  += base_location;
@@ -667,6 +669,8 @@ static void impl_SPIRV_FinalInitProgram(MOJOSHADER_glProgram *program)
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     program->vs_flip_loc   = vs_table->vpflip.location;
 #endif
+    program->vs_pixel_center_loc = vs_table->pixelcenter.location;
+    program->ps_vface_flip_loc = ps_table->vfaceflip.location;
 
     int32 ps_base_location = vs_table->location_count;
     if (ps_base_location)
@@ -675,6 +679,7 @@ static void impl_SPIRV_FinalInitProgram(MOJOSHADER_glProgram *program)
         if (program->ps_int4_loc   != -1) program->ps_int4_loc   += ps_base_location;
         if (program->ps_bool_loc   != -1) program->ps_bool_loc   += ps_base_location;
         if (program->ps_vpos_flip_loc != -1) program->ps_vpos_flip_loc += ps_base_location;
+        if (program->ps_vface_flip_loc != -1) program->ps_vface_flip_loc += ps_base_location;
     } // if
 } // impl_SPIRV_FinalInitProgram
 #endif // SUPPORT_PROFILE_GLSPIRV

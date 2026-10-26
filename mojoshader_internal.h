@@ -636,6 +636,8 @@ typedef struct SpirvPatchTable
 {
     // Patches for uniforms
     SpirvPatchEntry vpflip;
+    SpirvPatchEntry pixelcenter;  // cnaPixelCenter, the XNA pixel-centre correction -CNA
+    SpirvPatchEntry vfaceflip;    // cnaVFaceFlip, the VFACE sign under GL's winding -CNA
     SpirvPatchEntry array_vec4;
     SpirvPatchEntry array_ivec4;
     SpirvPatchEntry array_bool;

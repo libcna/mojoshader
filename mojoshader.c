@@ -5665,6 +5665,8 @@ static MOJOSHADER_parseData *build_parsedata(Context *ctx)
             MOJOSHADER_spirv_get_patch_table(retval, &tableCopy);
 
             if (table->vpflip.offset)      binary[table->vpflip.offset]      = table->vpflip.location;
+            if (table->pixelcenter.offset) binary[table->pixelcenter.offset] = table->pixelcenter.location;
+            if (table->vfaceflip.offset)   binary[table->vfaceflip.offset]   = table->vfaceflip.location;
             if (table->array_vec4.offset)  binary[table->array_vec4.offset]  = table->array_vec4.location;
             if (table->array_ivec4.offset) binary[table->array_ivec4.offset] = table->array_ivec4.location;
             if (table->array_bool.offset)  binary[table->array_bool.offset]  = table->array_bool.location;

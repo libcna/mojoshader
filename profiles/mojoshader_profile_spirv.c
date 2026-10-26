@@ -1547,6 +1547,38 @@ static void spv_emit_vs_main_end(Context* ctx)
     uint32 tid_float = spv_get_type(ctx, STI_FLOAT);
     uint32 id_new_output;
 
+    // gl_Position.xy += cnaPixelCenter * gl_Position.w; as the GLSL profile writes it, before the
+    // render-target flip. It is the XNA pixel-centre correction MOJOSHADER_glProgramPixelCenterInfo
+    // sets, which a GLSPIRV program otherwise silently ignored. -CNA
+    {
+        uint32 tid_vec2 = spv_get_type(ctx, STI_VEC2);
+        uint32 tid_ppixelcenter = spv_bumpid(ctx);
+        uint32 id_ppixelcenter = spv_bumpid(ctx);
+        uint32 id_pixelcenter = spv_bumpid(ctx);
+        uint32 id_old_xy = spv_bumpid(ctx);
+        uint32 id_old_w = spv_bumpid(ctx);
+        uint32 id_offset = spv_bumpid(ctx);
+        uint32 id_new_xy = spv_bumpid(ctx);
+        id_new_output = spv_bumpid(ctx);
+
+        spv_emit(ctx, 4, SpvOpLoad, tid_vec2, id_pixelcenter, id_ppixelcenter);
+        spv_emit(ctx, 7, SpvOpVectorShuffle, tid_vec2, id_old_xy, output.id, output.id, 0, 1);
+        spv_emit(ctx, 5, SpvOpCompositeExtract, tid_float, id_old_w, output.id, 3);
+        spv_emit(ctx, 5, SpvOpVectorTimesScalar, tid_vec2, id_offset, id_pixelcenter, id_old_w);
+        spv_emit(ctx, 5, SpvOpFAdd, tid_vec2, id_new_xy, id_old_xy, id_offset);
+        spv_emit(ctx, 9, SpvOpVectorShuffle, output.tid, id_new_output,
+                 output.id, id_new_xy, 4, 5, 2, 3);
+        output.id = id_new_output;
+
+        push_output(ctx, &ctx->mainline_intro);
+        spv_emit(ctx, 4, SpvOpTypePointer, tid_ppixelcenter, SpvStorageClassUniformConstant, tid_vec2);
+        spv_emit(ctx, 4, SpvOpVariable, tid_ppixelcenter, id_ppixelcenter, SpvStorageClassUniformConstant);
+        pop_output(ctx);
+
+        spv_output_name(ctx, id_ppixelcenter, "cnaPixelCenter");
+        ctx->spirv.patch_table.pixelcenter.offset = spv_output_location(ctx, id_ppixelcenter, ~0u);
+    }
+
 #ifdef MOJOSHADER_FLIP_RENDERTARGET
     // gl_Position.y = gl_Position.y * vpFlip;
     uint32 tid_pvpflip = spv_bumpid(ctx);
@@ -2000,6 +2032,34 @@ static void spv_link_ps_attributes(Context *ctx, uint32 id, RegisterType regtype
                     push_output(ctx, &ctx->mainline_top);
                     spv_emit(ctx, 4, SpvOpLoad, tid_bool, id_frontfacing, id_var_frontfacing);
                     spv_emit(ctx, 6, SpvOpSelect, tid_float, id_tmp, id_frontfacing, id_1_0, id_n1_0);
+                    if (ctx->spirv.mode == SPIRV_MODE_GL)
+                    {
+                        // gl_FrontFacing follows glFrontFace, which a GL renderer sets for its
+                        // culling and render-target flip rather than for Direct3D's clockwise
+                        // front; as the GLSL profile does, the sign is multiplied by
+                        // 1 - 2 * cnaVFaceFlip (MOJOSHADER_glProgramVFaceFlipInfo). -CNA
+                        uint32 tid_pfloatu = spv_bumpid(ctx);
+                        uint32 id_pflip = spv_bumpid(ctx);
+                        uint32 id_flip = spv_bumpid(ctx);
+                        uint32 id_2flip = spv_bumpid(ctx);
+                        uint32 id_scale = spv_bumpid(ctx);
+                        uint32 id_signed = spv_bumpid(ctx);
+                        uint32 id_2_0 = spv_getscalarf(ctx, 2.0f);
+
+                        spv_emit(ctx, 4, SpvOpLoad, tid_float, id_flip, id_pflip);
+                        spv_emit(ctx, 5, SpvOpFMul, tid_float, id_2flip, id_flip, id_2_0);
+                        spv_emit(ctx, 5, SpvOpFSub, tid_float, id_scale, id_1_0, id_2flip);
+                        spv_emit(ctx, 5, SpvOpFMul, tid_float, id_signed, id_tmp, id_scale);
+                        id_tmp = id_signed;
+
+                        push_output(ctx, &ctx->mainline_intro);
+                        spv_emit(ctx, 4, SpvOpTypePointer, tid_pfloatu, SpvStorageClassUniformConstant, tid_float);
+                        spv_emit(ctx, 4, SpvOpVariable, tid_pfloatu, id_pflip, SpvStorageClassUniformConstant);
+                        pop_output(ctx);
+
+                        spv_output_name(ctx, id_pflip, "cnaVFaceFlip");
+                        ctx->spirv.patch_table.vfaceflip.offset = spv_output_location(ctx, id_pflip, ~0u);
+                    } // if
                     spv_emit(ctx, 3 + 4, SpvOpCompositeConstruct, tid_vec4, id_vface, id_tmp, id_tmp, id_tmp, id_tmp);
                     spv_emit(ctx, 3, SpvOpStore, id_var_vface, id_vface);
                     pop_output(ctx);
@@ -3165,6 +3225,24 @@ void emit_SPIRV_finalize(Context *ctx)
     } // if
     else
         table->vpflip.location = -1;
+
+    if (table->pixelcenter.offset)
+    {
+        table->pixelcenter.offset += base_offset;
+        table->pixelcenter.location = location_count;
+        location_count += 1;
+    } // if
+    else
+        table->pixelcenter.location = -1;
+
+    if (table->vfaceflip.offset)
+    {
+        table->vfaceflip.offset += base_offset;
+        table->vfaceflip.location = location_count;
+        location_count += 1;
+    } // if
+    else
+        table->vfaceflip.location = -1;
 
     if (table->array_vec4.offset)
     {
