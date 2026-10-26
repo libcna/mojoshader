@@ -93,6 +93,19 @@ target_sources(cna_build_tests PRIVATE $<TARGET_OBJECTS:mojoshader_cna_version_h
 # Compiled, not linked: the object library defines the same symbols as the test library's copy.
 add_dependencies(cna_build_tests mojoshader_cna_opengl_noflip)
 
+# A3a2 A-01 / R4-03: the version-header generation must name exactly HEAD even when HEAD is a
+# merge. cna_build_tests runs at the checkout's own (linear in CI) HEAD, so it cannot see the
+# merge case; this test builds a merge-HEAD repository, runs the real generation module against it
+# and compiles the header it writes. It needs git and the C compiler at test time, so it runs
+# through a CMake script rather than as a compiled executable.
+add_test(NAME cna_version_header_merge
+    COMMAND "${CMAKE_COMMAND}"
+        "-DMOJOSHADER_VERSION_MODULE=${_cna_mojoshader_dir}/cmake/MojoShaderVersionHeader.cmake"
+        "-DTEST_CC=${CMAKE_C_COMPILER}"
+        "-DTEST_CC_IS_MSVC=$<BOOL:${MSVC}>"
+        "-DTEST_WORKDIR=${CMAKE_CURRENT_BINARY_DIR}/cna_version_header_merge.work"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cna_version_header_merge_test.cmake")
+
 mojoshader_cna_test(cna_effect_tests)
 
 mojoshader_cna_test(cna_spirv_tests)
