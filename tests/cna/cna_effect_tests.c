@@ -189,6 +189,41 @@ static void test_struct_member_defaults(void)
     MOJOSHADER_deleteEffect(effect);
 } // test_struct_member_defaults
 
+/*
+ * R6-01 (2026-10-26 remediation review, round 2): an effect without techniques -- the struct
+ * effect above has none -- has no technique array, and compileEffect took &techniques[0] of
+ * that NULL as its current technique, which UndefinedBehaviorSanitizer stops at ("applying zero
+ * offset to null pointer"); cloning it then failed cloneEffect's assertion that the clone found
+ * a current technique. It has none, and its clone has none.
+ */
+static void test_no_technique_effect(void)
+{
+    unsigned char bytes[1024];
+    const unsigned int len = struct_effect(bytes);
+    MOJOSHADER_effectShaderContext ctx = backend();
+    MOJOSHADER_effect *effect = MOJOSHADER_compileEffect(bytes, len, NULL, 0, NULL, 0, &ctx);
+    MOJOSHADER_effect *clone;
+
+    CNA_CHECK((effect != NULL) && (effect->error_count == 0), "the effect parses without errors");
+    if ((effect == NULL) || (effect->error_count != 0))
+        return;
+    CNA_CHECK((effect->technique_count == 0) && (effect->techniques == NULL), "it has no techniques");
+    CNA_CHECK(effect->current_technique == NULL, "and no current technique");
+    CNA_CHECK(MOJOSHADER_effectGetCurrentTechnique(effect) == NULL, "... as the getter says");
+    clone = MOJOSHADER_cloneEffect(effect);
+    CNA_CHECK(clone != NULL, "it clones");
+    if (clone != NULL)
+    {
+        CNA_CHECK((clone->technique_count == 0) && (clone->current_technique == NULL),
+                  "the clone has no current technique either");
+        CNA_CHECK((clone->param_count == 1) && (clone->params[0].value.value_count == 16) &&
+                  (memcmp(clone->params[0].value.valuesF, effect->params[0].value.valuesF,
+                          16 * sizeof (float)) == 0), "the clone keeps the parameter");
+        MOJOSHADER_deleteEffect(clone);
+    } // if
+    MOJOSHADER_deleteEffect(effect);
+} // test_no_technique_effect
+
 static void exercise_error_effect(const MOJOSHADER_effect *effect, const char *what)
 {
     CNA_CHECK(effect != NULL, what);
@@ -1276,6 +1311,7 @@ static void test_xna4_wrapper_truncated_after_skip(void)
 int main(void)
 {
     cna_test_run("struct_member_defaults", test_struct_member_defaults);
+    cna_test_run("no_technique_effect", test_no_technique_effect);
     cna_test_run("error_effects_are_deletable", test_error_effects_are_deletable);
     cna_test_run("value_type_offset_out_of_range", test_value_type_offset_out_of_range);
     cna_test_run("value_value_offset_out_of_range", test_value_value_offset_out_of_range);

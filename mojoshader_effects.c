@@ -1649,8 +1649,9 @@ MOJOSHADER_effect *MOJOSHADER_compileEffect(const unsigned char *buf,
         return &MOJOSHADER_not_an_effect_effect;
     } // if
 
-    /* Initial effect technique/pass */
-    retval->current_technique = &retval->techniques[0];
+    /* Initial effect technique/pass; none for an effect without techniques, whose array is
+     * NULL -- &techniques[0] was pointer arithmetic on NULL. -CNA */
+    retval->current_technique = (retval->techniques != NULL) ? &retval->techniques[0] : NULL;
     retval->current_pass = -1;
 
     if (len < 8)
@@ -2293,7 +2294,7 @@ MOJOSHADER_effect *MOJOSHADER_cloneEffect(const MOJOSHADER_effect *effect)
             clone->current_technique = &clone->techniques[i];
             break;
         } // if
-    assert(clone->current_technique != NULL);
+    assert((effect->current_technique == NULL) || (clone->current_technique != NULL));
     clone->current_pass = -1;
 
     /* Copy object table */
