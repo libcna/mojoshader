@@ -849,8 +849,19 @@ static void spv_add_attrib_fixup(Context *ctx, RegisterList *r, unsigned int typ
     next_types = (uint32*) Malloc(ctx, sizeof(uint32) * (TYPE_LOAD_OFFSET.num_loads + 1));
     next_opcodes = (uint32*) Malloc(ctx, sizeof(uint32) * (TYPE_LOAD_OFFSET.num_loads + 1));
 
-    memcpy(next_types, TYPE_LOAD_OFFSET.load_types, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
-    memcpy(next_opcodes, TYPE_LOAD_OFFSET.load_opcodes, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
+    if ((next_types == NULL) || (next_opcodes == NULL))
+    {
+        Free(ctx, next_types);
+        Free(ctx, next_opcodes);
+        return;  // Malloc() has marked the context out of memory.
+    } // if
+
+    // The first fixup has no lists to copy, and memcpy() takes no NULL even for zero bytes. -CNA
+    if (TYPE_LOAD_OFFSET.num_loads > 0)
+    {
+        memcpy(next_types, TYPE_LOAD_OFFSET.load_types, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
+        memcpy(next_opcodes, TYPE_LOAD_OFFSET.load_opcodes, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
+    } // if
 
     Free(ctx, TYPE_LOAD_OFFSET.load_types);
     Free(ctx, TYPE_LOAD_OFFSET.load_opcodes);
