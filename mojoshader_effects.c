@@ -407,19 +407,42 @@ static int value_is_sampler(const MOJOSHADER_effectValue *value)
         && (value->type.parameter_type <= MOJOSHADER_SYMTYPE_SAMPLERCUBE);
 } // value_is_sampler
 
-static void readvalue(const uint8 *base,
-                      const uint32 base_len,
-                      const uint32 typeoffset,
-                      const uint32 valoffset,
-                      MOJOSHADER_effectValue *value,
-                      MOJOSHADER_effectObject *objects,
-                      MOJOSHADER_malloc m,
-                      void *d)
+// How deeply readvalue may recurse through nested sampler-state values before it refuses the
+// content as runaway. XNA nests a sampler state's value at most one level; a handful of levels is
+// already far past anything legitimate, and the ceiling stops a cycle from exhausting the stack.
+// -CNA
+#define MOJOSHADER_EFFECT_MAX_VALUE_DEPTH 32
+
+// readvalue decodes a value's type metadata (from base + typeoffset) and its default data (from
+// base + valoffset), both offsets into the base region that compileEffect bounds with base_len.
+// Upstream read both through fabricated 9,999,999-byte windows and indexed objects[] with no
+// count, so a damaged offset, dimension or object reference read or wrote past the buffer. Every
+// span is now measured against base_len, every object index against object_count, and the nesting
+// against a depth ceiling; it returns 0 when the content cannot be decoded safely so the caller
+// can reject the effect. A base_len of 0 means the caller could not supply one and keeps the old
+// unbounded behaviour (compileEffect always supplies it). -CNA
+static int readvalue(const uint8 *base,
+                     const uint32 base_len,
+                     const uint32 typeoffset,
+                     const uint32 valoffset,
+                     MOJOSHADER_effectValue *value,
+                     MOJOSHADER_effectObject *objects,
+                     const uint32 object_count,
+                     const int depth,
+                     MOJOSHADER_malloc m,
+                     void *d)
 {
     int i, j, k;
+
+    if (depth > MOJOSHADER_EFFECT_MAX_VALUE_DEPTH)
+        return 0;
+    if ((base_len != 0) && ((typeoffset > base_len) || (valoffset > base_len)))
+        return 0;
+
     const uint8 *typeptr = base + typeoffset;
     const uint8 *valptr = base + valoffset;
-    unsigned int typelen = 9999999;  // !!! FIXME
+    unsigned int typelen = (base_len != 0) ? (base_len - typeoffset) : 9999999;
+    unsigned int vallen = (base_len != 0) ? (base_len - valoffset) : 9999999;
     const uint32 type = readui32(&typeptr, &typelen);
     const uint32 valclass = readui32(&typeptr, &typelen);
     const uint32 name = readui32(&typeptr, &typelen);
@@ -432,55 +455,62 @@ static void readvalue(const uint8 *base,
     value->semantic = readstring(base, base_len, semantic, m, d);
     value->type.elements = numelements;
 
-    /* Class sanity check */
-    assert(valclass >= MOJOSHADER_SYMCLASS_SCALAR && valclass <= MOJOSHADER_SYMCLASS_STRUCT);
-
     if (valclass == MOJOSHADER_SYMCLASS_SCALAR
      || valclass == MOJOSHADER_SYMCLASS_VECTOR
      || valclass == MOJOSHADER_SYMCLASS_MATRIX_ROWS
      || valclass == MOJOSHADER_SYMCLASS_MATRIX_COLUMNS)
     {
-        /* These classes only ever contain scalar values */
-        assert(type >= MOJOSHADER_SYMTYPE_BOOL && type <= MOJOSHADER_SYMTYPE_FLOAT);
-
         const uint32 columncount = readui32(&typeptr, &typelen);
         const uint32 rowcount = readui32(&typeptr, &typelen);
 
         value->type.columns = columncount;
         value->type.rows = rowcount;
 
-        uint32 siz = 4 * rowcount;
+        // value_count is 4 * rowcount padded registers, times the array length; the source read
+        // is columncount words per register row. Both come from content: compute them wide,
+        // refuse anything that would overflow or outrun the base region, then copy. -CNA
+        uint64 rows = (uint64) rowcount;
         if (numelements > 0)
-            siz *= numelements;
-        value->value_count = siz;
-        siz *= 4;
-        value->values = m(siz, d);
-        memset(value->values, '\0', siz);
-        siz /= 16;
-        for (i = 0; i < siz; i++)
+            rows *= numelements;
+        const uint64 vcount = rows * 4u;
+        const uint64 srcspan = (uint64) (columncount << 2) * rows;
+        if ((base_len != 0) &&
+            ((vcount > base_len) || ((uint64) valoffset + srcspan > base_len)))
+            return 0;
+        value->value_count = (unsigned int) vcount;
+        const uint64 bytes = vcount * 4u;
+        value->values = m((int) bytes, d);
+        if (value->values == NULL)
+            return 0;
+        memset(value->values, '\0', (size_t) bytes);
+        for (i = 0; i < (int) rows; i++)
             memcpy(value->valuesF + (i << 2), valptr + ((columncount << 2) * i), columncount << 2);
     } // if
     else if (valclass == MOJOSHADER_SYMCLASS_OBJECT)
     {
         /* This class contains either samplers or "objects" */
-        assert(type >= MOJOSHADER_SYMTYPE_STRING && type <= MOJOSHADER_SYMTYPE_VERTEXSHADER);
-
         if (type == MOJOSHADER_SYMTYPE_SAMPLER
          || type == MOJOSHADER_SYMTYPE_SAMPLER1D
          || type == MOJOSHADER_SYMTYPE_SAMPLER2D
          || type == MOJOSHADER_SYMTYPE_SAMPLER3D
          || type == MOJOSHADER_SYMTYPE_SAMPLERCUBE)
         {
-            unsigned int vallen = 9999999; // !!! FIXME
             const uint32 numstates = readui32(&valptr, &vallen);
+
+            // Each sampler state is four words of the value data; a count larger than what is
+            // left cannot be honest and would overflow the allocation below. -CNA
+            if ((base_len != 0) && (numstates > (vallen / (4 * sizeof (uint32)))))
+                return 0;
 
             value->value_count = numstates;
 
-            const uint32 siz = sizeof(MOJOSHADER_effectSamplerState) * numstates;
-            value->values = m(siz, d);
-            memset(value->values, '\0', siz);
+            const uint64 siz = (uint64) sizeof (MOJOSHADER_effectSamplerState) * numstates;
+            value->values = m((int) siz, d);
+            if (value->values == NULL)
+                return 0;
+            memset(value->values, '\0', (size_t) siz);
 
-            for (i = 0; i < numstates; i++)
+            for (i = 0; i < (int) numstates; i++)
             {
                 MOJOSHADER_effectSamplerState *state = &value->valuesSS[i];
                 const uint32 stype = readui32(&valptr, &vallen) & ~0xA0;
@@ -489,11 +519,19 @@ static void readvalue(const uint8 *base,
                 const uint32 statevaloffset = readui32(&valptr, &vallen);
 
                 state->type = (MOJOSHADER_samplerStateType) stype;
-                readvalue(base, base_len, statetypeoffset, statevaloffset,
-                          &state->value, objects,
-                          m, d);
+                if (!readvalue(base, base_len, statetypeoffset, statevaloffset,
+                               &state->value, objects, object_count, depth + 1,
+                               m, d))
+                    return 0;
                 if (stype == MOJOSHADER_SAMP_TEXTURE)
+                {
+                    // The texture index is content; it selects an object whose type this writes,
+                    // so it has to be present and in range. -CNA
+                    if ((state->value.values == NULL) || (state->value.value_count < 1) ||
+                        ((uint32) state->value.valuesI[0] >= object_count))
+                        return 0;
                     objects[state->value.valuesI[0]].type = (MOJOSHADER_symbolType) type;
+                } // if
             } // for
         } // if
         else
@@ -502,10 +540,16 @@ static void readvalue(const uint8 *base,
             if (numelements > 0)
                 numobjects = numelements;
 
+            // One word per object, read from the value data; bound the count against it. -CNA
+            if ((base_len != 0) && (numobjects > (vallen / sizeof (uint32))))
+                return 0;
+
             value->value_count = numobjects;
 
             const uint32 siz = 4 * numobjects;
             value->values = m(siz, d);
+            if (value->values == NULL)
+                return 0;
             memcpy(value->values, valptr, siz);
             #if MOJOSHADER_BIG_ENDIAN
             int valI;
@@ -513,8 +557,13 @@ static void readvalue(const uint8 *base,
                 value->valuesI[valI] = SWAP32(value->valuesI[valI]);
             }
             #endif
-            for (i = 0; i < value->value_count; i++)
+            for (i = 0; i < (int) value->value_count; i++)
+            {
+                // Each object reference selects an object whose type this writes. -CNA
+                if ((uint32) value->valuesI[i] >= object_count)
+                    return 0;
                 objects[value->valuesI[i]].type = (MOJOSHADER_symbolType) type;
+            } // for
         } // else
     } // else if
     else if (valclass == MOJOSHADER_SYMCLASS_STRUCT)
@@ -522,28 +571,29 @@ static void readvalue(const uint8 *base,
         uint32 siz;
 
         value->type.member_count = readui32(&typeptr, &typelen);
-        // The member count is content. Without a bound the size multiplication below wraps and
-        // hands back a buffer smaller than the loop that fills it; without the zeroing, the
-        // nested-struct fields this loop never assigns (see the FIXME below) are read later as
-        // whatever the heap held -- a garbage member count pointing at a garbage member list.
-        // -CNA
-        if (value->type.member_count > (0xFFFFFFFFu / sizeof (MOJOSHADER_symbolStructMember)))
+        // The member count is content. Each member is seven words of type metadata, so a count
+        // larger than what is left of the type data cannot be honest; the size multiplication
+        // below would also wrap and hand back a buffer smaller than the loop that fills it.
+        // Without the zeroing, the nested-struct fields this loop never assigns (see the FIXME
+        // below) are read later as whatever the heap held. -CNA
+        if ((value->type.member_count > (0xFFFFFFFFu / sizeof (MOJOSHADER_symbolStructMember))) ||
+            ((base_len != 0) && (value->type.member_count > (typelen / (7 * sizeof (uint32))))))
         {
             value->type.member_count = 0;
             value->type.members = NULL;
-            return;
+            return 0;
         } // if
         siz = value->type.member_count * sizeof (MOJOSHADER_symbolStructMember);
         value->type.members = (MOJOSHADER_symbolStructMember *) m(siz, d);
         if (value->type.members == NULL)
         {
             value->type.member_count = 0;
-            return;
+            return 0;
         } // if
         memset(value->type.members, '\0', siz);
 
-        uint32 structsize = 0;
-        for (i = 0; i < value->type.member_count; i++)
+        uint64 structsize = 0;
+        for (i = 0; i < (int) value->type.member_count; i++)
         {
             MOJOSHADER_symbolStructMember *mem = &value->type.members[i];
 
@@ -559,67 +609,90 @@ static void readvalue(const uint8 *base,
             mem->info.rows = readui32(&typeptr, &typelen);
 
             // !!! FIXME: Nested structs! -flibit
-            assert(mem->info.parameter_class >= MOJOSHADER_SYMCLASS_SCALAR
-                && mem->info.parameter_class <= MOJOSHADER_SYMCLASS_MATRIX_COLUMNS);
-            assert(mem->info.parameter_type >= MOJOSHADER_SYMTYPE_BOOL
-                && mem->info.parameter_type <= MOJOSHADER_SYMTYPE_FLOAT);
             mem->info.member_count = 0;
             mem->info.members = NULL;
 
-            uint32 memsize = 4 * mem->info.rows;
+            uint64 memsize = (uint64) 4 * mem->info.rows;
             if (mem->info.elements > 0)
                 memsize *= mem->info.elements;
             structsize += memsize;
         } // for
 
-        value->type.columns = structsize;
+        if ((base_len != 0) && (structsize > base_len))
+            return 0;
+        value->type.columns = (unsigned int) structsize;
         value->type.rows = 1;
-        value->value_count = structsize;
+        uint64 vcount = structsize;
         if (numelements > 0)
-            value->value_count *= numelements;
+            vcount *= numelements;
+        if ((base_len != 0) && (vcount > base_len))
+            return 0;
+        value->value_count = (unsigned int) vcount;
 
         siz = value->value_count * 4;
         value->values = m(siz, d);
+        if (value->values == NULL)
+            return 0;
         memset(value->values, '\0', siz);
+        // typeptr now sits just past the member metadata, where fxc packs the struct's defaults;
+        // bound each copy against the base region and the destination buffer. -CNA
+        uint32 typeptr_off = (uint32) (typeptr - base);
         int dst_offset = 0, src_offset = 0;
         i = 0;
         do
         {
-            for (j = 0; j < value->type.member_count; j++)
+            for (j = 0; j < (int) value->type.member_count; j++)
             {
                 // A non-array member has elements == 0 and still holds one value, exactly as
                 // the size computation above counts it; multiplying by 0 skipped its defaults
                 // and shifted every later member's onto it. -CNA
                 const uint32 elements = value->type.members[j].info.elements;
+                const uint32 columns = value->type.members[j].info.columns;
                 siz = value->type.members[j].info.rows * (elements ? elements : 1);
-                for (k = 0; k < siz; k++)
+                for (k = 0; k < (int) siz; k++)
                 {
+                    if (base_len != 0)
+                    {
+                        if (((uint64) dst_offset + 4 > value->value_count) ||
+                            ((uint64) typeptr_off + src_offset + (columns << 2) > base_len))
+                            return 0;
+                    } // if
                     memcpy(value->valuesF + dst_offset,
                            typeptr + src_offset, /* Yes, typeptr. -flibit */
-                           value->type.members[j].info.columns << 2);
+                           columns << 2);
                     dst_offset += 4;
-                    src_offset += value->type.members[j].info.columns << 2;
+                    src_offset += columns << 2;
                 } // for
             }
-        } while (++i < numelements);
+        } while (++i < (int) numelements);
     } // else if
+    else if (base_len != 0)
+    {
+        // A class the four cases above do not cover is not XNA content. Upstream asserted this
+        // (and the per-class type ranges); untrusted content reaches it, so refuse. -CNA
+        return 0;
+    } // else if
+    return 1;
 } // readvalue
 
-static void readannotations(const uint32 numannos,
+static int readannotations(const uint32 numannos,
                             const uint8 *base,
                             const uint32 base_len,
                             const uint8 **ptr,
                             uint32 *len,
                             MOJOSHADER_effectAnnotation **annotations,
                             MOJOSHADER_effectObject *objects,
+                            const uint32 object_count,
                             MOJOSHADER_malloc m,
                             void *d)
 {
     int i;
-    if (numannos == 0) return;
+    if (numannos == 0) return 1;
 
     const uint32 siz = sizeof(MOJOSHADER_effectAnnotation) * numannos;
     *annotations = (MOJOSHADER_effectAnnotation *) m(siz, d);
+    if (*annotations == NULL)
+        return 0;
     memset(*annotations, '\0', siz);
 
     for (i = 0; i < numannos; i++)
@@ -629,27 +702,32 @@ static void readannotations(const uint32 numannos,
         const uint32 typeoffset = readui32(ptr, len);
         const uint32 valoffset = readui32(ptr, len);
 
-        readvalue(base, base_len, typeoffset, valoffset,
-                  anno, objects,
-                  m, d);
+        if (!readvalue(base, base_len, typeoffset, valoffset,
+                       anno, objects, object_count, 0,
+                       m, d))
+            return 0;
     } // for
+    return 1;
 } // readannotation
 
-static void readparameters(const uint32 numparams,
+static int readparameters(const uint32 numparams,
                            const uint8 *base,
                             const uint32 base_len,
                            const uint8 **ptr,
                            uint32 *len,
                            MOJOSHADER_effectParam **params,
                            MOJOSHADER_effectObject *objects,
+                           const uint32 object_count,
                            MOJOSHADER_malloc m,
                            void *d)
 {
     int i;
-    if (numparams == 0) return;
+    if (numparams == 0) return 1;
 
     uint32 siz = sizeof(MOJOSHADER_effectParam) * numparams;
     *params = (MOJOSHADER_effectParam *) m(siz, d);
+    if (*params == NULL)
+        return 0;
     memset(*params, '\0', siz);
 
     for (i = 0; i < numparams; i++)
@@ -662,14 +740,17 @@ static void readparameters(const uint32 numparams,
         const uint32 numannos = readui32(ptr, len);
 
         param->annotation_count = numannos;
-        readannotations(numannos, base, base_len, ptr, len,
-                        &param->annotations, objects,
-                        m, d);
+        if (!readannotations(numannos, base, base_len, ptr, len,
+                             &param->annotations, objects, object_count,
+                             m, d))
+            return 0;
 
-        readvalue(base, base_len, typeoffset, valoffset,
-                  &param->value, objects,
-                  m, d);
+        if (!readvalue(base, base_len, typeoffset, valoffset,
+                       &param->value, objects, object_count, 0,
+                       m, d))
+            return 0;
     } // for
+    return 1;
 } // readparameters
 
 static int render_state_type_is_valid(const uint32 type)
@@ -690,6 +771,7 @@ static int readstates(const uint32 numstates,
                        uint32 *len,
                        MOJOSHADER_effectState **states,
                        MOJOSHADER_effectObject *objects,
+                       const uint32 object_count,
                        MOJOSHADER_malloc m,
                        void *d)
 {
@@ -698,6 +780,8 @@ static int readstates(const uint32 numstates,
 
     const uint32 siz = sizeof (MOJOSHADER_effectState) * numstates;
     *states = (MOJOSHADER_effectState *) m(siz, d);
+    if (*states == NULL)
+        return 0;
     memset(*states, '\0', siz);
 
     for (i = 0; i < numstates; i++)
@@ -714,9 +798,10 @@ static int readstates(const uint32 numstates,
         state->type = (MOJOSHADER_renderStateType) type;
         state->index = target;
         state->referenced_parameter = -1;
-        readvalue(base, base_len, typeoffset, valoffset,
-                  &state->value, objects,
-                  m, d);
+        if (!readvalue(base, base_len, typeoffset, valoffset,
+                       &state->value, objects, object_count, 0,
+                       m, d))
+            return 0;
     } // for
     return 1;
 } // readstates
@@ -728,6 +813,7 @@ static int readpasses(const uint32 numpasses,
                        uint32 *len,
                        MOJOSHADER_effectPass **passes,
                        MOJOSHADER_effectObject *objects,
+                       const uint32 object_count,
                        MOJOSHADER_malloc m,
                        void *d)
 {
@@ -736,6 +822,8 @@ static int readpasses(const uint32 numpasses,
 
     const uint32 siz = sizeof (MOJOSHADER_effectPass) * numpasses;
     *passes = (MOJOSHADER_effectPass *) m(siz, d);
+    if (*passes == NULL)
+        return 0;
     memset(*passes, '\0', siz);
 
     for (i = 0; i < numpasses; i++)
@@ -749,13 +837,14 @@ static int readpasses(const uint32 numpasses,
         pass->name = readstring(base, base_len, passnameoffset, m, d);
 
         pass->annotation_count = numannos;
-        readannotations(numannos, base, base_len, ptr, len,
-                        &pass->annotations, objects,
-                        m, d);
+        if (!readannotations(numannos, base, base_len, ptr, len,
+                             &pass->annotations, objects, object_count,
+                             m, d))
+            return 0;
 
         pass->state_count = numstates;
         if (!readstates(numstates, base, base_len, ptr, len,
-                        &pass->states, objects,
+                        &pass->states, objects, object_count,
                         m, d))
             return 0;
     } // for
@@ -769,6 +858,7 @@ static int readtechniques(const uint32 numtechniques,
                            uint32 *len,
                            MOJOSHADER_effectTechnique **techniques,
                            MOJOSHADER_effectObject *objects,
+                           const uint32 object_count,
                            MOJOSHADER_malloc m,
                            void *d)
 {
@@ -777,6 +867,8 @@ static int readtechniques(const uint32 numtechniques,
 
     const uint32 siz = sizeof (MOJOSHADER_effectTechnique) * numtechniques;
     *techniques = (MOJOSHADER_effectTechnique *) m(siz, d);
+    if (*techniques == NULL)
+        return 0;
     memset(*techniques, '\0', siz);
 
     for (i = 0; i < numtechniques; i++)
@@ -790,13 +882,14 @@ static int readtechniques(const uint32 numtechniques,
         technique->name = readstring(base, base_len, nameoffset, m, d);
 
         technique->annotation_count = numannos;
-        readannotations(numannos, base, base_len, ptr, len,
-                        &technique->annotations, objects,
-                        m, d);
+        if (!readannotations(numannos, base, base_len, ptr, len,
+                             &technique->annotations, objects, object_count,
+                             m, d))
+            return 0;
 
         technique->pass_count = numpasses;
         if (!readpasses(numpasses, base, base_len, ptr, len,
-                        &technique->passes, objects,
+                        &technique->passes, objects, object_count,
                         m, d))
             return 0;
     } // for
@@ -952,7 +1045,20 @@ static void readsmallobjects(const uint32 numsmallobjects,
         } // else
 
         /* Object block is always a multiple of four */
-        const uint32 blocklen = (length + 3) - ((length - 1) % 4);
+        // The unpadded length was bounded against *len above, but the stream advances by the
+        // padded length; padding it up can push it past the end, so the padded length is bounded
+        // too (as readlargeobjects already does). -CNA
+        if (length > 0xFFFFFFFCu)
+        {
+            errorlist_add(errors, NULL, 0, "Effect object block padding overflows.");
+            return;
+        } // if
+        const uint32 blocklen = (length + 3u) & ~3u;
+        if (blocklen > *len)
+        {
+            errorlist_add(errors, NULL, 0, "Effect object block padding is out of range.");
+            return;
+        } // if
         *ptr += blocklen;
         *len -= blocklen;
     } // for
@@ -1141,10 +1247,31 @@ static void readlargeobjects(const uint32 numlargeobjects,
                  * vertex/fragment shader.
                  */
                 object->shader.is_preshader = 1;
-                const uint32 start = *((uint32 *) *ptr) + 4;
+                // The block opens with the offset of the preshader data within it; the preshader
+                // then runs from there to the block's end. Reading that word needs four bytes,
+                // and the preshader must be handed the bytes that remain after the offset, not
+                // the whole block length -- which ran its parse past the block. -CNA
+                if (length < sizeof (uint32))
+                {
+                    errorlist_add(errors, NULL, 0, "Effect preshader block is too small.");
+                    return;
+                } // if
+                uint32 startword;
+                memcpy(&startword, *ptr, sizeof (startword));
+                const uint32 start = startword + 4;
+                if ((startword > length) || (start > length))
+                {
+                    errorlist_add(errors, NULL, 0, "Effect preshader offset is out of range.");
+                    return;
+                } // if
                 const char *array = readstring(*ptr, length, 0, m, d);
                 object->shader.param_count = 1;
                 object->shader.params = (uint32 *) m(sizeof (uint32), d);
+                if (object->shader.params == NULL)
+                {
+                    f((void *) array, d);
+                    return;
+                } // if
                 int par = findparameter(effect->params,
                                         effect->param_count,
                                         array,
@@ -1153,7 +1280,7 @@ static void readlargeobjects(const uint32 numlargeobjects,
                 if (par < 0)
                     return;
                 object->shader.params[0] = par;
-                object->shader.preshader = MOJOSHADER_parsePreshader(*ptr + start, length,
+                object->shader.preshader = MOJOSHADER_parsePreshader(*ptr + start, length - start,
                                                                      m, f, d);
                 if (object->shader.preshader == NULL)
                 {
@@ -1358,6 +1485,10 @@ MOJOSHADER_effect *MOJOSHADER_compileEffect(const unsigned char *buf,
             goto parseEffect_unexpectedEOF;
         ptr += skip;
         len -= skip;
+        // read_version_token() reads a four-byte token unconditionally; after the skip there may
+        // be fewer than four bytes left. -CNA
+        if (len < sizeof (uint32))
+            goto parseEffect_unexpectedEOF;
         read_version_token(&ptr, &len, &magic, &version_major, &version_minor);
     } // if
     if (!((magic == 0xFEFF) && (version_major == 0x09) && (version_minor == 0x01)))
@@ -1408,14 +1539,18 @@ MOJOSHADER_effect *MOJOSHADER_compileEffect(const unsigned char *buf,
 
     /* Parse effect parameters */
     retval->param_count = numparams;
-    readparameters(numparams, base, base_len, &ptr, &len,
-                   &retval->params, retval->objects,
-                   m, d);
+    if (!readparameters(numparams, base, base_len, &ptr, &len,
+                        &retval->params, retval->objects, numobjects,
+                        m, d))
+    {
+        MOJOSHADER_deleteEffect(retval);
+        return &MOJOSHADER_not_an_effect_effect;
+    } // if
 
     /* Parse effect techniques */
     retval->technique_count = numtechniques;
     if (!readtechniques(numtechniques, base, base_len, &ptr, &len,
-                        &retval->techniques, retval->objects,
+                        &retval->techniques, retval->objects, numobjects,
                         m, d))
     {
         MOJOSHADER_deleteEffect(retval);
