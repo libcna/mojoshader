@@ -78,3 +78,5 @@ mojoshader_cna_test(cna_spirv_tests)
 mojoshader_cna_test(cna_parser_tests)
 
 mojoshader_cna_test(cna_glsl_tests)
+
+mojoshader_cna_test(cna_opengl_tests)

@@ -803,13 +803,20 @@ static char *glsl_append(char *dst, const char *text, const size_t len)
 } // glsl_append
 
 
-/* "io_<usage>_<index>;", exactly as the GLSL profile emits a varying's name. */
+/* "io_<usage>_<index>;" or "cna_centroid_<usage>_<index>;", exactly as the GLSL profile emits
+ * a varying's name -- the second for a pixel input it interpolates at the centroid. -CNA */
 static int glsl_parse_io_name(const char *name, const size_t namelen, int *usage, int *index)
 {
-    size_t i = 3;  /* past "io_" */
+    size_t i;
     int values[2] = { 0, 0 };
     int which;
 
+    if ((namelen > 3) && (strncmp(name, "io_", 3) == 0))
+        i = 3;
+    else if ((namelen > 13) && (strncmp(name, "cna_centroid_", 13) == 0))
+        i = 13;
+    else
+        return 0;
     for (which = 0; which < 2; which++)
     {
         const size_t first = i;
@@ -972,8 +979,16 @@ static char *glsl_source_without_unmatched_inputs(const MOJOSHADER_parseData *vp
 
         /* A declaration this rewrite applies to is a whole line of the profile's own making: a
          * storage qualifier, an optional precision qualifier, a type, and the io_<usage>_<index>
-         * name the emitter derives from the semantic. Anything else is copied through untouched. */
-        if ((((size_t) (linend - line)) > 3) && (strncmp(line, "in ", 3) == 0))
+         * name the emitter derives from the semantic. Anything else is copied through untouched.
+         * An input interpolated at the centroid -- every Shader Model 2+ COLOR input, and any
+         * declared _centroid -- has a "centroid" qualifier and the cna_centroid_ name instead.
+         * -CNA */
+        if ((((size_t) (linend - line)) > 12) && (strncmp(line, "centroid in ", 12) == 0))
+            decl = line + 12;
+        else if ((((size_t) (linend - line)) > 17) &&
+                 (strncmp(line, "centroid varying ", 17) == 0))
+            decl = line + 17;
+        else if ((((size_t) (linend - line)) > 3) && (strncmp(line, "in ", 3) == 0))
             decl = line + 3;
         else if ((((size_t) (linend - line)) > 8) && (strncmp(line, "varying ", 8) == 0))
             decl = line + 8;
@@ -999,8 +1014,7 @@ static char *glsl_source_without_unmatched_inputs(const MOJOSHADER_parseData *vp
             } // while
         } // if
 
-        if ((name != NULL) && (type != NULL) && (namelen > 4) &&
-            (strncmp(name, "io_", 3) == 0) && (name[namelen - 1] == ';'))
+        if ((name != NULL) && (type != NULL) && (namelen > 4) && (name[namelen - 1] == ';'))
         {
             int usage = -1;
             int index = -1;
