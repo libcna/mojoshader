@@ -1093,6 +1093,22 @@ size_t MOJOSHADER_printFloat(char *text, size_t maxlen, float arg)
 #if SUPPORT_PROFILE_SPIRV
 #include "spirv/spirv.h"
 #include "spirv/GLSL.std.450.h"
+void MOJOSHADER_spirv_free_patch_table(SpirvPatchTable *table, MOJOSHADER_free f, void *d)
+{
+    int i, j;
+    for (i = 0; i < MOJOSHADER_USAGE_TOTAL; i++)
+    {
+        for (j = 0; j < 16; j++)
+        {
+            f(table->attrib_type_load_offsets[i][j].load_types, d);
+            f(table->attrib_type_load_offsets[i][j].load_opcodes, d);
+            table->attrib_type_load_offsets[i][j].load_types = NULL;
+            table->attrib_type_load_offsets[i][j].load_opcodes = NULL;
+            table->attrib_type_load_offsets[i][j].num_loads = 0;
+        } // for
+    } // for
+} // MOJOSHADER_spirv_free_patch_table
+
 void MOJOSHADER_spirv_link_attributes(const MOJOSHADER_parseData *vertex,
                                       const MOJOSHADER_parseData *pixel,
                                       int is_glspirv)

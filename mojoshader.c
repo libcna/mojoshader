@@ -5217,6 +5217,10 @@ static void destroy_context(Context *ctx)
         errorlist_destroy(ctx->errors);
         free_symbols(f, d, ctx->ctab.symbols, ctx->ctab.symbol_count);
         MOJOSHADER_freePreshader(ctx->preshader);
+#if SUPPORT_PROFILE_SPIRV
+        // Still the context's when no parse data took the patch table over (build_parsedata()).
+        MOJOSHADER_spirv_free_patch_table(&ctx->spirv.patch_table, f, d);
+#endif
         f((void *) ctx->mainfn, d);
         f(ctx, d);
     } // if
@@ -5665,6 +5669,11 @@ static MOJOSHADER_parseData *build_parsedata(Context *ctx)
                 if (entry.offset)
                     binary[entry.offset] = entry.location;
             } // for
+
+            // The output's copy of the patch table now owns the attribute load lists, which
+            // MOJOSHADER_freeParseData() releases; nothing frees them twice. -CNA
+            memset(ctx->spirv.patch_table.attrib_type_load_offsets, '\0',
+                   sizeof (ctx->spirv.patch_table.attrib_type_load_offsets));
         } // if
 #endif // SUPPORT_PROFILE_SPIRV
 
@@ -6056,6 +6065,22 @@ void MOJOSHADER_freeParseData(const MOJOSHADER_parseData *_data)
     int i;
 
     // we don't f(data->profile), because that's internal static data.
+
+#if SUPPORT_PROFILE_SPIRV
+    // A SPIR-V output ends in its patch table, whose attribute load lists this parse owns. -CNA
+    if ((data->output != NULL) && (data->profile != NULL) &&
+        (data->output_len >= (int) sizeof (SpirvPatchTable)) &&
+        ((strcmp(data->profile, MOJOSHADER_PROFILE_SPIRV) == 0) ||
+         (strcmp(data->profile, MOJOSHADER_PROFILE_GLSPIRV) == 0)))
+    {
+        SpirvPatchTable table;
+        const size_t at = (size_t) data->output_len - sizeof (SpirvPatchTable);
+        // The table follows the module at a 4-byte, not necessarily pointer-aligned, offset.
+        memcpy(&table, data->output + at, sizeof (table));
+        MOJOSHADER_spirv_free_patch_table(&table, f, d);
+        memcpy((char *) data->output + at, &table, sizeof (table));
+    } // if
+#endif
 
     f((void *) data->mainfn, d);
     f((void *) data->output, d);

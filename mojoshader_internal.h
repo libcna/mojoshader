@@ -669,6 +669,11 @@ typedef struct SpirvPatchTable
 void MOJOSHADER_spirv_link_attributes(const MOJOSHADER_parseData *vertex,
                                       const MOJOSHADER_parseData *pixel,
                                       int is_glspirv);
+
+// Frees the attribute load lists a patch table points to, and empties them. They are allocated
+// while a SPIR-V shader is emitted, owned by the parse context until the patch table is appended
+// to a parse's output, and by that parse data afterwards. -CNA
+void MOJOSHADER_spirv_free_patch_table(SpirvPatchTable *table, MOJOSHADER_free f, void *d);
 #endif
 
 #endif  // _INCLUDE_MOJOSHADER_INTERNAL_H_

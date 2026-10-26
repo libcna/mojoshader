@@ -240,8 +240,80 @@ static void test_plain_pair(void)
     check_pair("plain_vs_plain_ps", plain_vs3, sizeof (plain_vs3), plain_ps3, sizeof (plain_ps3), 2);
 } // test_plain_pair
 
+/* Counts what MOJOSHADER_parse() allocates through the caller's allocator, and frees. */
+static int live_allocations = 0;
+
+static void *MOJOSHADERCALL counting_malloc(int bytes, void *data)
+{
+    void *ptr = malloc((size_t) bytes);
+    (void) data;
+    if (ptr != NULL)
+        live_allocations++;
+    return ptr;
+} // counting_malloc
+
+static void MOJOSHADERCALL counting_free(void *ptr, void *data)
+{
+    (void) data;
+    if (ptr != NULL)
+        live_allocations--;
+    free(ptr);
+} // counting_free
+
+static const MOJOSHADER_parseData *counted_parse(const char *profile, const uint32_t *tokens,
+                                                 size_t bytes)
+{
+    return MOJOSHADER_parse(profile, "main", (const unsigned char *) tokens, (unsigned int) bytes,
+                            NULL, 0, NULL, 0, counting_malloc, counting_free, NULL);
+} // counted_parse
+
+/* vs_3_0 that reads the undeclared input v1 after loading v0: refused after a recorded load. */
+static const uint32_t undeclared_input_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 1, 15),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 15), CNA_SRC(CNA_INPUT, 1),
+    CNA_END
+};
+
+/*
+ * handoff "LeakSanitizer reports leaks in FNA3D's MojoShader": every vertex-input load records a
+ * patch point in a list the patch table points to, and nothing freed those lists. A parse --
+ * successful or not, on both SPIR-V profiles -- must return everything it allocated.
+ */
+static void test_parse_frees_patch_table_lists(void)
+{
+    static const char *profiles[2] = { "spirv", "glspirv" };
+    int i;
+    for (i = 0; i < 2; i++)
+    {
+        const MOJOSHADER_parseData *pd;
+
+        live_allocations = 0;
+        pd = counted_parse(profiles[i], plain_vs3, sizeof (plain_vs3));
+        CNA_CHECK((pd != NULL) && (pd->error_count == 0), "the vertex shader translates");
+        MOJOSHADER_freeParseData(pd);
+        if (live_allocations != 0)
+            fprintf(stderr, "  %s: %d allocation(s) outlive the parse data\n", profiles[i],
+                    live_allocations);
+        CNA_CHECK(live_allocations == 0, "a successful parse frees everything");
+
+        live_allocations = 0;
+        pd = counted_parse(profiles[i], undeclared_input_vs3, sizeof (undeclared_input_vs3));
+        CNA_CHECK((pd != NULL) && (pd->error_count > 0), "the vertex shader is refused");
+        MOJOSHADER_freeParseData(pd);
+        if (live_allocations != 0)
+            fprintf(stderr, "  %s (refused): %d allocation(s) outlive the parse data\n",
+                    profiles[i], live_allocations);
+        CNA_CHECK(live_allocations == 0, "a refused parse frees everything");
+    } // for
+} // test_parse_frees_patch_table_lists
+
 int main(void)
 {
+    cna_test_run("parse_frees_patch_table_lists", test_parse_frees_patch_table_lists);
     cna_test_run("plain_pair", test_plain_pair);
     cna_test_run("packed_vertex_outputs", test_packed_vertex_outputs);
     cna_test_run("packed_pixel_inputs", test_packed_pixel_inputs);
