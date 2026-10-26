@@ -577,8 +577,14 @@ static char *rewritePixelShader(
             } // else if
         } // for
 
+        // VFACE is the rasterizer's SV_IsFrontFace, never a vertex output; it is added to the
+        //  input struct below. Counted unmatched, it tripped the assert on every pixel shader
+        //  that reads it. -CNA
         if (strcmp(ppd->attributes[i].name, "vFace") == 0)
+        {
             vfaceidx = i;
+            found_matching_vs_output_for_ps_input = 1;
+        } // if
 
         // A vertex shader that doesn't properly initialize all its outputs
         //  can produce a situation where vpd->outputs is missing a matching

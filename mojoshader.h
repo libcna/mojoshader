@@ -1856,6 +1856,12 @@ typedef struct MOJOSHADER_d3d11Shader MOJOSHADER_d3d11Shader;
  *  (malloc_d) parameter. This pointer is passed as-is to your (m) and (f)
  *  functions.
  *
+ * A pixel shader's VFACE is +1 where SV_IsFrontFace is true and -1 where it
+ *  is false. That is Direct3D 9's sign -- positive on triangles that are
+ *  clockwise on the render target, whatever the culling -- when the
+ *  rasterizer states you draw with have FrontCounterClockwise = FALSE, the
+ *  Direct3D 11 default; with TRUE, every VFACE has the opposite sign. -CNA
+ *
  * This call is only as thread safe as your D3D11 context! If you call your
  *  context from multiple threads, you must protect this call with whatever
  *  thread synchronization technique you have for your other D3D calls.

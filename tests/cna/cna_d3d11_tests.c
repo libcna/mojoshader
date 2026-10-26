@@ -405,6 +405,68 @@ static void test_fog_pair_rewrite(void)
     free(ctx);
 } // test_fog_pair_rewrite
 
+/* vs_3_0: dcl_position v0; dcl_position o0; mov o0, v0 */
+static const uint32_t position_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+/* ps_3_0: def c0 = green; def c1 = red; dcl vFace; cmp oC0, vFace.x, c0, c1 */
+static const uint32_t vface_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DEF, 5), CNA_DST(CNA_CONST, 0, 15), 0x00000000u, 0x3f800000u, 0x00000000u, 0x3f800000u,
+    CNA_OP(CNA_DEF, 5), CNA_DST(CNA_CONST, 1, 15), 0x3f800000u, 0x00000000u, 0x00000000u, 0x3f800000u,
+    CNA_OP(CNA_DCL_OP, 2), 0x80000000u, CNA_DST(CNA_MISCTYPE, 1, 15),
+    CNA_OP(88, 4), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC_SWZ(CNA_MISCTYPE, 1, 0x00),
+    CNA_SRC(CNA_CONST, 0), CNA_SRC(CNA_CONST, 1),
+    CNA_END
+};
+
+/*
+ * Found verifying R8-01 (2026-10-26 remediation review, round 2) under Wine and DXVK: a pixel
+ * shader reading VFACE could not be linked with assertions on. The glue matches every pixel input
+ * to a vertex output, and asserts that one was found; VFACE is the rasterizer's SV_IsFrontFace,
+ * which no vertex shader outputs, so it never matched. The rewrite must link it, adding the
+ * SV_IsFrontFace member and keeping the profile's sign (positive where SV_IsFrontFace is true,
+ * which is Direct3D 9's clockwise front only under FrontCounterClockwise = FALSE).
+ */
+static void test_vface_pair_rewrite(void)
+{
+    MOJOSHADER_d3d11Context *ctx;
+    MOJOSHADER_d3d11Shader *vs, *ps;
+    char *source;
+
+    cna_alloc_reset(0);
+    ctx = make_context();
+    vs = (ctx != NULL) ? compile(ctx, position_vs3, sizeof (position_vs3)) : NULL;
+    ps = (ctx != NULL) ? compile(ctx, vface_ps3, sizeof (vface_ps3)) : NULL;
+    CNA_CHECK((vs != NULL) && (ps != NULL), "both shaders compile");
+    if ((vs != NULL) && (ps != NULL))
+    {
+        source = rewritePixelShader(ctx, vs, ps);
+        CNA_CHECK(source != NULL, "the pixel shader is rewritten");
+        if (source != NULL)
+        {
+            CNA_CHECK(strstr(source, "\tbool m_vFace : SV_IsFrontFace;\n") != NULL,
+                      "the input struct gains the SV_IsFrontFace member");
+            CNA_CHECK(strstr(source, "#define vFace (input.m_vFace ? 1 : -1)") != NULL,
+                      "VFACE is positive where SV_IsFrontFace is true");
+            CNA_CHECK(strstr(source, "float4 m_o0 : SV_Position;") != NULL,
+                      "the input struct is the vertex shader's");
+            ctx->free_fn(source, ctx->malloc_data);
+        } // if
+    } // if
+    if (vs != NULL)
+        MOJOSHADER_d3d11DeleteShader(ctx, vs);
+    if (ps != NULL)
+        MOJOSHADER_d3d11DeleteShader(ctx, ps);
+    CNA_CHECK((buffers_live == 0) && (cna_alloc_live() == 0), "everything is released");
+    free(ctx);
+} // test_vface_pair_rewrite
+
 int main(void)
 {
     cna_test_run("texbem_zero_state", test_texbem_zero_state);
@@ -412,5 +474,6 @@ int main(void)
     cna_test_run("refused_buffer_fails_compile", test_refused_buffer_fails_compile);
     cna_test_run("compile_allocation_failures", test_compile_allocation_failures);
     cna_test_run("fog_pair_rewrite", test_fog_pair_rewrite);
+    cna_test_run("vface_pair_rewrite", test_vface_pair_rewrite);
     return cna_test_finish();
 } // main
