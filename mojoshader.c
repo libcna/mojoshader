@@ -5797,8 +5797,12 @@ static void process_definitions(Context *ctx)
                     else if (regtype == REG_TYPE_DEPTHOUT)
                         usage = MOJOSHADER_USAGE_DEPTH;
 
+                    // oPos, oFog and oPts are POSITION0, FOG0 and PSIZE0: a RASTOUT register's
+                    // number picks its semantic, not the semantic's index. As FOG1 and PSIZE2
+                    // they linked to no pixel input and missed the point-size built-in. -CNA
                     add_attribute_register(ctx, regtype, regnum, usage,
-                                           regnum, 0xF, 0);
+                                           (regtype == REG_TYPE_RASTOUT) ? 0 : regnum,
+                                           0xF, 0);
                     break;
 
                 case REG_TYPE_ADDRESS:

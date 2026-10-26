@@ -1202,7 +1202,7 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             if (regtype == REG_TYPE_RASTOUT)
             {
                 regtype = REG_TYPE_OUTPUT;
-                index = regnum;
+                index = 0;  // POSITION0, FOG0, PSIZE0: the register number is the usage -CNA
                 switch ((const RastOutType) regnum)
                 {
                     case RASTOUT_TYPE_POSITION:

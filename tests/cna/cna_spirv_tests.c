@@ -157,6 +157,24 @@ static const uint32_t plain_ps3[] = {
     CNA_END
 };
 
+/* vs_2_0: oPos = v0, oFog = v0.x, oPts = v0.x -- the RASTOUT registers 0, 1 and 2. */
+static const uint32_t rastout_vs2[] = {
+    CNA_VS(2, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_MOV, 2), CNA_DST(4, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(4, 1, 1), CNA_SRC_SWZ(CNA_INPUT, 0, 0x00),
+    CNA_OP(CNA_MOV, 2), CNA_DST(4, 2, 1), CNA_SRC_SWZ(CNA_INPUT, 0, 0x00),
+    CNA_END
+};
+
+/* ps_3_0: dcl_fog v0.x, written to oC0. */
+static const uint32_t fog_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(11, 0), CNA_DST(CNA_INPUT, 0, 1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC_SWZ(CNA_INPUT, 0, 0x00),
+    CNA_END
+};
+
 /* Translates, links and checks one vertex/pixel pair. */
 static void check_pair(const char *name, const uint32_t *vs, size_t vs_bytes,
                        const uint32_t *ps, size_t ps_bytes, int expected_user_varyings)
@@ -215,6 +233,37 @@ done:
     MOJOSHADER_freeParseData(v);
     MOJOSHADER_freeParseData(p);
 } // check_pair
+
+/* A pre-vs_3_0 oFog is FOG0 and pairs with the pixel shader's FOG0 input, and oPts is the
+ * PointSize built-in, not a user varying: one user varying on each side, at one Location. Before,
+ * the parser listed them as FOG1 and PSIZE2, and linking the pair wrote a Location over the
+ * module's magic number. */
+static void test_rastout_semantics(void)
+{
+    const MOJOSHADER_parseData *v = cna_parse("spirv", rastout_vs2, sizeof (rastout_vs2));
+    SpirvFacts facts;
+    int id, pointsize = 0;
+
+    check_pair("rastout", rastout_vs2, sizeof (rastout_vs2), fog_ps3, sizeof (fog_ps3), 1);
+    CNA_CHECK(cna_report_errors("rastout vs", v) == 0, "the vs_2_0 RASTOUT shader translates");
+    if ((v != NULL) && (v->error_count == 0))
+    {
+        read_facts(v, &facts);
+        for (id = 0; id < MAX_IDS; id++)
+            if ((facts.storage[id] == SpvStorageClassOutput) &&
+                (facts.builtin[id] == SpvBuiltInPointSize))
+                pointsize++;
+        CNA_CHECK(pointsize == 1, "oPts is the PointSize built-in");
+    } // if
+    MOJOSHADER_freeParseData(v);
+
+    /* The GLSL profile maps the same registers onto its built-ins. */
+    v = cna_parse("glsl120", rastout_vs2, sizeof (rastout_vs2));
+    CNA_CHECK(cna_report_errors("rastout glsl", v) == 0, "the vs_2_0 RASTOUT shader translates to GLSL");
+    CNA_CHECK(cna_output_contains(v, "#define vs_oPts gl_PointSize"), "GLSL writes oPts to gl_PointSize");
+    CNA_CHECK(cna_output_contains(v, "#define vs_oFog gl_FogFragCoord"), "GLSL writes oFog as FOG0");
+    MOJOSHADER_freeParseData(v);
+} // test_rastout_semantics
 
 /* A2v2 A-02: packed vs_3_0 outputs; unpacked pixel inputs. */
 static void test_packed_vertex_outputs(void)
@@ -318,5 +367,6 @@ int main(void)
     cna_test_run("packed_vertex_outputs", test_packed_vertex_outputs);
     cna_test_run("packed_pixel_inputs", test_packed_pixel_inputs);
     cna_test_run("packed_both", test_packed_both);
+    cna_test_run("rastout_semantics", test_rastout_semantics);
     return cna_test_finish();
 } // main
