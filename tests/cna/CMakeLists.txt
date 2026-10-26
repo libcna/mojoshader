@@ -66,3 +66,5 @@ mojoshader_cna_test(cna_build_tests)
 target_sources(cna_build_tests PRIVATE $<TARGET_OBJECTS:mojoshader_cna_version_header>)
 # Compiled, not linked: the object library defines the same symbols as the test library's copy.
 add_dependencies(cna_build_tests mojoshader_cna_opengl_noflip)
+
+mojoshader_cna_test(cna_effect_tests)

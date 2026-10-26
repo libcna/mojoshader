@@ -583,7 +583,11 @@ static void readvalue(const uint8 *base,
         {
             for (j = 0; j < value->type.member_count; j++)
             {
-                siz = value->type.members[j].info.rows * value->type.members[j].info.elements;
+                // A non-array member has elements == 0 and still holds one value, exactly as
+                // the size computation above counts it; multiplying by 0 skipped its defaults
+                // and shifted every later member's onto it. -CNA
+                const uint32 elements = value->type.members[j].info.elements;
+                siz = value->type.members[j].info.rows * (elements ? elements : 1);
                 for (k = 0; k < siz; k++)
                 {
                     memcpy(value->valuesF + dst_offset,
