@@ -282,6 +282,126 @@ static void test_texbem_uniforms(void)
     CNA_CHECK(a.live == 0, "the context returned everything it allocated");
 } // test_texbem_uniforms
 
+/*
+ * A2v2 A-08: a program deleted with MOJOSHADER_sdlDeleteProgram() must leave the context's
+ * program cache too. Relinking the pair links a new program rather than returning the freed one.
+ */
+static void test_delete_program_then_relink(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(gpu_device, &a);
+    MOJOSHADER_sdlShaderData *vs, *ps;
+    MOJOSHADER_sdlProgram *p1, *p2;
+    SDL_GPUShader *gvs = NULL, *gps = NULL;
+    unsigned long long id1;
+
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    vs = compile(ctx, position_vs2, sizeof (position_vs2));
+    ps = compile(ctx, red_ps2, sizeof (red_ps2));
+    CNA_CHECK(vs && ps, "the shaders compile");
+    if (vs && ps)
+    {
+        p1 = link_pair(ctx, vs, ps);
+        CNA_CHECK(p1 != NULL, "the pair links");
+        id1 = MOJOSHADER_sdlGetProgramIdentity(ctx);
+        if (p1 != NULL)
+            MOJOSHADER_sdlDeleteProgram(ctx, p1);
+        CNA_CHECK(MOJOSHADER_sdlGetProgramIdentity(ctx) == 0, "the deleted program is unbound");
+
+        p2 = link_pair(ctx, vs, ps);
+        CNA_CHECK(p2 != NULL, "the pair links again");
+        CNA_CHECK(MOJOSHADER_sdlGetProgramIdentity(ctx) != id1,
+                  "relinking after the deletion links a new program");
+        MOJOSHADER_sdlGetShaders(ctx, &gvs, &gps);
+        CNA_CHECK((gvs != NULL) && (gps != NULL), "the new program has both GPU shaders");
+        CNA_CHECK(link_pair(ctx, vs, ps) == p2, "the new program is the cached one");
+    } // if
+
+    MOJOSHADER_sdlDeleteShader(ctx, vs);
+    MOJOSHADER_sdlDeleteShader(ctx, ps);
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "the context returned everything it allocated");
+} // test_delete_program_then_relink
+
+/* A2v2 A-08: deleting a shader of an explicitly deleted program evicts nothing twice. */
+static void test_delete_program_then_delete_shaders(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(gpu_device, &a);
+    MOJOSHADER_sdlShaderData *vs, *red, *green;
+    MOJOSHADER_sdlProgram *p_red, *p_green;
+
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    vs = compile(ctx, position_vs2, sizeof (position_vs2));
+    red = compile(ctx, red_ps2, sizeof (red_ps2));
+    green = compile(ctx, green_ps2, sizeof (green_ps2));
+    CNA_CHECK(vs && red && green, "the shaders compile");
+    if (vs && red && green)
+    {
+        p_red = link_pair(ctx, vs, red);
+        p_green = link_pair(ctx, vs, green);
+        CNA_CHECK((p_red != NULL) && (p_green != NULL), "both pairs link");
+        if (p_red != NULL)
+            MOJOSHADER_sdlDeleteProgram(ctx, p_red);
+        CNA_CHECK(MOJOSHADER_sdlGetProgramIdentity(ctx) != 0,
+                  "deleting another program leaves the bound one bound");
+    } // if
+
+    /* mojoshader.h's order: programs, then shaders, then the context. */
+    MOJOSHADER_sdlDeleteShader(ctx, red);
+    MOJOSHADER_sdlDeleteShader(ctx, green);
+    MOJOSHADER_sdlDeleteShader(ctx, vs);
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "the context returned everything it allocated");
+} // test_delete_program_then_delete_shaders
+
+/* Returns what a shader the context did not free holds (mojoshader.h: it frees none). */
+static void free_orphan_shader(MOJOSHADER_sdlShaderData *shader, CountingAllocator *a)
+{
+    if (shader == NULL)
+        return;
+    MOJOSHADER_freeParseData(shader->parseData);
+    counting_free(shader, a);
+} // free_orphan_shader
+
+/* A2v2 A-08: tearing down the cache does not delete an explicitly deleted program again. */
+static void test_delete_program_then_destroy_context(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(gpu_device, &a);
+    MOJOSHADER_sdlShaderData *vs, *ps;
+    MOJOSHADER_sdlProgram *p;
+
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    vs = compile(ctx, position_vs2, sizeof (position_vs2));
+    ps = compile(ctx, red_ps2, sizeof (red_ps2));
+    CNA_CHECK(vs && ps, "the shaders compile");
+    if (vs && ps)
+    {
+        p = link_pair(ctx, vs, ps);
+        CNA_CHECK(p != NULL, "the pair links");
+        if (p != NULL)
+            MOJOSHADER_sdlDeleteProgram(ctx, p);
+    } // if
+
+    MOJOSHADER_sdlDestroyContext(ctx);  // with both shaders alive: the cache is torn down
+    free_orphan_shader(vs, &a);
+    free_orphan_shader(ps, &a);
+    CNA_CHECK(a.live == 0, "everything allocated was returned");
+} // test_delete_program_then_destroy_context
+
 /* -- Driver -------------------------------------------------------------------------------- */
 
 static int open_device(void)
@@ -330,13 +450,54 @@ static int open_device(void)
     return 1;
 } // open_device
 
-int main(void)
+typedef struct TestCase
 {
-    cna_test_run("context_without_device", test_context_without_device);
-    if (open_device())
+    const char *name;
+    void (*run)(void);
+    int needs_device;
+} TestCase;
+
+static const TestCase test_cases[] = {
+    { "context_without_device", test_context_without_device, 0 },
+    { "link_and_cache", test_link_and_cache, 1 },
+    { "texbem_uniforms", test_texbem_uniforms, 1 },
+    { "delete_program_then_relink", test_delete_program_then_relink, 1 },
+    { "delete_program_then_delete_shaders", test_delete_program_then_delete_shaders, 1 },
+    { "delete_program_then_destroy_context", test_delete_program_then_destroy_context, 1 },
+};
+
+/* Every case, or with arguments only the cases they name. */
+static int selected(const TestCase *test, int argc, char **argv)
+{
+    int i;
+    if (argc < 2)
+        return 1;
+    for (i = 1; i < argc; i++)
+        if (strcmp(argv[i], test->name) == 0)
+            return 1;
+    return 0;
+} // selected
+
+int main(int argc, char **argv)
+{
+    const size_t count = sizeof (test_cases) / sizeof (test_cases[0]);
+    int device_cases = 0;
+    size_t i;
+
+    for (i = 0; i < count; i++)
     {
-        cna_test_run("link_and_cache", test_link_and_cache);
-        cna_test_run("texbem_uniforms", test_texbem_uniforms);
+        if (!selected(&test_cases[i], argc, argv))
+            continue;
+        if (test_cases[i].needs_device)
+            device_cases++;
+        else
+            cna_test_run(test_cases[i].name, test_cases[i].run);
+    } // for
+    if ((device_cases > 0) && open_device())
+    {
+        for (i = 0; i < count; i++)
+            if (test_cases[i].needs_device && selected(&test_cases[i], argc, argv))
+                cna_test_run(test_cases[i].name, test_cases[i].run);
         SDL_DestroyGPUDevice(gpu_device);
         SDL_Quit();
     } // if

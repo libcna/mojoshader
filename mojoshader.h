@@ -2277,6 +2277,10 @@ DECLSPEC void MOJOSHADER_sdlBindProgram(MOJOSHADER_sdlContext *context,
  *
  * If the program is currently bound by MOJOSHADER_sdlBindProgram(), it will
  *  be deleted as soon as it becomes unbound.
+ *
+ * The program also leaves the context's cache of linked programs: linking the
+ *  same shaders again links a new program, and neither deleting those shaders
+ *  nor destroying the context deletes this one a second time.
  */
 DECLSPEC void MOJOSHADER_sdlDeleteProgram(MOJOSHADER_sdlContext *context,
                                           MOJOSHADER_sdlProgram *program);

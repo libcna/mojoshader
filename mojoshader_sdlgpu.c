@@ -147,6 +147,7 @@ struct MOJOSHADER_sdlProgram
     MOJOSHADER_sdlShaderData *pixelShaderData;
     unsigned long long identity;
     int pixelSpirvTransformApplied;
+    const struct LinkedShaderData *cacheKey;  /* its linker_cache entry, once it has one -CNA */
 };
 
 /* Error state... */
@@ -233,6 +234,18 @@ static int match_shaders(const void *_a, const void *_b, void *data)
     return 1;
 } // match_shaders
 
+/* Frees a program and its GPU shaders, nothing else; the cache entry, if any, is the caller's. -CNA */
+static void destroy_program(MOJOSHADER_sdlContext *ctx, MOJOSHADER_sdlProgram *p)
+{
+    if (ctx->bound_program == p)
+        ctx->bound_program = NULL;
+    if (p->vertexShader != NULL)
+        SDL_ReleaseGPUShader(ctx->device, p->vertexShader);
+    if (p->pixelShader != NULL)
+        SDL_ReleaseGPUShader(ctx->device, p->pixelShader);
+    ctx->free_fn(p, ctx->malloc_data);
+} // destroy_program
+
 static void nuke_shaders(
     const void *_ctx,
     const void *key,
@@ -242,7 +255,7 @@ static void nuke_shaders(
     MOJOSHADER_sdlContext *ctx = (MOJOSHADER_sdlContext *) _ctx;
     (void) data;
     ctx->free_fn((void *) key, ctx->malloc_data); // this was a LinkedShaderData struct.
-    MOJOSHADER_sdlDeleteProgram(ctx, (MOJOSHADER_sdlProgram *) value);
+    destroy_program(ctx, (MOJOSHADER_sdlProgram *) value);
 } // nuke_shaders
 
 static uint8_t update_uniform_buffer(
@@ -625,6 +638,7 @@ static MOJOSHADER_sdlProgram *compile_program(
     size_t pshaderCodeSize = pshader->parseData->output_len;
     int pixelUniformBufferCount = 1;
     program->pixelSpirvTransformApplied = 0;
+    program->cacheKey = NULL;
 
     // Last-minute fixups before we actually invoke the compiler
     if (shader_format == SDL_GPU_SHADERFORMAT_SPIRV)
@@ -885,7 +899,7 @@ MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(
     program->pixelShaderData = pshader;
     if (ctx->next_program_identity == ~0ULL)
     {
-        MOJOSHADER_sdlDeleteProgram(ctx, program);
+        destroy_program(ctx, program);
         set_error("SDL_gpu linked-program identity space exhausted");
         return NULL;
     } // if
@@ -896,17 +910,18 @@ MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(
 
     if (item == NULL)
     {
-        MOJOSHADER_sdlDeleteProgram(ctx, program);
+        destroy_program(ctx, program);
     }
 
     memcpy(item, &shaders, sizeof(LinkedShaderData));
     if (hash_insert(ctx->linker_cache, item, program) != 1)
     {
         ctx->free_fn(item, ctx->malloc_data);
-        MOJOSHADER_sdlDeleteProgram(ctx, program);
+        destroy_program(ctx, program);
         out_of_memory();
         return NULL;
     }
+    program->cacheKey = item;
 
     ctx->bound_program = program;
     return program;
@@ -982,13 +997,16 @@ void MOJOSHADER_sdlDeleteProgram(
     MOJOSHADER_sdlContext *ctx,
     MOJOSHADER_sdlProgram *p
 ) {
-    if (ctx->bound_program == p)
-        ctx->bound_program = NULL;
-    if (p->vertexShader != NULL)
-        SDL_ReleaseGPUShader(ctx->device, p->vertexShader);
-    if (p->pixelShader != NULL)
-        SDL_ReleaseGPUShader(ctx->device, p->pixelShader);
-    ctx->free_fn(p, ctx->malloc_data);
+    const void *cached = NULL;
+
+    // A linked program is its linker_cache entry's value: remove the entry, exactly once, and
+    // nuke_shaders() destroys the program. Freeing the program alone left the entry behind, for
+    // the next link of the same shaders to return and for the cache to free a second time. -CNA
+    if ((p->cacheKey != NULL) && (ctx->linker_cache != NULL) &&
+        hash_find(ctx->linker_cache, p->cacheKey, &cached) && (cached == p))
+        hash_remove(ctx->linker_cache, p->cacheKey, ctx);
+    else
+        destroy_program(ctx, p);
 } // MOJOSHADER_sdlDeleteProgram
 
 void MOJOSHADER_sdlBindProgram(
