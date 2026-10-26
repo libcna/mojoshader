@@ -90,6 +90,151 @@ const char *get_HLSL_uniform_array_varname(Context *ctx,
     return buf;
 } // get_HLSL_uniform_array_varname
 
+// Shader Model 3 lets one vertex output or pixel input register carry several semantics in
+//  disjoint write masks, and the parser adds one attribute entry per semantic. Such a register
+//  is translated as the GLSL profile translates it: a float4 local of main, one struct member
+//  per semantic, and copies of each semantic's lanes (lane positions kept) at the end of main
+//  for outputs and at its start for inputs. A register with one semantic keeps the usual
+//  macro for its struct member. -CNA
+static int is_HLSL_packed_register(Context *ctx, const RegisterType regtype,
+                                   const int regnum)
+{
+    const RegisterList *item;
+    int semantics = 0;
+
+    if (!shader_version_atleast(ctx, 3, 0))
+        return 0;
+    else if (shader_is_vertex(ctx) && (regtype != REG_TYPE_OUTPUT))
+        return 0;
+    else if (shader_is_pixel(ctx) && (regtype != REG_TYPE_INPUT))
+        return 0;
+
+    for (item = ctx->attributes.next; item != NULL; item = item->next)
+    {
+        if ((item->regtype == regtype) && (item->regnum == regnum))
+            semantics++;
+    } // for
+    return (semantics > 1);
+} // is_HLSL_packed_register
+
+// isscalar() judges a register by its first semantic. A packed register is a float4 local
+//  even when that semantic is FOG, and its writes must keep their masks. -CNA
+static int isscalar_HLSL(Context *ctx, const RegisterType regtype,
+                         const int regnum)
+{
+    if (is_HLSL_packed_register(ctx, regtype, regnum))
+        return 0;
+    return isscalar(ctx, ctx->shader_type, regtype, regnum);
+} // isscalar_HLSL
+
+static void get_HLSL_writemask_suffix(const int writemask, char *buf,
+                                      const size_t len)
+{
+    size_t i = 0;
+    if ((writemask != 0xF) && (len >= 6))
+    {
+        buf[i++] = '.';
+        if (writemask & 0x1) buf[i++] = 'x';
+        if (writemask & 0x2) buf[i++] = 'y';
+        if (writemask & 0x4) buf[i++] = 'z';
+        if (writemask & 0x8) buf[i++] = 'w';
+    } // if
+    if (len > 0)
+        buf[(i < len) ? i : (len - 1)] = '\0';
+} // get_HLSL_writemask_suffix
+
+// The HLSL type and semantic of a vertex output (vertex_output != 0) or of a pixel shader
+//  input. Fails and returns NULL for a usage this profile cannot express. -CNA
+static const char *get_HLSL_varying_semantic(Context *ctx,
+                                             const int vertex_output,
+                                             const MOJOSHADER_usage usage,
+                                             const int index, char *buf,
+                                             const size_t len)
+{
+    const char *type = "float4";
+    if (vertex_output)
+    {
+        switch (usage)
+        {
+            case MOJOSHADER_USAGE_BINORMAL:
+                snprintf(buf, len, "BINORMAL%d", index);
+                break;
+            case MOJOSHADER_USAGE_BLENDINDICES:
+                snprintf(buf, len, "BLENDINDICES%d", index);
+                break;
+            case MOJOSHADER_USAGE_BLENDWEIGHT:
+                snprintf(buf, len, "BLENDWEIGHT%d", index);
+                break;
+            case MOJOSHADER_USAGE_COLOR:
+                snprintf(buf, len, "COLOR%d", index);
+                break;
+            case MOJOSHADER_USAGE_FOG:
+                type = "float";
+                snprintf(buf, len, "FOG");
+                break;
+            case MOJOSHADER_USAGE_NORMAL:
+                snprintf(buf, len, "NORMAL%d", index);
+                break;
+            case MOJOSHADER_USAGE_POSITION:
+                snprintf(buf, len, "POSITION%d", index);
+                break;
+            case MOJOSHADER_USAGE_POSITIONT:
+                snprintf(buf, len, "POSITIONT");
+                break;
+            case MOJOSHADER_USAGE_POINTSIZE:
+                type = "float";
+                snprintf(buf, len, "PSIZE");
+                break;
+            case MOJOSHADER_USAGE_TANGENT:
+                snprintf(buf, len, "TANGENT%d", index);
+                break;
+            case MOJOSHADER_USAGE_TESSFACTOR:
+                type = "float";
+                snprintf(buf, len, "TESSFACTOR%d", index);
+                break;
+            case MOJOSHADER_USAGE_TEXCOORD:
+                snprintf(buf, len, "TEXCOORD%d", index);
+                break;
+            default:
+                failf(ctx, "Invalid vertex output semantic %d", usage);
+                return NULL;
+        } // switch
+    } // if
+    else
+    {
+        switch (usage)
+        {
+            case MOJOSHADER_USAGE_TEXCOORD:
+                snprintf(buf, len, "TEXCOORD%d", index);
+                break;
+            case MOJOSHADER_USAGE_COLOR:
+                snprintf(buf, len, "COLOR%d", index);
+                break;
+            case MOJOSHADER_USAGE_FOG:
+                type = "float";
+                snprintf(buf, len, "FOG");
+                break;
+            case MOJOSHADER_USAGE_NORMAL:
+                // "NORMAL" is NORMAL0; a second normal needs its index. -CNA
+                if (index == 0)
+                    snprintf(buf, len, "NORMAL");
+                else
+                    snprintf(buf, len, "NORMAL%d", index);
+                break;
+            case MOJOSHADER_USAGE_POSITION:
+                snprintf(buf, len, "POSITION%d", index);
+                break;
+            case MOJOSHADER_USAGE_BLENDWEIGHT:
+                snprintf(buf, len, "BLENDWEIGHT%d", index);
+                break;
+            default:
+                fail(ctx, "BUG: unhandled pixel shader input");
+                return NULL;
+        } // switch
+    } // else
+    return type;
+} // get_HLSL_varying_semantic
+
 const char *get_HLSL_destarg_varname(Context *ctx, char *buf, size_t len)
 {
     const DestArgInfo *arg = &ctx->dest_arg;
@@ -176,7 +321,7 @@ const char *make_HLSL_destarg_assign(Context *ctx, char *buf,
                                                        sizeof (regnum_str));
     char writemask_str[6];
     size_t i = 0;
-    const int scalar = isscalar(ctx, ctx->shader_type, arg->regtype, arg->regnum);
+    const int scalar = isscalar_HLSL(ctx, arg->regtype, arg->regnum);
     if (!scalar && !writemask_xyzw(arg->writemask))
     {
         writemask_str[i++] = '.';
@@ -373,7 +518,7 @@ const char *make_HLSL_srcarg_string(Context *ctx, const size_t idx,
     } // if
 
     char swiz_str[6] = { '\0' };
-    if (!isscalar(ctx, ctx->shader_type, arg->regtype, arg->regnum))
+    if (!isscalar_HLSL(ctx, arg->regtype, arg->regnum))
     {
         make_HLSL_swizzle_string(swiz_str, sizeof (swiz_str),
                                  arg->swizzle, writemask);
@@ -584,6 +729,7 @@ void emit_HLSL_finalize(Context *ctx)
         ctx->indent--;
         pop_output(ctx);
     } // if
+
 } // emit_HLSL_finalize
 
 void emit_HLSL_global(Context *ctx, RegisterType regtype, int regnum)
@@ -779,23 +925,99 @@ void emit_HLSL_sampler(Context *ctx,int stage,TextureType ttype,int tb)
     } // if
 } // emit_HLSL_sampler
 
+// One semantic of a packed register (see is_HLSL_packed_register()). The member is named
+//  m_<register>_<semantic>, so each semantic of the register gets its own. -CNA
+static void emit_HLSL_packed_attribute(Context *ctx, const RegisterType regtype,
+                                       const int regnum,
+                                       const MOJOSHADER_usage usage,
+                                       const int index, const int wmask)
+{
+    const int vertex_output = shader_is_vertex(ctx);
+    const RegisterList *first = reglist_find(&ctx->attributes, regtype, regnum);
+    const int first_semantic = (first != NULL) && (first->usage == usage) &&
+                               (first->index == index);
+    char var[64];
+    char semantic[32];
+    char member[128];
+    char mask[6];
+    const char *type;
+    size_t i;
+
+    get_HLSL_varname_in_buf(ctx, regtype, regnum, var, sizeof (var));
+    type = get_HLSL_varying_semantic(ctx, vertex_output, usage, index,
+                                     semantic, sizeof (semantic));
+    if (type == NULL)
+        return;  // already failed.
+
+    snprintf(member, sizeof (member), "m_%s_%s", var, semantic);
+    for (i = strlen(var) + 3; member[i] != '\0'; i++)
+    {
+        if ((member[i] >= 'A') && (member[i] <= 'Z'))
+            member[i] = (char) (member[i] - 'A' + 'a');
+    } // for
+    get_HLSL_writemask_suffix(wmask, mask, sizeof (mask));
+
+    push_output(ctx, vertex_output ? &ctx->outputs : &ctx->inputs);
+    if (buffer_size(ctx->output) == 0)
+    {
+        output_line(ctx, "struct %s_%s", ctx->mainfn,
+                    vertex_output ? "Output" : "Input");
+        output_line(ctx, "{");
+        if (!vertex_output)
+        {
+            output_line(ctx, "\t// This must match the vertex output!");
+            output_line(ctx, "\t// Rewrite at link time if needed!");
+        } // if
+    } // if
+    ctx->indent++;
+    output_line(ctx, "%s %s : %s;", type, member, semantic);
+    pop_output(ctx);
+
+    // A scalar member (FOG) holds the semantic's one lane; an input starts out as (0,0,0,1),
+    //  like the GLSL profile's. -CNA
+    push_output(ctx, &ctx->mainline_top);
+    ctx->indent++;
+    if (first_semantic)
+    {
+        output_line(ctx, "float4 %s = float4(0.0, 0.0, 0.0, %s);",
+                    var, vertex_output ? "0.0" : "1.0");
+    } // if
+    if (!vertex_output)
+    {
+        if (strcmp(type, "float") == 0)
+            output_line(ctx, "%s%s = input.%s;", var, mask, member);
+        else
+            output_line(ctx, "%s%s = input.%s%s;", var, mask, member, mask);
+    } // if
+    pop_output(ctx);
+
+    // A vertex output is copied out at the end of main: finalize appends "return output;"
+    //  to mainline after these lines. -CNA
+    if (vertex_output)
+    {
+        push_output(ctx, &ctx->mainline);
+        ctx->indent++;
+        if (strcmp(type, "float") == 0)
+            output_line(ctx, "output.%s = %s.%c;", member, var, swizzle_channels[
+                (wmask & 0x1) ? 0 : (wmask & 0x2) ? 1 : (wmask & 0x4) ? 2 : 3]);
+        else
+            output_line(ctx, "output.%s%s = %s%s;", member, mask, var, mask);
+        pop_output(ctx);
+    } // if
+} // emit_HLSL_packed_attribute
 
 void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
                          MOJOSHADER_usage usage, int index, int wmask,
                          int flags)
 {
     // !!! FIXME: this function doesn't deal with write masks at all yet!
-    const char *usage_str = NULL;
-    char index_str[16] = { '\0' };
     char var[64];
-    char a[256];
+    char semantic[32];
+    const char *type;
 
     get_HLSL_varname_in_buf(ctx, regtype, regnum, var, sizeof (var));
 
     //assert((flags & MOD_PP) == 0);  // !!! FIXME: is PP allowed?
-
-    if (index != 0)  // !!! FIXME: a lot of these MUST be zero.
-        snprintf(index_str, sizeof (index_str), "%u", (uint) index);
 
     if (shader_is_vertex(ctx))
     {
@@ -895,6 +1117,9 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             pop_output(ctx);
         } // if
 
+        else if (is_HLSL_packed_register(ctx, regtype, regnum))
+            emit_HLSL_packed_attribute(ctx, regtype, regnum, usage, index, wmask);
+
         else if (regtype == REG_TYPE_OUTPUT)
         {
             push_output(ctx, &ctx->outputs);
@@ -906,53 +1131,15 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             ctx->indent++;
 
-            switch (usage)
+            if ((usage == MOJOSHADER_USAGE_POSITION) && (index == 0))
+                snprintf(ctx->hlsl_outpos_name, sizeof(ctx->hlsl_outpos_name), "%s", var);
+            else
             {
-                case MOJOSHADER_USAGE_BINORMAL:
-                    output_line(ctx, "float4 m_%s : BINORMAL%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_BLENDINDICES:
-                    output_line(ctx, "float4 m_%s : BLENDINDICES%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_BLENDWEIGHT:
-                    output_line(ctx, "float4 m_%s : BLENDWEIGHT%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_COLOR:
-                    output_line(ctx, "float4 m_%s : COLOR%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_FOG:
-                    output_line(ctx, "float m_%s : FOG;", var);
-                    break;
-                case MOJOSHADER_USAGE_NORMAL:
-                    output_line(ctx, "float4 m_%s : NORMAL%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_POSITION:
-                    if (index == 0)
-                        snprintf(ctx->hlsl_outpos_name,
-                                 sizeof(ctx->hlsl_outpos_name), "%s", var);
-                    else
-                        output_line(ctx, "float4 m_%s : POSITION%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_POSITIONT:
-                    output_line(ctx, "float4 m_%s : POSITIONT;", var);
-                    break;
-                case MOJOSHADER_USAGE_POINTSIZE:
-                    output_line(ctx, "float m_%s : PSIZE;", var);
-                    break;
-                case MOJOSHADER_USAGE_TANGENT:
-                    output_line(ctx, "float4 m_%s : TANGENT%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_TESSFACTOR:
-                    output_line(ctx, "float m_%s : TESSFACTOR%d;", var, index);
-                    break;
-                case MOJOSHADER_USAGE_TEXCOORD:
-                    output_line(ctx, "float4 m_%s : TEXCOORD%d;", var, index);
-                    break;
-                default:
-                    snprintf(a, sizeof(a), "Invalid vertex output semantic %d", usage);
-                    fail(ctx, a);
-                    break;
-            } // switch
+                type = get_HLSL_varying_semantic(ctx, 1, usage, index,
+                                                 semantic, sizeof (semantic));
+                if (type != NULL)
+                    output_line(ctx, "%s m_%s : %s;", type, var, semantic);
+            } // else
 
             pop_output(ctx);
 
@@ -1009,6 +1196,9 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             pop_output(ctx);
         } // if
 
+        else if (is_HLSL_packed_register(ctx, regtype, regnum))
+            emit_HLSL_packed_attribute(ctx, regtype, regnum, usage, index, wmask);
+
         // !!! FIXME: can you actualy have a texture register with COLOR usage?
         else if ((regtype == REG_TYPE_TEXTURE) ||
                  (regtype == REG_TYPE_INPUT) ||
@@ -1048,34 +1238,15 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             else
             {
-                switch (usage)
-                {
-                    case MOJOSHADER_USAGE_TEXCOORD:
-                        // ps_1_1 does a different hack for this attribute.
-                        //  Refer to emit_HLSL_global()'s REG_TYPE_ADDRESS code.
-                        if (!shader_version_atleast(ctx, 1, 4))
-                            skipreference = 1;
-                        output_line(ctx, "float4 m_%s : TEXCOORD%d;", var, index);
-                        break;
-                    case MOJOSHADER_USAGE_COLOR:
-                        output_line(ctx, "float4 m_%s : COLOR%d;", var, index);
-                        break;
-                    case MOJOSHADER_USAGE_FOG:
-                        output_line(ctx, "float m_%s : FOG;", var);
-                        break;
-                    case MOJOSHADER_USAGE_NORMAL:
-                        output_line(ctx, "float4 m_%s : NORMAL;", var);
-                        break;
-                    case MOJOSHADER_USAGE_POSITION:
-                        output_line(ctx, "float4 m_%s : POSITION%d;", var, index);
-                        break;
-                    case MOJOSHADER_USAGE_BLENDWEIGHT:
-                        output_line(ctx, "float4 m_%s : BLENDWEIGHT%d;", var, index);
-                        break;
-                    default:
-                        fail(ctx, "BUG: unhandled pixel shader input");
-                        break;
-                } // switch
+                // ps_1_1 does a different hack for this attribute.
+                //  Refer to emit_HLSL_global()'s REG_TYPE_ADDRESS code.
+                if ((usage == MOJOSHADER_USAGE_TEXCOORD) &&
+                    !shader_version_atleast(ctx, 1, 4))
+                    skipreference = 1;
+                type = get_HLSL_varying_semantic(ctx, 0, usage, index,
+                                                 semantic, sizeof (semantic));
+                if (type != NULL)
+                    output_line(ctx, "%s m_%s : %s;", type, var, semantic);
             } // else
 
             pop_output(ctx);

@@ -1,5 +1,5 @@
 /**
- * HLSL and Metal emitter regressions (A2v2 A-12).
+ * HLSL and Metal emitter regressions (A2v2 A-12, A-02).
  *
  * Every case translates a valid shader with both profiles and checks the structure of the
  * source. Where the shaderc library was found at configure time ($MOJOSHADER_SHADERC), the HLSL
@@ -288,12 +288,256 @@ static void test_loop_counts_iterations(void)
     } // for
 } // test_loop_counts_iterations
 
+/* -- A-02: packed Shader Model 3 semantics ------------------------------------------------- */
+
+/* vs_3_0: TEXCOORD0 in o1.xy and TEXCOORD1 in o1.zw. */
+static const uint32_t packed_outputs_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 1, 0x3),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 1), CNA_DST(CNA_OUTPUT, 1, 0xC),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+static void test_packed_vertex_outputs(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, packed_outputs_vs3,
+            sizeof (packed_outputs_vs3), "packed_outputs");
+        const char *member0 = metal ? "float4 o1_texcoord0 [[user(texcoord0)]];"
+                                    : "float4 m_o1_texcoord0 : TEXCOORD0;";
+        const char *member1 = metal ? "float4 o1_texcoord1 [[user(texcoord1)]];"
+                                    : "float4 m_o1_texcoord1 : TEXCOORD1;";
+        const char *copy0 = metal ? "output.o1_texcoord0.xy = o1.xy;" : "output.m_o1_texcoord0.xy = o1.xy;";
+        const char *copy1 = metal ? "output.o1_texcoord1.zw = o1.zw;" : "output.m_o1_texcoord1.zw = o1.zw;";
+        const long write_at = cna_offset(pd, "\to1 = v0;", 0);
+        const long return_at = cna_offset(pd, "return output;", 0);
+
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_braces_balance(pd), "braces balance");
+        CNA_CHECK(cna_output_count(pd, member0) == 1, "TEXCOORD0 has its own member");
+        CNA_CHECK(cna_output_count(pd, member1) == 1, "TEXCOORD1 has its own member");
+        CNA_CHECK(!cna_output_contains(pd, metal ? "float4 o1 [[" : "float4 m_o1 :"),
+                  "no member is named after the shared register");
+        CNA_CHECK(!cna_output_contains(pd, "#define o1 "), "the register is not a member macro");
+        CNA_CHECK(cna_output_count(pd, "float4 o1 = float4(0.0, 0.0, 0.0, 0.0);") == 1,
+                  "the register is one float4 local");
+        CNA_CHECK((write_at > 0) && (cna_offset(pd, copy0, 0) > write_at) &&
+                  (cna_offset(pd, copy0, 0) < return_at), "TEXCOORD0's lanes are copied at the end of main");
+        CNA_CHECK((cna_offset(pd, copy1, 0) > write_at) && (cna_offset(pd, copy1, 0) < return_at),
+                  "TEXCOORD1's lanes are copied at the end of main");
+        CNA_CHECK(cna_output_contains(pd, metal ? "float4 o0 [[position]];" : "float4 m_o0 : SV_Position;"),
+                  "the unpacked position output is unchanged");
+        CNA_CHECK(pd->output_count == 3, "the parse data still lists three outputs");
+        cna_check_hlsl_compiles(pd, profile, "packed_outputs");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_packed_vertex_outputs
+
+/* vs_3_0: TEXCOORD0 in o1.yzw and FOG in o1.x, written separately. */
+static const uint32_t packed_fog_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 1, 0xE),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_FOG, 0), CNA_DST(CNA_OUTPUT, 1, 0x1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xE), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0xFF),
+    CNA_END
+};
+
+static void test_packed_fog_output(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, packed_fog_vs3,
+            sizeof (packed_fog_vs3), "packed_fog");
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_output_contains(pd, "o1.yzw = v0.yzw;"), "the TEXCOORD0 lanes keep their mask");
+        CNA_CHECK(cna_output_contains(pd, "o1.x = v0.w;"), "the FOG lane keeps its mask");
+        if (metal)
+        {
+            CNA_CHECK(cna_output_contains(pd, "float4 o1_fog [[user(fog)]];"), "FOG has its own member");
+            CNA_CHECK(cna_output_contains(pd, "output.o1_fog.x = o1.x;"), "FOG's lane is copied");
+            CNA_CHECK(cna_output_contains(pd, "output.o1_texcoord0.yzw = o1.yzw;"), "TEXCOORD0's lanes are copied");
+        } // if
+        else
+        {
+            CNA_CHECK(cna_output_contains(pd, "float m_o1_fog : FOG;"), "FOG stays a scalar member");
+            CNA_CHECK(cna_output_contains(pd, "output.m_o1_fog = o1.x;"), "FOG's lane is copied");
+            CNA_CHECK(cna_output_contains(pd, "output.m_o1_texcoord0.yzw = o1.yzw;"), "TEXCOORD0's lanes are copied");
+        } // else
+        cna_check_hlsl_compiles(pd, profile, "packed_fog");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_packed_fog_output
+
+/* ps_3_0: TEXCOORD0 in v1.xy and TEXCOORD1 in v1.zw. */
+static const uint32_t packed_inputs_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_INPUT, 1, 0x3),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 1), CNA_DST(CNA_INPUT, 1, 0xC),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_COLOROUT, 0, 0xF), CNA_SRC(CNA_INPUT, 1),
+    CNA_END
+};
+
+static void test_packed_pixel_inputs(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, packed_inputs_ps3,
+            sizeof (packed_inputs_ps3), "packed_inputs");
+        const char *member0 = metal ? "float4 v1_texcoord0 [[user(texcoord0)]];"
+                                    : "float4 m_v1_texcoord0 : TEXCOORD0;";
+        const char *member1 = metal ? "float4 v1_texcoord1 [[user(texcoord1)]];"
+                                    : "float4 m_v1_texcoord1 : TEXCOORD1;";
+        const char *copy0 = metal ? "v1.xy = input.v1_texcoord0.xy;" : "v1.xy = input.m_v1_texcoord0.xy;";
+        const char *copy1 = metal ? "v1.zw = input.v1_texcoord1.zw;" : "v1.zw = input.m_v1_texcoord1.zw;";
+        const long init_at = cna_offset(pd, "float4 v1 = float4(0.0, 0.0, 0.0, 1.0);", 0);
+        const long read_at = cna_offset(pd, "oC0 = v1;", 0);
+
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_braces_balance(pd), "braces balance");
+        CNA_CHECK(cna_output_count(pd, member0) == 1, "TEXCOORD0 has its own member");
+        CNA_CHECK(cna_output_count(pd, member1) == 1, "TEXCOORD1 has its own member");
+        CNA_CHECK(!cna_output_contains(pd, "#define v1 "), "the register is not a member macro");
+        CNA_CHECK((init_at > cna_main_offset(pd)) && (cna_output_count(pd, "float4 v1 =") == 1),
+                  "the register is one float4 local of main, starting at (0,0,0,1)");
+        CNA_CHECK((cna_offset(pd, copy0, 0) > init_at) && (cna_offset(pd, copy0, 0) < read_at),
+                  "TEXCOORD0's lanes are copied in before use");
+        CNA_CHECK((cna_offset(pd, copy1, 0) > init_at) && (cna_offset(pd, copy1, 0) < read_at),
+                  "TEXCOORD1's lanes are copied in before use");
+        cna_check_hlsl_compiles(pd, profile, "packed_inputs");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_packed_pixel_inputs
+
+/* -- Unpacked shaders keep their translation ----------------------------------------------- */
+
+static const uint32_t plain_vs2[] = {
+    CNA_VS(2, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_ATTROUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+static const uint32_t plain_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_COLOR, 0), CNA_DST(CNA_OUTPUT, 1, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 2, 0x3),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 2, 0x3), CNA_SRC(CNA_INPUT, 0),
+    CNA_END
+};
+
+static const uint32_t plain_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_INPUT, 0, 0x3),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_COLOR, 0), CNA_DST(CNA_INPUT, 1, 0xF),
+    CNA_OP(CNA_ADD, 3), CNA_DST(CNA_COLOROUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0), CNA_SRC(CNA_INPUT, 1),
+    CNA_END
+};
+
+/* What the unfixed emitters produced for these shaders, byte for byte. */
+static const char plain_vs2_hlsl[] =
+    "struct main_Input\n{\n\tfloat4 m_v0 : POSITION0;\n};\n\nstruct main_Output\n{\n"
+    "\tfloat4 m_oD0 : COLOR0;\n\tfloat4 m_oPos : SV_Position;\n};\n\n"
+    "main_Output main(main_Input input)\n{\n\tmain_Output output = (main_Output) 0;\n"
+    "\t#define v0 input.m_v0\n\t#define oPos output.m_oPos\n\t#define oD0 output.m_oD0\n"
+    "\toPos = v0;\n\toD0 = v0;\n\t#undef v0\n\t#undef oPos\n\t#undef oD0\n\treturn output;\n"
+    "}\n\n";
+static const char plain_vs2_metal[] =
+    "#include <metal_common>\n\nusing namespace metal;\n\nstruct main_Input\n{\n"
+    "\tfloat4 v0 [[attribute(0)]];\n};\n\nstruct main_Output\n{\n"
+    "\tfloat4 oPos [[position]];\n\tfloat4 oD0 [[user(color0)]];\n};\n\n"
+    "vertex main_Output main (\n\tmain_Input input [[stage_in]]\n) {\n\tmain_Output output;\n"
+    "\t#define v0 input.v0\n\t#define oPos output.oPos\n\t#define oD0 output.oD0\n"
+    "\toPos = v0;\n\toD0 = v0;\n\toD0 = clamp(oD0, 0.0, 1.0);\n\t#undef v0\n\t#undef oPos\n"
+    "\t#undef oD0\n\treturn output;\n}\n\n";
+static const char plain_vs3_hlsl[] =
+    "struct main_Input\n{\n\tfloat4 m_v0 : POSITION0;\n};\n\nstruct main_Output\n{\n"
+    "\tfloat4 m_o1 : COLOR0;\n\tfloat4 m_o2 : TEXCOORD0;\n\tfloat4 m_o0 : SV_Position;\n};\n"
+    "\nmain_Output main(main_Input input)\n{\n\tmain_Output output = (main_Output) 0;\n"
+    "\t#define v0 input.m_v0\n\t#define o0 output.m_o0\n\t#define o1 output.m_o1\n"
+    "\t#define o2 output.m_o2\n\to0 = v0;\n\to1 = v0;\n\to2.xy = v0.xy;\n\t#undef v0\n"
+    "\t#undef o0\n\t#undef o1\n\t#undef o2\n\treturn output;\n}\n\n";
+static const char plain_vs3_metal[] =
+    "\nusing namespace metal;\n\nstruct main_Input\n{\n\tfloat4 v0 [[attribute(0)]];\n};\n\n"
+    "struct main_Output\n{\n\tfloat4 o0 [[position]];\n\tfloat4 o1 [[user(color0)]];\n"
+    "\tfloat4 o2 [[user(texcoord0)]];\n};\n\nvertex main_Output main (\n"
+    "\tmain_Input input [[stage_in]]\n) {\n\tmain_Output output;\n\t#define v0 input.v0\n"
+    "\t#define o0 output.o0\n\t#define o1 output.o1\n\t#define o2 output.o2\n\to0 = v0;\n"
+    "\to1 = v0;\n\to2.xy = v0.xy;\n\t#undef v0\n\t#undef o0\n\t#undef o1\n\t#undef o2\n"
+    "\treturn output;\n}\n\n";
+static const char plain_ps3_hlsl[] =
+    "struct main_Input\n{\n\t// This must match the vertex output!\n"
+    "\t// Rewrite at link time if needed!\n\tfloat4 m_v0 : TEXCOORD0;\n"
+    "\tfloat4 m_v1 : COLOR0;\n};\n\nstruct main_Output\n{\n\tfloat4 m_oC0 : SV_Target0;\n};\n"
+    "\nmain_Output main(main_Input input)\n{\n\tmain_Output output = (main_Output) 0;\n"
+    "\t#define v0 input.m_v0\n\t#define v1 input.m_v1\n\t#define oC0 output.m_oC0\n"
+    "\toC0 = v0 + v1;\n\t#undef v0\n\t#undef v1\n\t#undef oC0\n\treturn output;\n}\n\n";
+static const char plain_ps3_metal[] =
+    "\nusing namespace metal;\n\nstruct main_Input\n{\n\tfloat4 v0 [[user(texcoord0)]];\n"
+    "\tfloat4 v1 [[user(color0)]];\n};\n\nstruct main_Output\n{\n\tfloat4 oC0 [[color(0)]];\n"
+    "};\n\nfragment main_Output main (\n\tmain_Input input [[stage_in]]\n) {\n"
+    "\tmain_Output output;\n\t#define v0 input.v0\n\t#define v1 input.v1\n"
+    "\t#define oC0 output.oC0\n\toC0 = v0 + v1;\n\t#undef v0\n\t#undef v1\n\t#undef oC0\n"
+    "\treturn output;\n}\n\n";
+
+static void check_unchanged(const uint32_t *tokens, size_t bytes, const char *name,
+                            const char *hlsl, const char *metal)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const char *expected = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0) ? metal : hlsl;
+        const MOJOSHADER_parseData *pd = cna_translate(profile, tokens, bytes, name);
+        const int same = (pd->output != NULL) && (strcmp(pd->output, expected) == 0);
+        CNA_CHECK(same, "the shader translates exactly as expected");
+        if (!same)
+            fprintf(stderr, "%s %s: expected\n%s\ngot\n%s\n", name, profile, expected,
+                    (pd->output != NULL) ? pd->output : "(nothing)");
+        cna_check_hlsl_compiles(pd, profile, name);
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // check_unchanged
+
+static void test_unpacked_shaders_unchanged(void)
+{
+    check_unchanged(plain_vs2, sizeof (plain_vs2), "plain_vs2", plain_vs2_hlsl, plain_vs2_metal);
+    check_unchanged(plain_vs3, sizeof (plain_vs3), "plain_vs3", plain_vs3_hlsl, plain_vs3_metal);
+    check_unchanged(plain_ps3, sizeof (plain_ps3), "plain_ps3", plain_ps3_hlsl, plain_ps3_metal);
+} // test_unpacked_shaders_unchanged
+
 /* With an argument, runs only the case of that name (one case per process, so an abort on an
  * unfixed tree does not hide the others). */
 int main(int argc, char **argv)
 {
     static const struct { const char *name; void (*test)(void); } cases[] = {
-        { "loop_counts_iterations", test_loop_counts_iterations }
+        { "loop_counts_iterations", test_loop_counts_iterations },
+        { "packed_vertex_outputs", test_packed_vertex_outputs },
+        { "packed_fog_output", test_packed_fog_output },
+        { "packed_pixel_inputs", test_packed_pixel_inputs },
+        { "unpacked_shaders_unchanged", test_unpacked_shaders_unchanged }
     };
     size_t i;
     for (i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)

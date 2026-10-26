@@ -98,6 +98,88 @@ const char *get_METAL_uniform_array_varname(Context *ctx,
     return buf;
 } // get_METAL_uniform_array_varname
 
+// Shader Model 3 lets one vertex output or pixel input register carry several semantics in
+//  disjoint write masks, and the parser adds one attribute entry per semantic. Such a register
+//  is translated as the GLSL profile translates it: a float4 local of main, one struct member
+//  per semantic, and copies of each semantic's lanes (lane positions kept) at the end of main
+//  for outputs and at its start for inputs. A register with one semantic keeps the usual
+//  macro for its struct member. -CNA
+static int is_METAL_packed_register(Context *ctx, const RegisterType regtype,
+                                    const int regnum)
+{
+    const RegisterList *item;
+    int semantics = 0;
+
+    if (!shader_version_atleast(ctx, 3, 0))
+        return 0;
+    else if (shader_is_vertex(ctx) && (regtype != REG_TYPE_OUTPUT))
+        return 0;
+    else if (shader_is_pixel(ctx) && (regtype != REG_TYPE_INPUT))
+        return 0;
+
+    for (item = ctx->attributes.next; item != NULL; item = item->next)
+    {
+        if ((item->regtype == regtype) && (item->regnum == regnum))
+            semantics++;
+    } // for
+    return (semantics > 1);
+} // is_METAL_packed_register
+
+// isscalar() judges a register by its first semantic. A packed register is a float4 local
+//  even when that semantic is FOG, and its writes must keep their masks. -CNA
+static int isscalar_METAL(Context *ctx, const RegisterType regtype,
+                          const int regnum)
+{
+    if (is_METAL_packed_register(ctx, regtype, regnum))
+        return 0;
+    return isscalar(ctx, ctx->shader_type, regtype, regnum);
+} // isscalar_METAL
+
+static void get_METAL_writemask_suffix(const int writemask, char *buf,
+                                       const size_t len)
+{
+    size_t i = 0;
+    if ((writemask != 0xF) && (len >= 6))
+    {
+        buf[i++] = '.';
+        if (writemask & 0x1) buf[i++] = 'x';
+        if (writemask & 0x2) buf[i++] = 'y';
+        if (writemask & 0x4) buf[i++] = 'z';
+        if (writemask & 0x8) buf[i++] = 'w';
+    } // if
+    if (len > 0)
+        buf[(i < len) ? i : (len - 1)] = '\0';
+} // get_METAL_writemask_suffix
+
+// The user(...) name a vertex output and the matching fragment input share; 0 for a usage
+//  this profile does not pass between the stages. -CNA
+static int get_METAL_varying_name(const MOJOSHADER_usage usage, const int index,
+                                  char *buf, const size_t len)
+{
+    switch (usage)
+    {
+        case MOJOSHADER_USAGE_COLOR:
+            snprintf(buf, len, "color%d", index);
+            return 1;
+        case MOJOSHADER_USAGE_FOG:
+            snprintf(buf, len, "fog");
+            return 1;
+        case MOJOSHADER_USAGE_TEXCOORD:
+            snprintf(buf, len, "texcoord%d", index);
+            return 1;
+        case MOJOSHADER_USAGE_NORMAL:
+            // user(normal) stays NORMAL0's name; a second normal needs its own. -CNA
+            if (index == 0)
+                snprintf(buf, len, "normal");
+            else
+                snprintf(buf, len, "normal%d", index);
+            return 1;
+        default:
+            // !!! FIXME: we need to deal with some more built-in varyings here.
+            return 0;
+    } // switch
+} // get_METAL_varying_name
+
 const char *get_METAL_destarg_varname(Context *ctx, char *buf, size_t len)
 {
     const DestArgInfo *arg = &ctx->dest_arg;
@@ -195,7 +277,7 @@ const char *make_METAL_destarg_assign(Context *ctx, char *buf,
                                                        sizeof (regnum_str));
     char writemask_str[6];
     size_t i = 0;
-    const int scalar = isscalar(ctx, ctx->shader_type, arg->regtype, arg->regnum);
+    const int scalar = isscalar_METAL(ctx, arg->regtype, arg->regnum);
     if (!scalar && !writemask_xyzw(arg->writemask))
     {
         writemask_str[i++] = '.';
@@ -395,7 +477,7 @@ const char *make_METAL_srcarg_string(Context *ctx, const size_t idx,
     } // if
 
     char swiz_str[6] = { '\0' };
-    if (!isscalar(ctx, ctx->shader_type, arg->regtype, arg->regnum))
+    if (!isscalar_METAL(ctx, arg->regtype, arg->regnum))
     {
         make_METAL_swizzle_string(swiz_str, sizeof (swiz_str),
                                  arg->swizzle, writemask);
@@ -632,6 +714,7 @@ void emit_METAL_finalize(Context *ctx)
         output_blank_line(ctx);
         pop_output(ctx);
     } // if
+
 } // emit_METAL_finalize
 
 void emit_METAL_global(Context *ctx, RegisterType regtype, int regnum)
@@ -836,21 +919,77 @@ void emit_METAL_sampler(Context *ctx,int stage,TextureType ttype,int tb)
     } // if
 } // emit_METAL_sampler
 
+// One semantic of a packed register (see is_METAL_packed_register()). The member is named
+//  <register>_<varying>, so each semantic of the register gets its own. -CNA
+static void emit_METAL_packed_attribute(Context *ctx, const RegisterType regtype,
+                                        const int regnum,
+                                        const MOJOSHADER_usage usage,
+                                        const int index, const int wmask)
+{
+    const int vertex_output = shader_is_vertex(ctx);
+    const RegisterList *first = reglist_find(&ctx->attributes, regtype, regnum);
+    const int first_semantic = (first != NULL) && (first->usage == usage) &&
+                               (first->index == index);
+    char var[64];
+    char varying[32];
+    char member[128];
+    char mask[6];
+    int passed;
+
+    get_METAL_varname_in_buf(ctx, regtype, regnum, var, sizeof (var));
+    passed = get_METAL_varying_name(usage, index, varying, sizeof (varying));
+    snprintf(member, sizeof (member), "%s_%s", var, varying);
+    get_METAL_writemask_suffix(wmask, mask, sizeof (mask));
+
+    // Like an unpacked register's, a semantic Metal does not pass gets no member. -CNA
+    if (passed)
+    {
+        push_output(ctx, vertex_output ? &ctx->outputs : &ctx->inputs);
+        if (buffer_size(ctx->output) == 0)
+        {
+            output_line(ctx, "struct %s_%s", ctx->mainfn,
+                        vertex_output ? "Output" : "Input");
+            output_line(ctx, "{");
+        } // if
+        ctx->indent++;
+        output_line(ctx, "float4 %s [[user(%s)]];", member, varying);
+        pop_output(ctx);
+    } // if
+
+    // An input starts out as (0,0,0,1), like the GLSL profile's. -CNA
+    push_output(ctx, &ctx->mainline_top);
+    ctx->indent++;
+    if (first_semantic)
+    {
+        output_line(ctx, "float4 %s = float4(0.0, 0.0, 0.0, %s);",
+                    var, vertex_output ? "0.0" : "1.0");
+    } // if
+    if (passed && !vertex_output)
+        output_line(ctx, "%s%s = input.%s%s;", var, mask, member, mask);
+    pop_output(ctx);
+
+    // A vertex output is copied out at the end of main: finalize appends "return output;"
+    //  to mainline after these lines. -CNA
+    if (passed && vertex_output)
+    {
+        push_output(ctx, &ctx->mainline);
+        ctx->indent++;
+        output_line(ctx, "output.%s%s = %s%s;", member, mask, var, mask);
+        pop_output(ctx);
+    } // if
+} // emit_METAL_packed_attribute
+
 void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
                           MOJOSHADER_usage usage, int index, int wmask,
                           int flags)
 {
     // !!! FIXME: this function doesn't deal with write masks at all yet!
-    const char *usage_str = NULL;
-    char index_str[16] = { '\0' };
     char var[64];
+    char varying[32];
 
     get_METAL_varname_in_buf(ctx, regtype, regnum, var, sizeof (var));
 
     //assert((flags & MOD_PP) == 0);  // !!! FIXME: is PP allowed?
-
-    if (index != 0)  // !!! FIXME: a lot of these MUST be zero.
-        snprintf(index_str, sizeof (index_str), "%u", (uint) index);
 
     if (shader_is_vertex(ctx))
     {
@@ -917,6 +1056,9 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
             pop_output(ctx);
         } // if
 
+        else if (is_METAL_packed_register(ctx, regtype, regnum))
+            emit_METAL_packed_attribute(ctx, regtype, regnum, usage, index, wmask);
+
         else if (regtype == REG_TYPE_OUTPUT)
         {
             push_output(ctx, &ctx->outputs);
@@ -928,29 +1070,12 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             ctx->indent++;
 
-            switch (usage)
-            {
-                case MOJOSHADER_USAGE_POSITION:
-                    output_line(ctx, "float4 %s [[position]];", var);
-                    break;
-                case MOJOSHADER_USAGE_POINTSIZE:
-                    output_line(ctx, "float %s [[point_size]];", var);
-                    break;
-                case MOJOSHADER_USAGE_COLOR:
-                    output_line(ctx, "float4 %s [[user(color%d)]];", var, index);
-                    break;
-                case MOJOSHADER_USAGE_FOG:
-                    output_line(ctx, "float4 %s [[user(fog)]];", var);
-                    break;
-                case MOJOSHADER_USAGE_TEXCOORD:
-                    output_line(ctx, "float4 %s [[user(texcoord%d)]];", var, index);
-                    break;
-                case MOJOSHADER_USAGE_NORMAL:
-                    output_line(ctx, "float4 %s [[user(normal)]];", var);
-                default:
-                    // !!! FIXME: we need to deal with some more built-in varyings here.
-                    break;
-            } // switch
+            if (usage == MOJOSHADER_USAGE_POSITION)
+                output_line(ctx, "float4 %s [[position]];", var);
+            else if (usage == MOJOSHADER_USAGE_POINTSIZE)
+                output_line(ctx, "float %s [[point_size]];", var);
+            else if (get_METAL_varying_name(usage, index, varying, sizeof (varying)))
+                output_line(ctx, "float4 %s [[user(%s)]];", var, varying);
 
             pop_output(ctx);
 
@@ -1011,6 +1136,9 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
             pop_output(ctx);
         } // if
 
+        else if (is_METAL_packed_register(ctx, regtype, regnum))
+            emit_METAL_packed_attribute(ctx, regtype, regnum, usage, index, wmask);
+
         // !!! FIXME: can you actualy have a texture register with COLOR usage?
         else if ((regtype == REG_TYPE_TEXTURE) ||
                  (regtype == REG_TYPE_INPUT) ||
@@ -1038,23 +1166,13 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             else
             {
-                if (usage == MOJOSHADER_USAGE_TEXCOORD)
-                {
-                    // ps_1_1 does a different hack for this attribute.
-                    //  Refer to emit_METAL_global()'s REG_TYPE_ADDRESS code.
-                    if (!shader_version_atleast(ctx, 1, 4))
-                        skipreference = 1;
-                    output_line(ctx, "float4 %s [[user(texcoord%d)]];", var, index);
-                } // if
-
-                else if (usage == MOJOSHADER_USAGE_COLOR)
-                    output_line(ctx, "float4 %s [[user(color%d)]];", var, index);
-
-                else if (usage == MOJOSHADER_USAGE_FOG)
-                    output_line(ctx, "float4 %s [[user(fog)]];", var);
-
-                else if (usage == MOJOSHADER_USAGE_NORMAL)
-                    output_line(ctx, "float4 %s [[user(normal)]];", var);
+                // ps_1_1 does a different hack for this attribute.
+                //  Refer to emit_METAL_global()'s REG_TYPE_ADDRESS code.
+                if ((usage == MOJOSHADER_USAGE_TEXCOORD) &&
+                    !shader_version_atleast(ctx, 1, 4))
+                    skipreference = 1;
+                if (get_METAL_varying_name(usage, index, varying, sizeof (varying)))
+                    output_line(ctx, "float4 %s [[user(%s)]];", var, varying);
             } // else
 
             pop_output(ctx);
