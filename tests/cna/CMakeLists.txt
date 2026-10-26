@@ -3,8 +3,9 @@
 # The library is compiled again here, separately from the `mojoshader` target, with every source
 # profile on -- HLSL and Metal included, whatever the host -- and with the switches FNA3D builds
 # MojoShader with, so each emitter is exercised on any machine that can run CMake and a C99
-# compiler. The OpenGL glue is compiled (it needs no GL at build time); the Direct3D 11 glue is not,
-# since it needs d3d11.h; the SDL_GPU glue only when an SDL3 package is found (see the end).
+# compiler. The OpenGL glue is compiled (it needs no GL at build time); the Direct3D 11 glue only
+# into cna_d3d11_tests, against a stand-in d3d11.h; the SDL_GPU glue only when an SDL3 package is
+# found (see the end).
 
 set(_cna_mojoshader_dir "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(_cna_mojoshader_sources
@@ -122,6 +123,14 @@ mojoshader_cna_test(cna_printfloat_tests)
 
 # Every profile's translation while each of its allocations fails in turn.
 mojoshader_cna_test(cna_alloc_tests)
+
+# The Direct3D 11 glue, compiled against a stand-in d3d11.h (d3d11-stub/) and driven through a
+# fake device and context; the real header and API only exist on Windows, where this is not built.
+if(NOT WIN32)
+    mojoshader_cna_test(cna_d3d11_tests)
+    target_include_directories(cna_d3d11_tests BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/d3d11-stub")
+    target_link_libraries(cna_d3d11_tests PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 # The SDL_GPU glue, when find_package() finds an SDL3 package (CMAKE_PREFIX_PATH). It is built as
 # FNA3D builds it on SDL3 -- USE_SDL3 and SDL's standard library (MOJOSHADER_USE_SDL_STDLIB) -- so

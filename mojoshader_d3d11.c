@@ -802,28 +802,34 @@ MOJOSHADER_d3d11Shader *MOJOSHADER_d3d11CompileShader(MOJOSHADER_d3d11Context *c
         } // for
         retval->buflen += 32 * retval->texbemCount;  // see update_uniform_buffer() -CNA
 
+        // The CPU-side staging buffer comes first: update_uniform_buffer() maps the GPU buffer
+        //  only when the uniforms differ from it, so the buffer is created holding it. Created
+        //  without initial data, its contents were undefined until a uniform or the bump
+        //  environment first changed, and a draw with them all still zero read garbage. -CNA
+        const UINT bytewidth = (UINT) next_highest_alignment(retval->buflen);
+        retval->constantData = (unsigned char *) m(bytewidth, d);
+        if (retval->constantData == NULL)  // -CNA
+        {
+            out_of_memory();
+            f(retval->shaderMaps, d);
+            f(retval, d);
+            goto compile_shader_fail;
+        } // if
+        memset(retval->constantData, '\0', bytewidth);
+
         D3D11_BUFFER_DESC bdesc;
-        bdesc.ByteWidth = next_highest_alignment(retval->buflen);
+        bdesc.ByteWidth = bytewidth;
         bdesc.Usage = D3D11_USAGE_DYNAMIC;
         bdesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bdesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         bdesc.MiscFlags = 0;
         bdesc.StructureByteStride = 0;
-        ID3D11Device_CreateBuffer((ID3D11Device*) ctx->device, &bdesc, NULL,
+        D3D11_SUBRESOURCE_DATA initial;
+        initial.pSysMem = retval->constantData;
+        initial.SysMemPitch = 0;
+        initial.SysMemSlicePitch = 0;
+        ID3D11Device_CreateBuffer((ID3D11Device*) ctx->device, &bdesc, &initial,
                                   (ID3D11Buffer**) &retval->ubo);
-
-        // Additionally allocate a CPU-side staging buffer
-        retval->constantData = (unsigned char *) m(retval->buflen, d);
-        if (retval->constantData == NULL)  // -CNA
-        {
-            out_of_memory();
-            if (retval->ubo != NULL)
-                ID3D11Buffer_Release((ID3D11Buffer*) retval->ubo);
-            f(retval->shaderMaps, d);
-            f(retval, d);
-            goto compile_shader_fail;
-        } // if
-        memset(retval->constantData, '\0', retval->buflen);
     } // if
 
     return retval;
@@ -861,10 +867,10 @@ void MOJOSHADER_d3d11DeleteShader(
             } // if
 
             if (shader->ubo != NULL)
-            {
                 ID3D11Buffer_Release((ID3D11Buffer*) shader->ubo);
+            // Also when CreateBuffer() made no buffer of it. -CNA
+            if (shader->constantData != NULL)
                 ctx->free_fn(shader->constantData, ctx->malloc_data);
-            } // if
 
             if (shader->parseData->shader_type == MOJOSHADER_TYPE_VERTEX)
             {
