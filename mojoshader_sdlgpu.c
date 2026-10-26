@@ -739,6 +739,7 @@ static MOJOSHADER_sdlProgram *compile_program(
             if (!pshaderSource)
             {
                 out_of_memory();
+                ctx->free_fn(program, ctx->malloc_data);  // as every later failure does -CNA
                 return NULL;
             }
             strcpy(pshaderSource, pshader->parseData->output);
@@ -958,7 +959,10 @@ MOJOSHADER_sdlProgram *MOJOSHADER_sdlLinkProgram(
 
     if (item == NULL)
     {
+        // The program was destroyed; returning here, not copying the key into NULL. -CNA
         destroy_program(ctx, program);
+        out_of_memory();
+        return NULL;
     }
 
     memcpy(item, &shaders, sizeof(LinkedShaderData));

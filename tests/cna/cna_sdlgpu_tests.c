@@ -45,6 +45,14 @@ static const uint32_t position_vs2[] = {
     CNA_END
 };
 
+/* vs_2_0 reading one uniform: add oPos, v0, c0. */
+static const uint32_t uniform_vs2[] = {
+    CNA_VS(2, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(CNA_ADD, 3), CNA_DST(CNA_RASTOUT, 0, 15), CNA_SRC(CNA_INPUT, 0), CNA_SRC(CNA_CONST, 0),
+    CNA_END
+};
+
 /* ps_2_0 writing a constant colour: def c0, r, g, b, 1; mov oC0, c0. */
 #define CNA_COLOR_PS2(r, g, b) { \
     CNA_PS(2, 0), \
@@ -664,6 +672,113 @@ static void test_shadercross_outlives_native_context(void)
     CNA_CHECK((a.live == 0) && (b.live == 0), "both contexts returned everything they allocated");
 } // test_shadercross_outlives_native_context
 
+/*
+ * A2v2 A-06: whichever allocation of a link is refused -- the cache, the program, its cache key,
+ * the cache entry -- the link fails cleanly or succeeds, the next link of the pair succeeds, and
+ * everything is returned. The sweep refuses the first allocation of the link, then the second,
+ * and so on, each in a fresh context, until a link refuses none.
+ */
+static void test_link_allocation_failures(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx;
+    MOJOSHADER_sdlShaderData *vs, *ps;
+    MOJOSHADER_sdlProgram *p;
+    char label[128];
+    int k, refused = 1;
+
+    for (k = 0; refused && (k < 64); k++)
+    {
+        ctx = make_context(gpu_device, &a);
+        if (ctx == NULL)
+        {
+            CNA_CHECK(0, "a context is made");
+            return;
+        } // if
+        vs = compile(ctx, position_vs2, sizeof (position_vs2));
+        ps = compile(ctx, red_ps2, sizeof (red_ps2));
+        CNA_CHECK(vs && ps, "the shaders compile");
+        if (vs && ps)
+        {
+            a.fail_after = k;
+            p = link_pair(ctx, vs, ps);
+            a.fail_after = -1;
+            refused = (a.failed > 0);
+            snprintf(label, sizeof (label), "allocation %d refused: the pair links on retry", k);
+            if (!refused)
+                CNA_CHECK(p != NULL, "with no allocation refused, the pair links");
+            else
+                CNA_CHECK(link_pair(ctx, vs, ps) != NULL, label);
+            if (refused && (p == NULL))
+            {
+                snprintf(label, sizeof (label), "allocation %d refused: out of memory", k);
+                CNA_CHECK(error_contains("out of memory"), label);
+            } // if
+        } // if
+        MOJOSHADER_sdlDeleteShader(ctx, vs);
+        MOJOSHADER_sdlDeleteShader(ctx, ps);
+        MOJOSHADER_sdlDestroyContext(ctx);
+        snprintf(label, sizeof (label), "allocation %d refused: everything returned", k);
+        CNA_CHECK(a.live == 0, label);
+    } // for
+    CNA_CHECK(!refused, "the sweep reached a link that refused nothing");
+    printf("  (a link allocated %d time(s))\n", k - 1);
+} // test_link_allocation_failures
+
+/* A2v2 A-06 (fixed in 0c671bc): a refused uniform staging buffer stages and pushes nothing. */
+static void test_uniform_staging_allocation_failure(void)
+{
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(gpu_device, &a);
+    MOJOSHADER_sdlShaderData *vs, *ps;
+    SDL_GPUCommandBuffer *cb;
+    float *vsf, *psf;
+    int *vsi, *psi;
+    unsigned char *vsb, *psb;
+    static const float c0[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+
+    if (ctx == NULL)
+    {
+        CNA_CHECK(0, "a context is made");
+        return;
+    } // if
+    vs = compile(ctx, uniform_vs2, sizeof (uniform_vs2));
+    ps = compile(ctx, red_ps2, sizeof (red_ps2));
+    CNA_CHECK(vs && ps, "the shaders compile");
+    if (vs && ps)
+    {
+        CNA_CHECK((MOJOSHADER_sdlGetUniformBufferSize(vs) == 16) &&
+                  (MOJOSHADER_sdlGetUniformBufferSize(ps) == 0),
+                  "only the vertex shader has uniforms");
+        CNA_CHECK(link_pair(ctx, vs, ps) != NULL, "the pair links");
+        cb = SDL_AcquireGPUCommandBuffer(gpu_device);
+        CNA_CHECK(cb != NULL, "a command buffer");
+        if ((cb != NULL) && (ctx->bound_program != NULL))
+        {
+            MOJOSHADER_sdlMapUniformBufferMemory(ctx, &vsf, &vsi, &vsb, &psf, &psi, &psb);
+            memcpy(vsf, c0, sizeof (c0));
+            MOJOSHADER_sdlUnmapUniformBufferMemory(ctx);
+
+            a.fail_after = 0;
+            MOJOSHADER_sdlUpdateUniformBuffers(ctx, cb);
+            CNA_CHECK(a.failed == 1, "the staging buffer's allocation is refused");
+            CNA_CHECK((ctx->uniform_staging == NULL) && (ctx->uniform_staging_length == 0),
+                      "... and nothing is staged");
+
+            MOJOSHADER_sdlUpdateUniformBuffers(ctx, cb);
+            CNA_CHECK((ctx->uniform_staging != NULL) &&
+                      (memcmp(ctx->uniform_staging, c0, sizeof (c0)) == 0),
+                      "the next update stages c0");
+            SDL_SubmitGPUCommandBuffer(cb);
+        } // if
+    } // if
+
+    MOJOSHADER_sdlDeleteShader(ctx, vs);
+    MOJOSHADER_sdlDeleteShader(ctx, ps);
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "the context returned everything it allocated");
+} // test_uniform_staging_allocation_failure
+
 /* -- Driver -------------------------------------------------------------------------------- */
 
 static int open_device(void)
@@ -731,6 +846,8 @@ static const TestCase test_cases[] = {
     { "shader_identity_after_65536_compiles", test_shader_identity_after_65536_compiles, 1 },
     { "shader_identity_high_bits", test_shader_identity_high_bits, 1 },
     { "shadercross_outlives_native_context", test_shadercross_outlives_native_context, 1 },
+    { "link_allocation_failures", test_link_allocation_failures, 1 },
+    { "uniform_staging_allocation_failure", test_uniform_staging_allocation_failure, 1 },
 };
 
 /* Every case, or with arguments only the cases they name. */
