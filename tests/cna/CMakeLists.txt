@@ -167,6 +167,16 @@ if(TARGET SDL3::SDL3)
     target_link_libraries(cna_sdlgpu_tests PRIVATE mojoshader_cna_sdl)
     add_test(NAME cna_sdlgpu_tests COMMAND cna_sdlgpu_tests)
 
+    # The statically linked SDL_shadercross path (CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC, as
+    # FNA3D's MOJOSHADER_STATIC_SPIRVCROSS selects it), against a stand-in header
+    # (shadercross-stub/) and ShaderCross functions the test defines itself. No device.
+    add_executable(cna_sdlgpu_static_tests cna_sdlgpu_static_tests.c)
+    target_compile_definitions(cna_sdlgpu_static_tests PRIVATE CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
+    target_include_directories(cna_sdlgpu_static_tests BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/shadercross-stub")
+    target_link_libraries(cna_sdlgpu_static_tests PRIVATE mojoshader_cna_sdl)
+    add_test(NAME cna_sdlgpu_static_tests COMMAND cna_sdlgpu_static_tests)
+
     # A real libSDL3_shadercross.so.0 replaces the stand-in on the test's library path when
     # MOJOSHADER_CNA_SDL_SHADERCROSS_DIR names its directory; shadercross_links_on_device then
     # links through it on the device.

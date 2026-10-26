@@ -465,12 +465,18 @@ MOJOSHADER_sdlContext *MOJOSHADER_sdlCreateContext(
     resultCtx->profile = (shader_format == SDL_GPU_SHADERFORMAT_SPIRV) ? "spirv" : "metal";
 
     // We only care about ShaderCross if the device doesn't natively support the profile
+    //
+    // MojoShader never calls SDL_ShaderCross_Init() or SDL_ShaderCross_Quit(): both are the
+    // process's, and not reference-counted, so pairing them here would unload d3dcompiler under
+    // an application that initialized ShaderCross itself (as CNA's SDL_GPU renderer does). DXBC
+    // is offered only after the application's SDL_ShaderCross_Init(); see mojoshader.h. -CNA
     if (!(SDL_GetGPUShaderFormats(device) & shader_format))
     {
 #if defined(CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC)
         if (!(SDL_GetGPUShaderFormats(device) & SDL_ShaderCross_GetSPIRVShaderFormats()))
         {
-            set_error("SDL_shadercross cannot compile SPIR-V for the active SDL_gpu device");
+            set_error("SDL_shadercross cannot compile SPIR-V for the active SDL_gpu device "
+                      "(for DXBC, call SDL_ShaderCross_Init() before creating it)");
             goto init_fail;
         } // if
         resultCtx->use_shadercross = 1;

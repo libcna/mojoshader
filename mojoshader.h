@@ -2091,6 +2091,20 @@ typedef struct SDL_GPUCommandBuffer SDL_GPUCommandBuffer;
  * Call this function to get the 'formatFlags' parameter for
  *  SDL_CreateGPUDevice.
  *
+ * A device that does not take MojoShader's own format (SPIR-V, or MSL on Apple
+ *  platforms) gets its shaders through SDL_shadercross, and the formats it
+ *  offers are included here. SDL_shadercross offers DXBC only once
+ *  SDL_ShaderCross_Init() has loaded d3dcompiler, and MojoShader never calls
+ *  SDL_ShaderCross_Init() or SDL_ShaderCross_Quit() itself: both act on the
+ *  whole process and are not reference-counted, so a library pairing them
+ *  could unload the compiler under an application that uses SDL_shadercross
+ *  too. An application that wants DXBC calls SDL_ShaderCross_Init() before
+ *  this function and MOJOSHADER_sdlCreateContext(), and SDL_ShaderCross_Quit()
+ *  only after its last MOJOSHADER_sdlContext is destroyed. Where MojoShader
+ *  loads the shared SDL_shadercross library itself (a build without
+ *  CNA_MOJOSHADER_SDL_GPU_SHADERCROSS_STATIC), that is the library the
+ *  application must have initialized.
+ *
  * Returns the SDL_GPUShaderFormatFlagBits for creating the SDL_GPUDevice.
  */
 DECLSPEC unsigned int MOJOSHADER_sdlGetShaderFormats(void);
@@ -2104,6 +2118,12 @@ DECLSPEC unsigned int MOJOSHADER_sdlGetShaderFormats(void);
  *
  * You can only have one MOJOSHADER_sdlContext per actual SDL_gpu context, or
  *  undefined behaviour will result.
+ *
+ * A device that takes no format MojoShader writes needs SDL_shadercross, and,
+ *  for DXBC, the application's own SDL_ShaderCross_Init() first (see
+ *  MOJOSHADER_sdlGetShaderFormats()); MojoShader neither initializes nor
+ *  quits SDL_shadercross. With a statically linked SDL_shadercross, a context
+ *  for a device it cannot serve is refused.
  *
  * As MojoShader requires some memory to be allocated, you may provide a
  *  custom allocator to this function, which will be used to allocate/free
