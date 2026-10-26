@@ -681,6 +681,11 @@ void MOJOSHADER_spirv_link_attributes(const MOJOSHADER_parseData *vertex,
 // while a SPIR-V shader is emitted, owned by the parse context until the patch table is appended
 // to a parse's output, and by that parse data afterwards. -CNA
 void MOJOSHADER_spirv_free_patch_table(SpirvPatchTable *table, MOJOSHADER_free f, void *d);
+
+// A SPIR-V parse's output is the module followed by its patch table, at the module's 4-byte
+// end, which is not necessarily aligned for the table's pointers: it is only ever read through
+// a copy. -CNA
+void MOJOSHADER_spirv_get_patch_table(const MOJOSHADER_parseData *pd, SpirvPatchTable *table);
 #endif
 
 #endif  // _INCLUDE_MOJOSHADER_INTERNAL_H_

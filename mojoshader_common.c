@@ -1336,6 +1336,12 @@ void MOJOSHADER_spirv_free_patch_table(SpirvPatchTable *table, MOJOSHADER_free f
     } // for
 } // MOJOSHADER_spirv_free_patch_table
 
+void MOJOSHADER_spirv_get_patch_table(const MOJOSHADER_parseData *pd, SpirvPatchTable *table)
+{
+    const size_t at = (size_t) pd->output_len - sizeof (SpirvPatchTable);
+    memcpy(table, pd->output + at, sizeof (SpirvPatchTable));
+} // MOJOSHADER_spirv_get_patch_table
+
 void MOJOSHADER_spirv_link_attributes(const MOJOSHADER_parseData *vertex,
                                       const MOJOSHADER_parseData *pixel,
                                       int is_glspirv)
@@ -1343,10 +1349,11 @@ void MOJOSHADER_spirv_link_attributes(const MOJOSHADER_parseData *vertex,
     int i;
     uint32 attr_loc = 0;
     uint32 vOffset, pOffset;
-    int vDataLen = vertex->output_len - sizeof(SpirvPatchTable);
-    int pDataLen = pixel->output_len - sizeof(SpirvPatchTable);
-    SpirvPatchTable *vTable = (SpirvPatchTable *) &vertex->output[vDataLen];
-    SpirvPatchTable *pTable = (SpirvPatchTable *) &pixel->output[pDataLen];
+    SpirvPatchTable vTableCopy, pTableCopy;
+    const SpirvPatchTable *vTable = &vTableCopy;
+    const SpirvPatchTable *pTable = &pTableCopy;
+    MOJOSHADER_spirv_get_patch_table(vertex, &vTableCopy);
+    MOJOSHADER_spirv_get_patch_table(pixel, &pTableCopy);
     const uint32 texcoord0Loc = pTable->attrib_offsets[MOJOSHADER_USAGE_TEXCOORD][0];
 
     if (is_glspirv)

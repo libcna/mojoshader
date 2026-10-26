@@ -457,11 +457,9 @@ static int impl_GLSL_MaxUniforms(MOJOSHADER_shaderType shader_type)
 } // impl_GLSL_MaxUniforms
 
 #if SUPPORT_PROFILE_GLSPIRV
-static const SpirvPatchTable* spv_getPatchTable(MOJOSHADER_glShader *shader)
+static void spv_getPatchTable(MOJOSHADER_glShader *shader, SpirvPatchTable *table)
 {
-    const MOJOSHADER_parseData *pd = shader->parseData;
-    size_t table_offset = pd->output_len - sizeof(SpirvPatchTable);
-    return (const SpirvPatchTable *) (pd->output + table_offset);
+    MOJOSHADER_spirv_get_patch_table(shader->parseData, table);
 } // spv_getPatchTable
 
 static int spv_CompileShader(const MOJOSHADER_parseData *pd, int32 base_location, GLuint *s)
@@ -477,7 +475,9 @@ static int spv_CompileShader(const MOJOSHADER_parseData *pd, int32 base_location
 
         patched_data = (uint32 *) Malloc(data_len);
         memcpy(patched_data, data, data_len);
-        const SpirvPatchTable *table = (const SpirvPatchTable *) &pd->output[data_len];
+        SpirvPatchTable tableCopy;
+        const SpirvPatchTable *table = &tableCopy;
+        MOJOSHADER_spirv_get_patch_table(pd, &tableCopy);
         if (table->vpflip.offset)      patched_data[table->vpflip.offset]      += base_location;
         if (table->array_vec4.offset)  patched_data[table->array_vec4.offset]  += base_location;
         if (table->array_ivec4.offset) patched_data[table->array_ivec4.offset] += base_location;
@@ -542,8 +542,9 @@ static GLuint impl_SPIRV_LinkProgram(MOJOSHADER_glShader *vshader,
         if (!spv_CompileShader(vshader->parseData, base_location, &vs_handle))
             return 0;
 
-        const SpirvPatchTable* patch_table = spv_getPatchTable(vshader);
-        base_location += patch_table->location_count;
+        SpirvPatchTable patch_table;
+        spv_getPatchTable(vshader, &patch_table);
+        base_location += patch_table.location_count;
     } // if
 
     GLuint ps_handle = 0;
@@ -633,22 +634,29 @@ static GLint impl_SPIRV_GetUniformLocation(MOJOSHADER_glProgram *program, MOJOSH
 
 static GLint impl_SPIRV_GetSamplerLocation(MOJOSHADER_glProgram *program, MOJOSHADER_glShader *shader, int idx)
 {
-    const SpirvPatchTable *table = spv_getPatchTable(shader);
-    GLint location = table->samplers[idx].location;
+    SpirvPatchTable table;
+    spv_getPatchTable(shader, &table);
+    GLint location = table.samplers[idx].location;
     if (location == -1)
         return location;
 
     assert(location >= 0);
     if (shader->parseData->shader_type == MOJOSHADER_TYPE_PIXEL)
-        location += spv_getPatchTable(program->vertex)->location_count;
+    {
+        spv_getPatchTable(program->vertex, &table);
+        location += table.location_count;
+    } // if
 
     return location;
 } // impl_SPIRV_GetSamplerLocation
 
 static void impl_SPIRV_FinalInitProgram(MOJOSHADER_glProgram *program)
 {
-    const SpirvPatchTable *vs_table = spv_getPatchTable(program->vertex);
-    const SpirvPatchTable *ps_table = spv_getPatchTable(program->fragment);
+    SpirvPatchTable vs_tableCopy, ps_tableCopy;
+    const SpirvPatchTable *vs_table = &vs_tableCopy;
+    const SpirvPatchTable *ps_table = &ps_tableCopy;
+    spv_getPatchTable(program->vertex, &vs_tableCopy);
+    spv_getPatchTable(program->fragment, &ps_tableCopy);
     program->vs_float4_loc = vs_table->array_vec4.location;
     program->vs_int4_loc   = vs_table->array_ivec4.location;
     program->vs_bool_loc   = vs_table->array_bool.location;

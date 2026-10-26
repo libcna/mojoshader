@@ -5659,9 +5659,10 @@ static MOJOSHADER_parseData *build_parsedata(Context *ctx)
          || strcmp(retval->profile, MOJOSHADER_PROFILE_GLSPIRV) == 0)
         {
             size_t i, max;
-            int binary_size = retval->output_len - sizeof(SpirvPatchTable);
             uint32 *binary = (uint32 *) retval->output;
-            SpirvPatchTable *table = (SpirvPatchTable *) &retval->output[binary_size];
+            SpirvPatchTable tableCopy;
+            const SpirvPatchTable *table = &tableCopy;
+            MOJOSHADER_spirv_get_patch_table(retval, &tableCopy);
 
             if (table->vpflip.offset)      binary[table->vpflip.offset]      = table->vpflip.location;
             if (table->array_vec4.offset)  binary[table->array_vec4.offset]  = table->array_vec4.location;
@@ -6079,11 +6080,8 @@ void MOJOSHADER_freeParseData(const MOJOSHADER_parseData *_data)
          (strcmp(data->profile, MOJOSHADER_PROFILE_GLSPIRV) == 0)))
     {
         SpirvPatchTable table;
-        const size_t at = (size_t) data->output_len - sizeof (SpirvPatchTable);
-        // The table follows the module at a 4-byte, not necessarily pointer-aligned, offset.
-        memcpy(&table, data->output + at, sizeof (table));
+        MOJOSHADER_spirv_get_patch_table(data, &table);
         MOJOSHADER_spirv_free_patch_table(&table, f, d);
-        memcpy((char *) data->output + at, &table, sizeof (table));
     } // if
 #endif
 
@@ -6216,8 +6214,9 @@ int MOJOSHADER_linkSPIRVShaders(const MOJOSHADER_parseData *vertex_spirv,
     // BYTE4  - 5
     // SHORT2 - 6
     // SHORT4 - 7
-    int vDataLen = vertex_spirv->output_len - sizeof(SpirvPatchTable);
-    SpirvPatchTable *vTable = (SpirvPatchTable *) &vertex_spirv->output[vDataLen];
+    SpirvPatchTable vTableCopy;
+    const SpirvPatchTable *vTable = &vTableCopy;
+    MOJOSHADER_spirv_get_patch_table(vertex_spirv, &vTableCopy);
 
     for (int i = 0; i < vertexAttributeCount; i += 1)
     {
