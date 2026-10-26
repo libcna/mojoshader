@@ -1,5 +1,5 @@
 /**
- * HLSL and Metal emitter regressions (A2v2 A-12, A-02).
+ * HLSL and Metal emitter regressions (A2v2 A-12, A-02, A-03).
  *
  * Every case translates a valid shader with both profiles and checks the structure of the
  * source. Where the shaderc library was found at configure time ($MOJOSHADER_SHADERC), the HLSL
@@ -19,9 +19,16 @@
 
 #include "cna_test.h"
 
+#define CNA_F1 0x3f800000u  /* 1.0f */
+#define CNA_FHALF 0x3f000000u  /* 0.5f */
+
 /* D3DDECLUSAGE_* values a DCL token carries. */
 enum { CNA_POSITION = 0, CNA_TEXCOORD = 5, CNA_COLOR = 10, CNA_FOG = 11 };
 
+#define CNA_MOVA 46  /* D3DSIO_MOVA */
+
+/* dcl_2d s# (D3DSTT_2D in bits 27-30). */
+#define CNA_DCL_2D (0x80000000u | (2u << 27))
 
 static const char *const cna_profiles[] = { MOJOSHADER_PROFILE_HLSL, MOJOSHADER_PROFILE_METAL };
 
@@ -528,6 +535,336 @@ static void test_unpacked_shaders_unchanged(void)
     check_unchanged(plain_ps3, sizeof (plain_ps3), "plain_ps3", plain_ps3_hlsl, plain_ps3_metal);
 } // test_unpacked_shaders_unchanged
 
+/* -- A-03: subroutines --------------------------------------------------------------------- */
+
+/* vs_2_0: main calls l0 and returns; l0, defined after it, writes both outputs. */
+static const uint32_t forward_subroutine_vs2[] = {
+    CNA_VS(2, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_ATTROUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_END
+};
+
+static void test_forward_subroutine(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, forward_subroutine_vs2,
+            sizeof (forward_subroutine_vs2), "forward_subroutine");
+        const long main_at = cna_main_offset(pd);
+        const long body_at = cna_offset(pd, "oPos = v0;", 0);
+        const long definition_at = cna_offset(pd, "void l0(l0_PARAMETERS)\n{", 0);
+
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_braces_balance(pd), "braces balance");
+        CNA_CHECK(main_at > 0, "main is emitted");
+        CNA_CHECK(cna_output_count(pd, "oPos = v0;") == 1, "the subroutine body is emitted once");
+        CNA_CHECK((definition_at >= 0) && (definition_at < body_at) && (body_at < main_at),
+                  "the subroutine is defined before and outside main");
+        CNA_CHECK(cna_offset(pd, "l0(l0_ARGUMENTS);", main_at) > main_at, "main calls l0");
+        CNA_CHECK(cna_output_count(pd, "void l0(l0_PARAMETERS);") == 1, "l0 has one prototype");
+        /* The subroutine reaches the output struct and the input through its parameters, and
+         * the register macros are defined before it. */
+        CNA_CHECK(cna_output_contains(pd, metal
+            ? "#define l0_PARAMETERS main_Input input, thread main_Output &output\n"
+            : "#define l0_PARAMETERS main_Input input, inout main_Output output\n"),
+            "l0 receives the input and output structs");
+        CNA_CHECK(cna_output_contains(pd, "#define l0_ARGUMENTS input, output\n"),
+                  "the call passes them");
+        CNA_CHECK((cna_offset(pd, metal ? "#define oPos output.oPos" : "#define oPos output.m_oPos", 0) >= 0) &&
+                  (cna_offset(pd, metal ? "#define oPos output.oPos" : "#define oPos output.m_oPos", 0) < definition_at),
+                  "the register macros precede the subroutine");
+        if (metal)
+        {
+            const long clamp_at = cna_offset(pd, "oD0 = clamp(oD0, 0.0, 1.0);", 0);
+            CNA_CHECK((clamp_at > main_at) && (clamp_at < cna_offset(pd, "return output;", 0)),
+                      "Metal still clamps oD0 at the end of main");
+        } // if
+        cna_check_hlsl_compiles(pd, profile, "forward_subroutine");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_forward_subroutine
+
+/*
+ * vs_3_0, several and nested subroutines: l0 calls l1 (defined after it), l2 writes a temporary
+ * main reads back, and l3 is called inside a loop and calls l4, which therefore also receives
+ * aL although it is not lexically inside a loop. l1 and l4 read a DEF constant, l2 a uniform.
+ */
+static const uint32_t nested_subroutines_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DEF, 5), CNA_DST(CNA_CONST, 0, 0xF), CNA_FHALF, CNA_FHALF, CNA_FHALF, CNA_F1,
+    CNA_OP(CNA_DEFI, 5), CNA_DST(CNA_CONSTINT, 0, 0xF), 2, 0, 1, 0,
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 1, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 1), CNA_DST(CNA_OUTPUT, 2, 0xF),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_TEMP, 3, 0xF), CNA_SRC(CNA_CONST, 0),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 2),
+    CNA_OP(CNA_LOOP_OP, 2), CNA_SRC(CNA_LOOP, 0), CNA_SRC(CNA_CONSTINT, 0),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 3),
+    CNA_OP(CNA_ENDLOOP, 0),
+    CNA_OP(CNA_ADD, 3), CNA_DST(CNA_OUTPUT, 2, 0xF), CNA_SRC(CNA_TEMP, 1), CNA_SRC(CNA_TEMP, 3),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 1),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 1),
+    CNA_OP(CNA_MUL, 3), CNA_DST(CNA_TEMP, 0, 0xF), CNA_SRC(CNA_INPUT, 0), CNA_SRC(CNA_CONST, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xF), CNA_SRC(CNA_TEMP, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 2),
+    CNA_OP(CNA_MUL, 3), CNA_DST(CNA_TEMP, 1, 0xF), CNA_SRC(CNA_INPUT, 0), CNA_SRC(CNA_CONST, 1),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 3),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 4),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 4),
+    CNA_OP(CNA_ADD, 3), CNA_DST(CNA_TEMP, 3, 0xF), CNA_SRC(CNA_TEMP, 3), CNA_SRC(CNA_CONST, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_END
+};
+
+static void test_nested_subroutines(void)
+{
+    static const char *const bodies[] = {
+        "l1(l1_ARGUMENTS);", "o0 = v0;", "r0 = v0 * c0;", "o1 = r0;", "r1 = v0 * c1;",
+        "l4(l4_ARGUMENTS);", "r3 = r3 + c0;"
+    };
+    size_t i, j;
+    char text[128];
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, nested_subroutines_vs3,
+            sizeof (nested_subroutines_vs3), "nested_subroutines");
+        const long main_at = cna_main_offset(pd);
+
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_braces_balance(pd), "braces balance");
+        for (j = 0; j < sizeof (bodies) / sizeof (bodies[0]); j++)
+        {
+            CNA_CHECK(cna_output_count(pd, bodies[j]) == 1, bodies[j]);
+            CNA_CHECK((cna_offset(pd, bodies[j], 0) >= 0) && (cna_offset(pd, bodies[j], 0) < main_at),
+                      "a subroutine statement is outside main");
+        } // for
+        for (j = 0; j <= 4; j++)
+        {
+            snprintf(text, sizeof (text), "void l%u(l%u_PARAMETERS);", (unsigned) j, (unsigned) j);
+            CNA_CHECK(cna_output_count(pd, text) == 1, "every subroutine has a prototype");
+            const long prototype_at = cna_offset(pd, text, 0);
+            snprintf(text, sizeof (text), "void l%u(l%u_PARAMETERS)\n{", (unsigned) j, (unsigned) j);
+            CNA_CHECK(cna_output_count(pd, text) == 1, "every subroutine is defined once");
+            CNA_CHECK((prototype_at >= 0) && (prototype_at < cna_offset(pd, "void l0(l0_PARAMETERS)\n{", 0)),
+                      "the prototypes precede every definition");
+        } // for
+
+        /* Main's calls, and the loop-inheriting ones that pass aL. */
+        CNA_CHECK(cna_offset(pd, "l0(l0_ARGUMENTS);", main_at) > main_at, "main calls l0");
+        CNA_CHECK(cna_offset(pd, "l3(l3_ARGUMENTS);", main_at) > main_at, "main calls l3");
+        CNA_CHECK(cna_output_contains(pd, metal ? "#define l3_PARAMETERS int aL, " : "#define l3_PARAMETERS int aL, "),
+                  "l3, called in a loop, takes aL");
+        CNA_CHECK(cna_output_contains(pd, "#define l4_PARAMETERS int aL, "),
+                  "l4, called from l3, takes aL too");
+        CNA_CHECK(cna_output_contains(pd, "#define l4_ARGUMENTS aL, "), "and l3 passes it");
+        CNA_CHECK(cna_output_contains(pd, "#define l0_PARAMETERS main_Input input, ") ||
+                  cna_output_contains(pd, "#define l0_PARAMETERS constant main_Uniforms &uniforms, main_Input input, "),
+                  "l0 does not take aL");
+        /* The temporaries and the DEF constant main declares reach the subroutines. */
+        CNA_CHECK(cna_output_contains(pd, metal ? "thread float4 &r0, thread float4 &r1, thread float4 &r3"
+                                                : "inout float4 r0, inout float4 r1, inout float4 r3"),
+                  "the temporaries are passed by reference");
+        CNA_CHECK(cna_output_contains(pd, ", const float4 c0") && cna_output_contains(pd, ", const int4 i0"),
+                  "the DEF constants are passed");
+        if (metal)
+            CNA_CHECK(cna_output_contains(pd, "#define l2_PARAMETERS constant main_Uniforms &uniforms, "),
+                      "Metal passes the uniform buffer");
+        cna_check_hlsl_compiles(pd, profile, "nested_subroutines");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_nested_subroutines
+
+/* ps_3_0: a subroutine samples a texture and reads a uniform (Metal must pass both). */
+static const uint32_t sampling_subroutine_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL_2D, CNA_DST(CNA_SAMPLER, 0, 0xF),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_TEXLD, 3), CNA_DST(CNA_TEMP, 0, 0xF), CNA_SRC(CNA_INPUT, 0), CNA_SRC(CNA_SAMPLER, 0),
+    CNA_OP(CNA_MUL, 3), CNA_DST(CNA_COLOROUT, 0, 0xF), CNA_SRC(CNA_TEMP, 0), CNA_SRC(CNA_CONST, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_END
+};
+
+static void test_sampling_subroutine(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, sampling_subroutine_ps3,
+            sizeof (sampling_subroutine_ps3), "sampling_subroutine");
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_braces_balance(pd), "braces balance");
+        CNA_CHECK(cna_offset(pd, "void l0(l0_PARAMETERS)\n{", 0) < cna_main_offset(pd),
+                  "the subroutine precedes main");
+        if (metal)
+        {
+            CNA_CHECK(cna_output_contains(pd, "#define l0_PARAMETERS constant main_Uniforms &uniforms, "
+                                              "texture2d<float> s0_texture, sampler s0, main_Input input, "
+                                              "thread main_Output &output, thread float4 &r0\n"),
+                      "Metal hands the subroutine the uniforms, texture, sampler and state");
+            CNA_CHECK(cna_output_contains(pd, "#define l0_ARGUMENTS uniforms, s0_texture, s0, input, output, r0\n"),
+                      "and main passes them");
+        } // if
+        else
+        {
+            CNA_CHECK(cna_output_contains(pd, "#define l0_PARAMETERS main_Input input, "
+                                              "inout main_Output output, inout float4 r0\n"),
+                      "HLSL hands the subroutine its state; resources are global");
+        } // else
+        cna_check_hlsl_compiles(pd, profile, "sampling_subroutine");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_sampling_subroutine
+
+/*
+ * A vs_3_0 constant table naming one float4[3] uniform, "bones", at c4: relative addressing
+ * needs one. 22 comment tokens: the CTAB id, D3DXSHADER_CONSTANTTABLE, one CONSTANTINFO, its
+ * TYPEINFO, and the name, target and creator strings.
+ */
+#define CNA_CTAB_BONES_C4 \
+    0x0000fffeu | (22u << 16), 0x42415443u, \
+    28, 80, CNA_VS(3, 0), 1, 28, 0, 72, \
+    64, 0x00040002u, 3, 48, 0, \
+    0x00030001u, 0x00040001u, 3, 0, \
+    0x656e6f62u, 0x00000073u, 0x335f7376u, 0x0000305fu, 0x00616e63u
+
+/*
+ * vs_3_0: a subroutine indexes, through a0, both the DEF constants c0..c2 (which become a
+ * constant array local to main) and the uniform array at c4 (ARRAYBASE_4, also local to main).
+ */
+static const uint32_t relative_subroutine_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_CTAB_BONES_C4,
+    CNA_OP(CNA_DEF, 5), CNA_DST(CNA_CONST, 0, 0xF), CNA_F1, 0, 0, CNA_F1,
+    CNA_OP(CNA_DEF, 5), CNA_DST(CNA_CONST, 1, 0xF), 0, CNA_F1, 0, CNA_F1,
+    CNA_OP(CNA_DEF, 5), CNA_DST(CNA_CONST, 2, 0xF), 0, 0, CNA_F1, CNA_F1,
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_COLOR, 0), CNA_DST(CNA_OUTPUT, 1, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 2, 0xF),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_MOVA, 2), CNA_DST(CNA_ADDR, 0, 0x1), CNA_SRC_SWZ(CNA_INPUT, 0, 0x00),
+    CNA_OP(CNA_MOV, 3), CNA_DST(CNA_OUTPUT, 1, 0xF), CNA_SRC(CNA_CONST, 0) | (1u << 13),
+        CNA_SRC_SWZ(CNA_ADDR, 0, 0x00),
+    CNA_OP(CNA_MOV, 3), CNA_DST(CNA_OUTPUT, 2, 0xF), CNA_SRC(CNA_CONST, 4) | (1u << 13),
+        CNA_SRC_SWZ(CNA_ADDR, 0, 0x00),
+    CNA_OP(CNA_RET, 0),
+    CNA_END
+};
+
+static void test_relative_subroutine(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, relative_subroutine_vs3,
+            sizeof (relative_subroutine_vs3), "relative_subroutine");
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_braces_balance(pd), "braces balance");
+        CNA_CHECK(cna_output_contains(pd, metal ? "thread int4 &a0" : "inout int4 a0"),
+                  "the address register is passed by reference");
+        CNA_CHECK(cna_output_contains(pd, metal ? "thread const float4 *const_array_0_3"
+                                                : "const float4 const_array_0_3[3]"),
+                  "the DEF constant array is passed");
+        CNA_CHECK(cna_output_contains(pd, "const int ARRAYBASE_4"),
+                  "the uniform array's base is passed");
+        CNA_CHECK((cna_offset(pd, "const_array_0_3[a0.x]", 0) >= 0) &&
+                  (cna_offset(pd, "const_array_0_3[a0.x]", 0) < cna_main_offset(pd)),
+                  "the subroutine indexes the constant array");
+        CNA_CHECK((cna_offset(pd, "[ARRAYBASE_4 + a0.x]", 0) >= 0) &&
+                  (cna_offset(pd, "[ARRAYBASE_4 + a0.x]", 0) < cna_main_offset(pd)),
+                  "and the uniform array");
+        cna_check_hlsl_compiles(pd, profile, "relative_subroutine");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_relative_subroutine
+
+/* vs_3_0: a packed register written in a subroutine reaches it as a parameter. */
+static const uint32_t packed_subroutine_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_OUTPUT, 0, 0xF),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_TEXCOORD, 0), CNA_DST(CNA_OUTPUT, 1, 0x3),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_COLOR, 0), CNA_DST(CNA_OUTPUT, 1, 0xC),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_CALL, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_OP(CNA_LABEL_OP, 1), CNA_SRC(CNA_LABEL, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_OUTPUT, 1, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_END
+};
+
+static void test_packed_register_in_subroutine(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof (cna_profiles) / sizeof (cna_profiles[0]); i++)
+    {
+        const char *profile = cna_profiles[i];
+        const int metal = (strcmp(profile, MOJOSHADER_PROFILE_METAL) == 0);
+        const MOJOSHADER_parseData *pd = cna_translate(profile, packed_subroutine_vs3,
+            sizeof (packed_subroutine_vs3), "packed_subroutine");
+        const long main_at = cna_main_offset(pd);
+        CNA_CHECK(pd->output != NULL, "there is source");
+        CNA_CHECK(cna_braces_balance(pd), "braces balance");
+        CNA_CHECK(cna_output_contains(pd, metal ? ", thread float4 &o1\n" : ", inout float4 o1\n"),
+                  "the packed register is a parameter of the subroutine");
+        CNA_CHECK((cna_offset(pd, "o1 = v0;", 0) >= 0) && (cna_offset(pd, "o1 = v0;", 0) < main_at),
+                  "the subroutine writes it");
+        CNA_CHECK(cna_offset(pd, metal ? "output.o1_color0.zw = o1.zw;" : "output.m_o1_color0.zw = o1.zw;",
+                             main_at) > cna_offset(pd, "l0(l0_ARGUMENTS);", main_at),
+                  "main copies it out after the call");
+        cna_check_hlsl_compiles(pd, profile, "packed_subroutine");
+        MOJOSHADER_freeParseData(pd);
+    } // for
+} // test_packed_register_in_subroutine
+
+/* vs_2_0 plain_vs2 with an explicit RET ending main: the same translation, no subroutine. */
+static const uint32_t explicit_ret_vs2[] = {
+    CNA_VS(2, 0),
+    CNA_OP(CNA_DCL_OP, 2), CNA_DCL(CNA_POSITION, 0), CNA_DST(CNA_INPUT, 0, 0xF),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_MOV, 2), CNA_DST(CNA_ATTROUT, 0, 0xF), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(CNA_RET, 0),
+    CNA_END
+};
+
+static void test_explicit_main_ret(void)
+{
+    check_unchanged(explicit_ret_vs2, sizeof (explicit_ret_vs2), "explicit_ret_vs2",
+                    plain_vs2_hlsl, plain_vs2_metal);
+} // test_explicit_main_ret
+
 /* With an argument, runs only the case of that name (one case per process, so an abort on an
  * unfixed tree does not hide the others). */
 int main(int argc, char **argv)
@@ -537,7 +874,13 @@ int main(int argc, char **argv)
         { "packed_vertex_outputs", test_packed_vertex_outputs },
         { "packed_fog_output", test_packed_fog_output },
         { "packed_pixel_inputs", test_packed_pixel_inputs },
-        { "unpacked_shaders_unchanged", test_unpacked_shaders_unchanged }
+        { "unpacked_shaders_unchanged", test_unpacked_shaders_unchanged },
+        { "explicit_main_ret", test_explicit_main_ret },
+        { "forward_subroutine", test_forward_subroutine },
+        { "nested_subroutines", test_nested_subroutines },
+        { "sampling_subroutine", test_sampling_subroutine },
+        { "relative_subroutine", test_relative_subroutine },
+        { "packed_register_in_subroutine", test_packed_register_in_subroutine }
     };
     size_t i;
     for (i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)

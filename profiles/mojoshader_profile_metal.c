@@ -180,6 +180,33 @@ static int get_METAL_varying_name(const MOJOSHADER_usage usage, const int index,
     } // switch
 } // get_METAL_varying_name
 
+// True when the shader has subroutines (a LABEL or CALL names a label register). -CNA
+static int METAL_uses_subroutines(Context *ctx)
+{
+    const RegisterList *item;
+    for (item = ctx->used_registers.next; item != NULL; item = item->next)
+    {
+        if (item->regtype == REG_TYPE_LABEL)
+            return 1;
+    } // for
+    return 0;
+} // METAL_uses_subroutines
+
+// Register macros (v0 for input.v0, c4 for a uniform, ...) normally open main's body. A
+//  subroutine is a separate function, emitted before main, so in a shader that has any the
+//  macros go to file scope, ahead of the subroutines -- and after the structs, whose members
+//  have the registers' names. -CNA
+static void push_METAL_register_macros(Context *ctx)
+{
+    if (METAL_uses_subroutines(ctx))
+        push_output(ctx, &ctx->helpers);
+    else
+    {
+        push_output(ctx, &ctx->mainline_top);
+        ctx->indent++;
+    } // else
+} // push_METAL_register_macros
+
 const char *get_METAL_destarg_varname(Context *ctx, char *buf, size_t len)
 {
     const DestArgInfo *arg = &ctx->dest_arg;
@@ -607,6 +634,177 @@ void emit_METAL_phase(Context *ctx)
     // no-op in Metal.
 } // emit_METAL_phase
 
+static void output_METAL_state_item(Context *ctx, int *items, const int declare,
+                                    const char *type, const char *name)
+{
+    const size_t typelen = strlen(type);
+    const int pointer = (typelen > 0) &&
+                        ((type[typelen - 1] == '&') || (type[typelen - 1] == '*'));
+    buffer_append(ctx->output, (*items == 0) ? " " : ", ", (*items == 0) ? 1 : 2);
+    if (declare)
+        buffer_append_fmt(ctx->output, pointer ? "%s%s" : "%s %s", type, name);
+    else
+        buffer_append(ctx->output, name, strlen(name));
+    (*items)++;
+} // output_METAL_state_item
+
+// Writes "#define <label>_PARAMETERS ..." (declare) or "#define <label>_ARGUMENTS ...": what a
+//  subroutine needs of main's state. A Direct3D 9 subroutine shares every register with its
+//  caller, but here it is a function of its own, and Metal has no mutable file-scope storage,
+//  so it is handed main's arguments (uniforms, textures and samplers, the stage input), the
+//  output struct and each local main declares for a register (the same set
+//  emit_METAL_global(), emit_METAL_DEF*(), emit_METAL_array(), emit_METAL_const_array() and
+//  the packed attributes declare), and aL when its calls sit inside a loop. -CNA
+static void output_METAL_subroutine_state(Context *ctx, const char *label,
+                                          const int loopreg, const int declare)
+{
+    const RegisterList *item;
+    const ConstantsList *constant;
+    const VariableList *var;
+    char type[64];
+    char name[64];
+    int items = 0;
+
+    if (isfail(ctx))
+        return;
+
+    buffer_append_fmt(ctx->output, "#define %s_%s", label,
+                      declare ? "PARAMETERS" : "ARGUMENTS");
+
+    if (loopreg)
+        output_METAL_state_item(ctx, &items, declare, "int", "aL");
+
+    if ((ctx->uniform_float4_count + ctx->uniform_int4_count + ctx->uniform_bool_count) > 0)
+    {
+        snprintf(type, sizeof (type), "constant %s_Uniforms &", ctx->mainfn);
+        output_METAL_state_item(ctx, &items, declare, type, "uniforms");
+    } // if
+
+    for (item = ctx->samplers.next; item != NULL; item = item->next)
+    {
+        const char *texsuffix = NULL;
+        switch ((TextureType) item->index)
+        {
+            case TEXTURE_TYPE_2D: texsuffix = "2d"; break;
+            case TEXTURE_TYPE_CUBE: texsuffix = "cube"; break;
+            case TEXTURE_TYPE_VOLUME: texsuffix = "3d"; break;
+            default: break;
+        } // switch
+        if (texsuffix == NULL)
+            continue;  // emit_METAL_sampler() did not declare it either.
+        get_METAL_varname_in_buf(ctx, REG_TYPE_SAMPLER, item->regnum, name, sizeof (name));
+        snprintf(type, sizeof (type), "texture%s<float>", texsuffix);
+        snprintf(name + strlen(name), sizeof (name) - strlen(name), "_texture");
+        output_METAL_state_item(ctx, &items, declare, type, name);
+        get_METAL_varname_in_buf(ctx, REG_TYPE_SAMPLER, item->regnum, name, sizeof (name));
+        output_METAL_state_item(ctx, &items, declare, "sampler", name);
+    } // for
+
+    if (ctx->inputs != NULL)
+    {
+        snprintf(type, sizeof (type), "%s_Input", ctx->mainfn);
+        output_METAL_state_item(ctx, &items, declare, type, "input");
+    } // if
+
+    if (ctx->outputs != NULL)
+    {
+        snprintf(type, sizeof (type), "thread %s_Output &", ctx->mainfn);
+        output_METAL_state_item(ctx, &items, declare, type, "output");
+    } // if
+
+    for (item = ctx->used_registers.next; item != NULL; item = item->next)
+    {
+        const char *regtype = NULL;
+        if (reglist_find(&ctx->defined_registers, item->regtype, item->regnum))
+            continue;
+        else if (item->regtype == REG_TYPE_TEMP)
+            regtype = "thread float4 &";
+        else if (item->regtype == REG_TYPE_PREDICATE)
+            regtype = "thread bool4 &";
+        else if ((item->regtype == REG_TYPE_ADDRESS) && shader_is_vertex(ctx))
+            regtype = "thread int4 &";
+        else if ((item->regtype == REG_TYPE_ADDRESS) &&
+                 !shader_version_atleast(ctx, 1, 4))
+            regtype = "thread float4 &";
+        if (regtype != NULL)
+        {
+            get_METAL_varname_in_buf(ctx, item->regtype, item->regnum, name, sizeof (name));
+            output_METAL_state_item(ctx, &items, declare, regtype, name);
+        } // if
+    } // for
+
+    for (constant = ctx->constants; constant != NULL; constant = constant->next)
+    {
+        const int index = constant->constant.index;
+        if (constant->constant.type == MOJOSHADER_UNIFORM_FLOAT)
+        {
+            get_METAL_varname_in_buf(ctx, REG_TYPE_CONST, index, name, sizeof (name));
+            output_METAL_state_item(ctx, &items, declare, "const float4", name);
+        } // if
+        else if (constant->constant.type == MOJOSHADER_UNIFORM_INT)
+        {
+            get_METAL_varname_in_buf(ctx, REG_TYPE_CONSTINT, index, name, sizeof (name));
+            output_METAL_state_item(ctx, &items, declare, "const int4", name);
+        } // else if
+        else if (constant->constant.type == MOJOSHADER_UNIFORM_BOOL)
+        {
+            get_METAL_varname_in_buf(ctx, REG_TYPE_CONSTBOOL, index, name, sizeof (name));
+            output_METAL_state_item(ctx, &items, declare, "const bool", name);
+        } // else if
+    } // for
+
+    for (var = ctx->variables; var != NULL; var = var->next)
+    {
+        if (!var->used)
+            continue;
+        else if (var->constant)
+        {
+            get_METAL_const_array_varname_in_buf(ctx, var->index, var->count,
+                                                 name, sizeof (name));
+            output_METAL_state_item(ctx, &items, declare, "thread const float4 *", name);
+        } // else if
+        else
+        {
+            snprintf(name, sizeof (name), "ARRAYBASE_%d", var->index);
+            output_METAL_state_item(ctx, &items, declare, "const int", name);
+        } // else
+    } // for
+
+    for (item = ctx->attributes.next; item != NULL; item = item->next)
+    {
+        // The first entry of a packed register declares its local.
+        if ((item == reglist_find(&ctx->attributes, item->regtype, item->regnum)) &&
+            is_METAL_packed_register(ctx, item->regtype, item->regnum))
+        {
+            get_METAL_varname_in_buf(ctx, item->regtype, item->regnum, name, sizeof (name));
+            output_METAL_state_item(ctx, &items, declare, "thread float4 &", name);
+        } // if
+    } // for
+
+    buffer_append(ctx->output, ctx->endline, ctx->endline_len);
+} // output_METAL_subroutine_state
+
+// The parameter macros and a prototype for every subroutine, ahead of all the definitions:
+//  a subroutine may call one defined after it. -CNA
+static void output_METAL_subroutine_declarations(Context *ctx)
+{
+    const RegisterList *item;
+    char label[64];
+
+    push_output(ctx, &ctx->helpers);
+    for (item = ctx->used_registers.next; item != NULL; item = item->next)
+    {
+        if (item->regtype != REG_TYPE_LABEL)
+            continue;
+        get_METAL_varname_in_buf(ctx, REG_TYPE_LABEL, item->regnum, label, sizeof (label));
+        output_METAL_subroutine_state(ctx, label, item->misc == 1, 1);
+        output_METAL_subroutine_state(ctx, label, item->misc == 1, 0);
+        output_line(ctx, "void %s(%s_PARAMETERS);", label, label);
+    } // for
+    output_blank_line(ctx);
+    pop_output(ctx);
+} // output_METAL_subroutine_declarations
+
 void emit_METAL_finalize(Context *ctx)
 {
     // If we had a relative addressing of REG_TYPE_INPUT, we need to build
@@ -715,6 +913,8 @@ void emit_METAL_finalize(Context *ctx)
         pop_output(ctx);
     } // if
 
+    if (METAL_uses_subroutines(ctx))
+        output_METAL_subroutine_declarations(ctx);
 } // emit_METAL_finalize
 
 void emit_METAL_global(Context *ctx, RegisterType regtype, int regnum)
@@ -831,8 +1031,7 @@ void emit_METAL_uniform(Context *ctx, RegisterType regtype, int regnum,
 
     get_METAL_varname_in_buf(ctx, regtype, regnum, varname, sizeof (varname));
 
-    push_output(ctx, &ctx->mainline_top);
-    ctx->indent++;
+    push_METAL_register_macros(ctx);
 
     if (var == NULL)
     {
@@ -1044,8 +1243,7 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
             output_line(ctx, "float4 %s [[attribute(%d)]];", var, regnum);
             pop_output(ctx);
 
-            push_output(ctx, &ctx->mainline_top);
-            ctx->indent++;
+            push_METAL_register_macros(ctx);
             // !!! FIXME: might trigger unused var warnings in Clang.
             //output_line(ctx, "constant float4 &%s = input.%s;", var, var);
             output_line(ctx, "#define %s input.%s", var, var);
@@ -1079,8 +1277,7 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             pop_output(ctx);
 
-            push_output(ctx, &ctx->mainline_top);
-            ctx->indent++;
+            push_METAL_register_macros(ctx);
             // !!! FIXME: this doesn't work.
             //output_line(ctx, "float4 &%s = output.%s;", var, var);
             output_line(ctx, "#define %s output.%s", var, var);
@@ -1124,8 +1321,7 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             pop_output(ctx);
 
-            push_output(ctx, &ctx->mainline_top);
-            ctx->indent++;
+            push_METAL_register_macros(ctx);
             // !!! FIXME: this doesn't work.
             //output_line(ctx, "float%s &%s = output.%s;", (regtype == REG_TYPE_DEPTHOUT) ? "" : "4", var, var);
             output_line(ctx, "#define %s output.%s", var, var);
@@ -1190,8 +1386,7 @@ void emit_METAL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             if (!skipreference)
             {
-                push_output(ctx, &ctx->mainline_top);
-                ctx->indent++;
+                push_METAL_register_macros(ctx);
                 output_line(ctx, "#define %s input.%s", var, var);
                 pop_output(ctx);
                 push_output(ctx, &ctx->mainline);
@@ -1545,26 +1740,22 @@ void emit_METAL_M3X2(Context *ctx)
     output_line(ctx, "%s", code);
 } // emit_METAL_M3X2
 
+// A label is an identifier, not a vector source: the masked source string could append the
+//  previous instruction's write mask to it. Whether aL is passed is the callee's property,
+//  known since its first CALL; in a subroutine that inherits aL, ctx->loops is 0. -CNA
 void emit_METAL_CALL(Context *ctx)
 {
-    char src0[64]; make_METAL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
-    if (ctx->loops > 0)
-        output_line(ctx, "%s(aL);", src0);
-    else
-        output_line(ctx, "%s();", src0);
+    char src0[64]; get_METAL_srcarg_varname(ctx, 0, src0, sizeof (src0));
+    output_line(ctx, "%s(%s_ARGUMENTS);", src0, src0);
 } // emit_METAL_CALL
 
 void emit_METAL_CALLNZ(Context *ctx)
 {
     // !!! FIXME: if src1 is a constbool that's true, we can remove the
     // !!! FIXME:  if. If it's false, we can make this a no-op.
-    char src0[64]; make_METAL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
-    char src1[64]; make_METAL_srcarg_string_masked(ctx, 1, src1, sizeof (src1));
-
-    if (ctx->loops > 0)
-        output_line(ctx, "if (%s) { %s(aL); }", src1, src0);
-    else
-        output_line(ctx, "if (%s) { %s(); }", src1, src0);
+    char src0[64]; get_METAL_srcarg_varname(ctx, 0, src0, sizeof (src0));
+    char src1[64]; make_METAL_srcarg_string_scalar(ctx, 1, src1, sizeof (src1));
+    output_line(ctx, "if (%s) { %s(%s_ARGUMENTS); }", src1, src0, src0);
 } // emit_METAL_CALLNZ
 
 void emit_METAL_LOOP(Context *ctx)
@@ -1587,9 +1778,23 @@ void emit_METAL_RET(Context *ctx)
     // thankfully, the MSDN specs say a RET _has_ to end a function...no
     //  early returns. So if you hit one, you know you can safely close
     //  a high-level function.
-    push_output(ctx, &ctx->postflight);
-    output_line(ctx, "}");
-    output_blank_line(ctx);
+    // main's closing brace goes to postflight, after the "return output;" and #undef lines
+    //  that only reach mainline later. A subroutine closes in its own buffer (subroutines, or
+    //  ignore for an unused one). Either way the next function starts at indent 0. -CNA
+    if (ctx->output == ctx->mainline)
+    {
+        push_output(ctx, &ctx->postflight);
+        output_line(ctx, "}");
+        output_blank_line(ctx);
+        pop_output(ctx);
+    } // if
+    else
+    {
+        ctx->indent = 0;
+        output_line(ctx, "}");
+        output_blank_line(ctx);
+    } // else
+    ctx->indent = 0;
     set_output(ctx, &ctx->subroutines);  // !!! FIXME: is this for LABEL? Maybe set it there so we don't allocate unnecessarily.
 } // emit_METAL_RET
 
@@ -1603,7 +1808,7 @@ void emit_METAL_ENDLOOP(Context *ctx)
 
 void emit_METAL_LABEL(Context *ctx)
 {
-    char src0[64]; make_METAL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
+    char src0[64]; get_METAL_srcarg_varname(ctx, 0, src0, sizeof (src0));
     const int label = ctx->source_args[0].regnum;
     RegisterList *reg = reglist_find(&ctx->used_registers, REG_TYPE_LABEL, label);
     assert(ctx->output == ctx->subroutines);  // not mainline, etc.
@@ -1617,12 +1822,10 @@ void emit_METAL_LABEL(Context *ctx)
     // !!! FIXME: it would be nice if we could determine if a function is
     // !!! FIXME:  only called once and, if so, forcibly inline it.
 
-    // !!! FIXME: this worked in GLSL because all our state is global to the shader,
-    // !!! FIXME:  but in metal we kept it local to the shader mainline.
-    // !!! FIXME:  Can we do C++11 lambdas in Metal to have nested functions?  :)
-
-    const char *uses_loopreg = ((reg) && (reg->misc == 1)) ? "int aL" : "";
-    output_line(ctx, "void %s(%s)", src0, uses_loopreg);
+    // Metal keeps the shader's state local to main, so a subroutine is handed it (and aL if
+    //  its calls sit in a loop). That set is only known once the whole shader is:
+    //  output_METAL_subroutine_declarations() defines the macro. -CNA
+    output_line(ctx, "void %s(%s_PARAMETERS)", src0, src0);
     output_line(ctx, "{");
     ctx->indent++;
 } // emit_METAL_LABEL

@@ -235,6 +235,32 @@ static const char *get_HLSL_varying_semantic(Context *ctx,
     return type;
 } // get_HLSL_varying_semantic
 
+// True when the shader has subroutines (a LABEL or CALL names a label register). -CNA
+static int HLSL_uses_subroutines(Context *ctx)
+{
+    const RegisterList *item;
+    for (item = ctx->used_registers.next; item != NULL; item = item->next)
+    {
+        if (item->regtype == REG_TYPE_LABEL)
+            return 1;
+    } // for
+    return 0;
+} // HLSL_uses_subroutines
+
+// Register macros (v0 for input.m_v0, c4 for a uniform, ...) normally open main's body. A
+//  subroutine is a separate function, emitted before main, so in a shader that has any the
+//  macros go to file scope, ahead of the subroutines. -CNA
+static void push_HLSL_register_macros(Context *ctx)
+{
+    if (HLSL_uses_subroutines(ctx))
+        push_output(ctx, &ctx->helpers);
+    else
+    {
+        push_output(ctx, &ctx->mainline_top);
+        ctx->indent++;
+    } // else
+} // push_HLSL_register_macros
+
 const char *get_HLSL_destarg_varname(Context *ctx, char *buf, size_t len)
 {
     const DestArgInfo *arg = &ctx->dest_arg;
@@ -644,6 +670,150 @@ void output_HLSL_uniform_array(Context *ctx, const RegisterType regtype,
     } // if
 } // output_HLSL_uniform_array
 
+static void output_HLSL_state_item(Context *ctx, int *items, const int declare,
+                                   const char *type, const char *name,
+                                   const char *suffix)
+{
+    buffer_append(ctx->output, (*items == 0) ? " " : ", ", (*items == 0) ? 1 : 2);
+    if (declare)
+        buffer_append_fmt(ctx->output, "%s %s%s", type, name, suffix);
+    else
+        buffer_append(ctx->output, name, strlen(name));
+    (*items)++;
+} // output_HLSL_state_item
+
+// Writes "#define <label>_PARAMETERS ..." (declare) or "#define <label>_ARGUMENTS ...": what a
+//  subroutine needs of main's state. A Direct3D 9 subroutine shares every register with its
+//  caller, but here it is a function of its own, so it is handed the input and output structs
+//  and each local main declares for a register (the same set emit_HLSL_global(),
+//  emit_HLSL_DEF*(), emit_HLSL_array(), emit_HLSL_const_array() and the packed attributes
+//  declare), and aL when its calls sit inside a loop. -CNA
+static void output_HLSL_subroutine_state(Context *ctx, const char *label,
+                                         const int loopreg, const int declare)
+{
+    const RegisterList *item;
+    const ConstantsList *constant;
+    const VariableList *var;
+    char type[64];
+    char name[64];
+    char suffix[16];
+    int items = 0;
+
+    if (isfail(ctx))
+        return;
+
+    buffer_append_fmt(ctx->output, "#define %s_%s", label,
+                      declare ? "PARAMETERS" : "ARGUMENTS");
+
+    if (loopreg)
+        output_HLSL_state_item(ctx, &items, declare, "int", "aL", "");
+
+    if (ctx->inputs != NULL)
+    {
+        snprintf(type, sizeof (type), "%s_Input", ctx->mainfn);
+        output_HLSL_state_item(ctx, &items, declare, type, "input", "");
+    } // if
+
+    if (ctx->outputs != NULL)
+    {
+        snprintf(type, sizeof (type), "inout %s_Output", ctx->mainfn);
+        output_HLSL_state_item(ctx, &items, declare, type, "output", "");
+    } // if
+
+    for (item = ctx->used_registers.next; item != NULL; item = item->next)
+    {
+        const char *regtype = NULL;
+        if (reglist_find(&ctx->defined_registers, item->regtype, item->regnum))
+            continue;
+        else if (item->regtype == REG_TYPE_TEMP)
+            regtype = "inout float4";
+        else if (item->regtype == REG_TYPE_PREDICATE)
+            regtype = "inout bool4";
+        else if ((item->regtype == REG_TYPE_ADDRESS) && shader_is_vertex(ctx))
+            regtype = "inout int4";
+        else if ((item->regtype == REG_TYPE_ADDRESS) &&
+                 !shader_version_atleast(ctx, 1, 4))
+            regtype = "inout float4";
+        if (regtype != NULL)
+        {
+            get_HLSL_varname_in_buf(ctx, item->regtype, item->regnum, name, sizeof (name));
+            output_HLSL_state_item(ctx, &items, declare, regtype, name, "");
+        } // if
+    } // for
+
+    for (constant = ctx->constants; constant != NULL; constant = constant->next)
+    {
+        const int index = constant->constant.index;
+        if (constant->constant.type == MOJOSHADER_UNIFORM_FLOAT)
+        {
+            get_HLSL_varname_in_buf(ctx, REG_TYPE_CONST, index, name, sizeof (name));
+            output_HLSL_state_item(ctx, &items, declare, "const float4", name, "");
+        } // if
+        else if (constant->constant.type == MOJOSHADER_UNIFORM_INT)
+        {
+            get_HLSL_varname_in_buf(ctx, REG_TYPE_CONSTINT, index, name, sizeof (name));
+            output_HLSL_state_item(ctx, &items, declare, "const int4", name, "");
+        } // else if
+        else if (constant->constant.type == MOJOSHADER_UNIFORM_BOOL)
+        {
+            get_HLSL_varname_in_buf(ctx, REG_TYPE_CONSTBOOL, index, name, sizeof (name));
+            output_HLSL_state_item(ctx, &items, declare, "const bool", name, "");
+        } // else if
+    } // for
+
+    for (var = ctx->variables; var != NULL; var = var->next)
+    {
+        if (!var->used)
+            continue;
+        else if (var->constant)
+        {
+            get_HLSL_const_array_varname_in_buf(ctx, var->index, var->count,
+                                                name, sizeof (name));
+            snprintf(suffix, sizeof (suffix), "[%d]", var->count);
+            output_HLSL_state_item(ctx, &items, declare, "const float4", name, suffix);
+        } // else if
+        else
+        {
+            snprintf(name, sizeof (name), "ARRAYBASE_%d", var->index);
+            output_HLSL_state_item(ctx, &items, declare, "const int", name, "");
+        } // else
+    } // for
+
+    for (item = ctx->attributes.next; item != NULL; item = item->next)
+    {
+        // The first entry of a packed register declares its local.
+        if ((item == reglist_find(&ctx->attributes, item->regtype, item->regnum)) &&
+            is_HLSL_packed_register(ctx, item->regtype, item->regnum))
+        {
+            get_HLSL_varname_in_buf(ctx, item->regtype, item->regnum, name, sizeof (name));
+            output_HLSL_state_item(ctx, &items, declare, "inout float4", name, "");
+        } // if
+    } // for
+
+    buffer_append(ctx->output, ctx->endline, ctx->endline_len);
+} // output_HLSL_subroutine_state
+
+// The parameter macros and a prototype for every subroutine, ahead of all the definitions:
+//  a subroutine may call one defined after it. -CNA
+static void output_HLSL_subroutine_declarations(Context *ctx)
+{
+    const RegisterList *item;
+    char label[64];
+
+    push_output(ctx, &ctx->helpers);
+    for (item = ctx->used_registers.next; item != NULL; item = item->next)
+    {
+        if (item->regtype != REG_TYPE_LABEL)
+            continue;
+        get_HLSL_varname_in_buf(ctx, REG_TYPE_LABEL, item->regnum, label, sizeof (label));
+        output_HLSL_subroutine_state(ctx, label, item->misc == 1, 1);
+        output_HLSL_subroutine_state(ctx, label, item->misc == 1, 0);
+        output_line(ctx, "void %s(%s_PARAMETERS);", label, label);
+    } // for
+    output_blank_line(ctx);
+    pop_output(ctx);
+} // output_HLSL_subroutine_declarations
+
 void emit_HLSL_finalize(Context *ctx)
 {
     if (ctx->have_relative_input_registers) // !!! FIXME
@@ -723,13 +893,13 @@ void emit_HLSL_finalize(Context *ctx)
 
     if (ctx->need_max_float)
     {
-        push_output(ctx, &ctx->mainline_top);
-        ctx->indent++;
+        push_HLSL_register_macros(ctx);
         output_line(ctx, "#define FLT_MAX 1e38");
-        ctx->indent--;
         pop_output(ctx);
     } // if
 
+    if (HLSL_uses_subroutines(ctx))
+        output_HLSL_subroutine_declarations(ctx);
 } // emit_HLSL_finalize
 
 void emit_HLSL_global(Context *ctx, RegisterType regtype, int regnum)
@@ -843,8 +1013,7 @@ void emit_HLSL_uniform(Context *ctx, RegisterType regtype, int regnum,
 
     get_HLSL_varname_in_buf(ctx, regtype, regnum, varname, sizeof (varname));
 
-    push_output(ctx, &ctx->mainline_top);
-    ctx->indent++;
+    push_HLSL_register_macros(ctx);
 
     if (var == NULL)
     {
@@ -1107,8 +1276,7 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             } // case
             pop_output(ctx);
 
-            push_output(ctx, &ctx->mainline_top);
-            ctx->indent++;
+            push_HLSL_register_macros(ctx);
             output_line(ctx, "#define %s input.m_%s", var, var);
             pop_output(ctx);
             push_output(ctx, &ctx->mainline);
@@ -1143,8 +1311,7 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             pop_output(ctx);
 
-            push_output(ctx, &ctx->mainline_top);
-            ctx->indent++;
+            push_HLSL_register_macros(ctx);
             output_line(ctx, "#define %s output.m_%s", var, var);
             pop_output(ctx);
             push_output(ctx, &ctx->mainline);
@@ -1186,8 +1353,7 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             pop_output(ctx);
 
-            push_output(ctx, &ctx->mainline_top);
-            ctx->indent++;
+            push_HLSL_register_macros(ctx);
             output_line(ctx, "#define %s output.m_%s", var, var);
             pop_output(ctx);
             push_output(ctx, &ctx->mainline);
@@ -1253,8 +1419,7 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
 
             if (!skipreference)
             {
-                push_output(ctx, &ctx->mainline_top);
-                ctx->indent++;
+                push_HLSL_register_macros(ctx);
                 output_line(ctx, "#define %s %sinput.m_%s%s", var,
                             define_start, var, define_end);
                 pop_output(ctx);
@@ -1553,26 +1718,22 @@ void emit_HLSL_M3X2(Context *ctx)
     output_line(ctx, "%s", code);
 } // emit_HLSL_M3X2
 
+// A label is an identifier, not a vector source: the masked source string could append the
+//  previous instruction's write mask to it. Whether aL is passed is the callee's property,
+//  known since its first CALL; in a subroutine that inherits aL, ctx->loops is 0. -CNA
 void emit_HLSL_CALL(Context *ctx)
 {
-    char src0[64]; make_HLSL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
-    if (ctx->loops > 0)
-        output_line(ctx, "%s(aL);", src0);
-    else
-        output_line(ctx, "%s();", src0);
+    char src0[64]; get_HLSL_srcarg_varname(ctx, 0, src0, sizeof (src0));
+    output_line(ctx, "%s(%s_ARGUMENTS);", src0, src0);
 } // emit_HLSL_CALL
 
 void emit_HLSL_CALLNZ(Context *ctx)
 {
     // !!! FIXME: if src1 is a constbool that's true, we can remove the
     // !!! FIXME:  if. If it's false, we can make this a no-op.
-    char src0[64]; make_HLSL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
-    char src1[64]; make_HLSL_srcarg_string_masked(ctx, 1, src1, sizeof (src1));
-
-    if (ctx->loops > 0)
-        output_line(ctx, "if (%s) { %s(aL); }", src1, src0);
-    else
-        output_line(ctx, "if (%s) { %s(); }", src1, src0);
+    char src0[64]; get_HLSL_srcarg_varname(ctx, 0, src0, sizeof (src0));
+    char src1[64]; make_HLSL_srcarg_string_scalar(ctx, 1, src1, sizeof (src1));
+    output_line(ctx, "if (%s) { %s(%s_ARGUMENTS); }", src1, src0, src0);
 } // emit_HLSL_CALLNZ
 
 void emit_HLSL_LOOP(Context *ctx)
@@ -1595,9 +1756,23 @@ void emit_HLSL_RET(Context *ctx)
     // thankfully, the MSDN specs say a RET _has_ to end a function...no
     //  early returns. So if you hit one, you know you can safely close
     //  a high-level function.
-    push_output(ctx, &ctx->postflight);
-    output_line(ctx, "}");
-    output_blank_line(ctx);
+    // main's closing brace goes to postflight, after the "return output;" and #undef lines
+    //  that only reach mainline later. A subroutine closes in its own buffer (subroutines, or
+    //  ignore for an unused one). Either way the next function starts at indent 0. -CNA
+    if (ctx->output == ctx->mainline)
+    {
+        push_output(ctx, &ctx->postflight);
+        output_line(ctx, "}");
+        output_blank_line(ctx);
+        pop_output(ctx);
+    } // if
+    else
+    {
+        ctx->indent = 0;
+        output_line(ctx, "}");
+        output_blank_line(ctx);
+    } // else
+    ctx->indent = 0;
     set_output(ctx, &ctx->subroutines);  // !!! FIXME: is this for LABEL? Maybe set it there so we don't allocate unnecessarily.
 } // emit_HLSL_RET
 
@@ -1611,7 +1786,7 @@ void emit_HLSL_ENDLOOP(Context *ctx)
 
 void emit_HLSL_LABEL(Context *ctx)
 {
-    char src0[64]; make_HLSL_srcarg_string_masked(ctx, 0, src0, sizeof (src0));
+    char src0[64]; get_HLSL_srcarg_varname(ctx, 0, src0, sizeof (src0));
     const int label = ctx->source_args[0].regnum;
     RegisterList *reg = reglist_find(&ctx->used_registers, REG_TYPE_LABEL, label);
     assert(ctx->output == ctx->subroutines);  // not mainline, etc.
@@ -1625,8 +1800,9 @@ void emit_HLSL_LABEL(Context *ctx)
     // !!! FIXME: it would be nice if we could determine if a function is
     // !!! FIXME:  only called once and, if so, forcibly inline it.
 
-    const char *uses_loopreg = ((reg) && (reg->misc == 1)) ? "int aL" : "";
-    output_line(ctx, "void %s(%s)", src0, uses_loopreg);
+    // The parameters (main's state, and aL if the calls sit in a loop) are only known once
+    //  the whole shader is: output_HLSL_subroutine_declarations() defines the macro. -CNA
+    output_line(ctx, "void %s(%s_PARAMETERS)", src0, src0);
     output_line(ctx, "{");
     ctx->indent++;
 } // emit_HLSL_LABEL
