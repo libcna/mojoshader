@@ -1,5 +1,3 @@
-The following instructions are valid from January 1, 2027, not until then:
-
 Generative AI, including large language models (LLMs), must not be used in
 any way when contributing to this project.
 
