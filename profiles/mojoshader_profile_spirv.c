@@ -1388,12 +1388,6 @@ static void spv_assign_destarg(Context *ctx, SpirvResult value)
     // CENTROID only allowed in DCL opcodes, which shouldn't come through here.
     assert((arg->result_mod & MOD_CENTROID) == 0);
 
-    if (ctx->predicated)
-    {
-        fail(ctx, "predicated destinations unsupported");  // !!! FIXME
-        return;
-    } // if
-
     if (arg->result_shift)
     {
         float factor = 1.0f;
@@ -1485,6 +1479,38 @@ static void spv_assign_destarg(Context *ctx, SpirvResult value)
         );
         pop_output(ctx);
         value.id = clamped;
+    } // if
+
+    if (ctx->predicated)
+    {
+        const SourceArgInfo *predicate_arg = &ctx->predicate_arg;
+        RegisterList *predicate_reg = spv_getreg(ctx, predicate_arg->regtype, predicate_arg->regnum);
+        SpirvResult predicate = spv_loadreg(ctx, predicate_reg);
+        uint32 condition, current_value, selected_value;
+        if (predicate.id == 0)
+            return;
+
+        // Select after all result transforms. Both loads precede the store, including when
+        // a predicated SETP reads and writes p0 itself. Inactive lanes retain old bits. -CNA
+        current_value = spv_bumpid(ctx);
+        selected_value = spv_bumpid(ctx);
+        push_output(ctx, &ctx->mainline);
+        if (reg->regtype == REG_TYPE_DEPTHOUT ||
+            isscalar(ctx, ctx->shader_type, arg->regtype, arg->regnum))
+        {
+            condition = spv_bumpid(ctx);
+            spv_emit(ctx, 5, SpvOpCompositeExtract, spv_get_type(ctx, STI_BOOL), condition,
+                     predicate.id, predicate_arg->swizzle & 3);
+        }
+        else
+            condition = spv_emit_swizzle(ctx, predicate.id, spv_get_type(ctx, STI_BVEC4),
+                                         predicate_arg->swizzle, 0xF);
+        spv_emit(ctx, 4, SpvOpLoad, value.tid, current_value, reg->spirv.iddecl);
+        spv_emit(ctx, 6, SpvOpSelect, value.tid, selected_value, condition,
+                 predicate_arg->src_mod == SRCMOD_NOT ? current_value : value.id,
+                 predicate_arg->src_mod == SRCMOD_NOT ? value.id : current_value);
+        pop_output(ctx);
+        value.id = selected_value;
     } // if
 
     switch (reg->regtype)

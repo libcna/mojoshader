@@ -1,15 +1,17 @@
 /* SPDX-License-Identifier: Zlib */
 /* Independent numeric predicate truth tables and portable SPIR-V control flow. */
 #include <string.h>
+#include <math.h>
+#include "spirv/GLSL.std.450.h"
 #include "cna_test.h"
 #include "spirv/spirv.h"
 #define LIMIT 4096
 typedef struct Value { float v[4]; unsigned int known; int width; } Value;
 
-static void kill_condition(const MOJOSHADER_parseData *p,int expected)
+static void program_result(const MOJOSHADER_parseData *p,int expected,const float *output,int output_kind,int output_width)
 {
     static Value values[LIMIT],memory[LIMIT];
-    static int widths[LIMIT],kills[LIMIT];
+    static int widths[LIMIT],kills[LIMIT],kinds[LIMIT],pointee[LIMIT],storage[LIMIT],var_type[LIMIT],position[LIMIT];
     const uint32_t *w=(const uint32_t *)p->output;
     const size_t n=cna_spirv_module_words(p);
     size_t at;
@@ -17,11 +19,17 @@ static void kill_condition(const MOJOSHADER_parseData *p,int expected)
     CNA_CHECK(w[3]<LIMIT,"predicate oracle ID bound");if(w[3]>=LIMIT) return;
     memset(values,0,sizeof(values));memset(memory,0,sizeof(memory));
     memset(widths,0,sizeof(widths));memset(kills,0,sizeof(kills));
+    memset(kinds,0,sizeof(kinds));memset(pointee,0,sizeof(pointee));memset(var_type,0,sizeof(var_type));
+    memset(position,0,sizeof(position));for(i=0;i<LIMIT;i++) storage[i]=-1;
     for(at=5;at<n && (w[at]>>16);at+=w[at]>>16)
     {
         const uint32_t *d=w+at;unsigned int op=d[0]&0xffff;
-        if(op==SpvOpTypeBool || op==SpvOpTypeFloat) widths[d[1]]=1;
-        if(op==SpvOpTypeVector) widths[d[1]]=d[3];
+        if(op==SpvOpTypeBool || op==SpvOpTypeFloat || op==SpvOpTypeInt)
+        { widths[d[1]]=1;kinds[d[1]]=op==SpvOpTypeFloat?1:op==SpvOpTypeBool?2:3; }
+        if(op==SpvOpTypeVector) { widths[d[1]]=d[3];kinds[d[1]]=kinds[d[2]]; }
+        if(op==SpvOpTypePointer) pointee[d[1]]=d[3];
+        if(op==SpvOpVariable) { storage[d[2]]=d[3];var_type[d[2]]=pointee[d[1]]; }
+        if(op==SpvOpDecorate && d[2]==SpvDecorationBuiltIn && d[3]==SpvBuiltInPosition) position[d[1]]=1;
         if(op==SpvOpLabel) block=d[1];
         if(op==SpvOpKill) kills[block]=1;
     }
@@ -29,7 +37,11 @@ static void kill_condition(const MOJOSHADER_parseData *p,int expected)
     {
         const uint32_t *d=w+at;unsigned int op=d[0]&0xffff;
         if(op==SpvOpConstant)
-        { memcpy(values[d[2]].v,d+3,sizeof(float));values[d[2]].known=1;values[d[2]].width=1; }
+        {
+            if(kinds[d[1]]==3) values[d[2]].v[0]=(float)(int32_t)d[3];
+            else memcpy(values[d[2]].v,d+3,sizeof(float));
+            values[d[2]].known=1;values[d[2]].width=1;
+        }
         if(op==SpvOpConstantTrue || op==SpvOpConstantFalse)
         { values[d[2]].v[0]=op==SpvOpConstantTrue;values[d[2]].known=1;values[d[2]].width=1; }
         if(op==SpvOpConstantComposite || op==SpvOpCompositeConstruct)
@@ -64,6 +76,35 @@ static void kill_condition(const MOJOSHADER_parseData *p,int expected)
                 v->v[i]=op==SpvOpFOrdGreaterThan?a->v[i]>b->v[i]:op==SpvOpFOrdLessThan?a->v[i]<b->v[i]:
                         op==SpvOpLogicalAnd?(a->v[i]!=0 && b->v[i]!=0):(a->v[i]!=0 || b->v[i]!=0);
         }
+        if(op==SpvOpCompositeExtract)
+        {
+            values[d[2]].width=1;values[d[2]].v[0]=values[d[3]].v[d[4]];
+            values[d[2]].known=(values[d[3]].known>>d[4])&1;
+        }
+        if(op==SpvOpFAdd || op==SpvOpFMul)
+        {
+            Value *v=&values[d[2]],*a=&values[d[3]],*b=&values[d[4]];
+            v->width=widths[d[1]];v->known=a->known&b->known;
+            for(i=0;i<v->width;i++) v->v[i]=op==SpvOpFAdd?a->v[i]+b->v[i]:a->v[i]*b->v[i];
+        }
+        if(op==SpvOpExtInst)
+        {
+            Value *v=&values[d[2]],*a=&values[d[5]];v->width=widths[d[1]];v->known=a->known;
+            CNA_CHECK(d[4]==GLSLstd450FClamp || d[4]==GLSLstd450Round,"known numeric predicate operation");
+            for(i=0;i<v->width;i++)
+            {
+                float x=a->v[i];
+                if(d[4]==GLSLstd450Round) v->v[i]=roundf(x);
+                else
+                {
+                    float lo=values[d[6]].v[i],hi=values[d[7]].v[i];
+                    v->v[i]=x<lo?lo:x>hi?hi:x;
+                    v->known&=values[d[6]].known&values[d[7]].known;
+                }
+            }
+        }
+        if(op==SpvOpConvertFToS)
+        { values[d[2]]=values[d[3]];for(i=0;i<values[d[2]].width;i++) values[d[2]].v[i]=truncf(values[d[3]].v[i]); }
         if(op==SpvOpLogicalNot)
         {
             Value *v=&values[d[2]],*a=&values[d[3]];*v=*a;
@@ -95,7 +136,25 @@ static void kill_condition(const MOJOSHADER_parseData *p,int expected)
             CNA_CHECK(kills[condition->v[0]?d[2]:d[3]]==expected,"literal per-lane predicate/negative-component truth table");
         }
     }
-    CNA_CHECK(branches==1,"one conditional kill branch");
+    if(expected>=0) CNA_CHECK(branches==1,"one conditional kill branch");
+    if(output)
+    {
+        int observed=0;
+        for(i=1;i<LIMIT;i++)
+        {
+            int matches=output_kind==0?(storage[i]==SpvStorageClassOutput && !position[i]):
+                (storage[i]==SpvStorageClassFunction || storage[i]==SpvStorageClassPrivate) && kinds[var_type[i]]==output_kind;
+            if(matches && widths[var_type[i]]==output_width)
+            {
+                int lane;observed++;
+                CNA_CHECK(memory[i].known==((1u<<output_width)-1),"all observed predicated destination lanes are defined");
+                for(lane=0;lane<output_width;lane++)
+                    CNA_CHECK(fabsf(memory[i].v[lane]-output[lane])<.000001f,
+                              "predicate updates selected destination lanes and preserves old values");
+            }
+        }
+        CNA_CHECK(observed==1,"one observed numeric predicated destination");
+    }
 }
 static void predicated_kill(void)
 {
@@ -130,9 +189,89 @@ static void predicated_kill(void)
         p=cna_parse(profiles[profile],w.at,w.count*4);
         CNA_CHECK(cna_report_errors("predicated kill",p)==0,"predicate fixture accepted");
         if(p && !p->error_count)
-        { kill_condition(p,expected);CNA_CHECK(cna_spirv_validate(p,"predicated_kill")==1,"valid predicated-kill module"); }
+        { program_result(p,expected,NULL,0,0);CNA_CHECK(cna_spirv_validate(p,"predicated_kill")==1,"valid predicated-kill module"); }
+        MOJOSHADER_freeParseData(p);cna_words_free(&w);
+    }
+}
+static void push_float(CnaWords *w,float value)
+{ uint32_t bits;memcpy(&bits,&value,sizeof(bits));cna_words_push(w,bits); }
+static void predicated_writes(void)
+{
+    static const char *profiles[]={"spirv","glspirv"};
+    static const unsigned int predicates[]={0,5,15},selectors[]={0xe4,0,0x55,0xaa,0xff},masks[]={15,6,8};
+    int profile,pattern,selector,negated,mask_index,mode;
+    for(profile=0;profile<2;profile++) for(pattern=0;pattern<3;pattern++) for(selector=0;selector<5;selector++)
+        for(negated=0;negated<2;negated++) for(mask_index=0;mask_index<3;mask_index++) for(mode=0;mode<6;mode++)
+    {
+        CnaWords w={0};const MOJOSHADER_parseData *p;
+        float constants[4][4]={{.25f,.5f,.75f,1},{2,-1,.125f,3},{0},{.5f,.5f,.5f,.5f}},expected[4];
+        const unsigned int bits=predicates[pattern],mask=mode==3?1:masks[mask_index];
+        int i,c,vertex=mode==5;
+        unsigned int destination=mode==3?CNA_DEPTHOUT:mode==4?19:mode==5?CNA_ADDR:CNA_TEMP;
+        unsigned int opcode=mode==1?CNA_ADD:mode==4?94:mode==5?46:CNA_MOV;
+        if(mode==2)
+        {
+            const float initial[]={-.25f,1.5f,2,-1};
+            memcpy(constants[0],initial,sizeof(initial));
+        }
+        if(mode==3) constants[1][0]=.75f;
+        if(mode==4) for(i=0;i<4;i++) constants[1][i]=2;
+        if(mode==5)
+        {
+            const float initial[]={1.2f,-2.2f,3.2f,-4.2f},next[]={2.7f,-3.7f,4.7f,-5.7f};
+            memcpy(constants[0],initial,sizeof(initial));memcpy(constants[1],next,sizeof(next));
+        }
+        for(i=0;i<4;i++) constants[2][i]=(bits&(1u<<i))?1:0;
+        cna_words_push(&w,vertex?CNA_VS(3,0):CNA_PS(3,0));
+        for(c=0;c<4;c++)
+        {
+            cna_words_push(&w,CNA_OP(CNA_DEF,5));cna_words_push(&w,CNA_DST(CNA_CONST,c,15));
+            for(i=0;i<4;i++) push_float(&w,constants[c][i]);
+        }
+        if(vertex)
+        {
+            cna_words_push(&w,CNA_OP(CNA_DCL_OP,2));cna_words_push(&w,CNA_DCL(0,0));cna_words_push(&w,CNA_DST(CNA_OUTPUT,0,15));
+            cna_words_push(&w,CNA_OP(CNA_MOV,2));cna_words_push(&w,CNA_DST(CNA_OUTPUT,0,15));cna_words_push(&w,CNA_SRC(CNA_CONST,0));
+        }
+        cna_words_push(&w,CNA_OP(94,3)|(1u<<16));cna_words_push(&w,CNA_DST(19,0,15));
+        cna_words_push(&w,CNA_SRC(CNA_CONST,2));cna_words_push(&w,CNA_SRC(CNA_CONST,3));
+        if(mode!=4)
+        {
+            cna_words_push(&w,CNA_OP(vertex?46:CNA_MOV,2));cna_words_push(&w,CNA_DST(destination,0,mode==3?1:15));
+            cna_words_push(&w,CNA_SRC(CNA_CONST,0));
+        }
+        cna_words_push(&w,CNA_OP(opcode,mode==1 || mode==4?4:3)|(1u<<28)|(mode==4?1u<<16:0));
+        cna_words_push(&w,CNA_DST(destination,0,mask)|(mode==2?1u<<20:0));
+        cna_words_push(&w,CNA_SRC(mode==1?CNA_TEMP:CNA_CONST,mode==1?0:1));
+        if(mode==1 || mode==4) cna_words_push(&w,CNA_SRC(CNA_CONST,mode==4?0:1));
+        cna_words_push(&w,CNA_SRC_SWZ(19,0,selectors[selector])|(negated?13u<<24:0));
+        if(mode<=2)
+        {
+            cna_words_push(&w,CNA_OP(CNA_MOV,2));cna_words_push(&w,CNA_DST(CNA_COLOROUT,0,15));
+            cna_words_push(&w,CNA_SRC(CNA_TEMP,0));
+        }
+        cna_words_push(&w,CNA_END);
+        for(i=0;i<4;i++)
+        {
+            float old=mode==4?constants[2][i]:mode==5?roundf(constants[0][i]):constants[0][i];
+            float next=mode==4?1:mode==5?roundf(constants[1][i]):mode==1?old+constants[1][i]:constants[1][i];
+            int selected=((bits>>((selectors[selector]>>(2*i))&3))&1)^negated;
+            if(mode==2) next=next<0?0:next>1?1:next;
+            expected[i]=selected && (mask&(1u<<i))?next:old;
+        }
+        p=cna_parse(profiles[profile],w.at,w.count*4);
+        CNA_CHECK(cna_report_errors("predicated write",p)==0,"legal predicated destination accepted");
+        if(p && !p->error_count)
+        {
+            program_result(p,-1,expected,mode==4?2:mode==5?3:0,mode==3?1:4);
+            CNA_CHECK(cna_spirv_validate(p,"predicated_write")==1,"valid predicated-write module");
+        }
         MOJOSHADER_freeParseData(p);cna_words_free(&w);
     }
 }
 int main(void)
-{ cna_test_run("predicated_kill_truth_table",predicated_kill);return cna_test_finish(); }
+{
+    cna_test_run("predicated_kill_truth_table",predicated_kill);
+    cna_test_run("predicated_destination_values",predicated_writes);
+    return cna_test_finish();
+}
