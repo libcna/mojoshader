@@ -113,6 +113,7 @@ mojoshader_cna_test(cna_spirv_tests)
 
 mojoshader_cna_test(cna_ps14_tests)
 mojoshader_cna_test(cna_legacy_spirv_tests)
+mojoshader_cna_test(cna_specular_spirv_tests)
 
 mojoshader_cna_test(cna_glspirv_tests)
 mojoshader_cna_test(cna_glspirv_default_tests cna_glspirv_tests.c mojoshader_cna_default)

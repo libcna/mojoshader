@@ -3567,26 +3567,23 @@ static SpirvTexm3x3SetupResult spv_texm3x3_setup(Context *ctx)
 
 static uint32 spv_reflect(Context *ctx, uint32 id_normal, uint32 id_eyeray)
 {
-    // reflect(E : vec3 = eyeray, N : vec3 = normal) -> vec3
-    // 2 * [(N*E) / (N*N)] * N - E
-
+    // D3D9 legacy specular lookup: 2 * dot(N,E) / dot(N,N) * N - E. -CNA
+    uint32 tid_float    = spv_get_type(ctx, STI_FLOAT);
     uint32 tid_vec3     = spv_get_type(ctx, STI_VEC3);
     uint32 id_2         = spv_getscalarf(ctx, 2.0f);
-    uint32 id_2_v3      = spv_bumpid(ctx);
-    uint32 id_refl_0    = spv_bumpid(ctx);
-    uint32 id_refl_1    = spv_bumpid(ctx);
-    uint32 id_refl_2    = spv_bumpid(ctx);
-    uint32 id_refl_3    = spv_bumpid(ctx);
-    uint32 id_refl_4    = spv_bumpid(ctx);
+    uint32 id_dot_ne    = spv_bumpid(ctx);
+    uint32 id_dot_nn    = spv_bumpid(ctx);
+    uint32 id_ratio     = spv_bumpid(ctx);
+    uint32 id_factor    = spv_bumpid(ctx);
+    uint32 id_scaled    = spv_bumpid(ctx);
     uint32 id_reflected = spv_bumpid(ctx);
 
-    spv_emit(ctx, 3 + 3, SpvOpCompositeConstruct, tid_vec3, id_2_v3, id_2, id_2, id_2);
-    spv_emit(ctx, 5, SpvOpFMul, tid_vec3, id_refl_0, id_normal, id_eyeray);
-    spv_emit(ctx, 5, SpvOpFMul, tid_vec3, id_refl_1, id_normal, id_normal);
-    spv_emit(ctx, 5, SpvOpFDiv, tid_vec3, id_refl_2, id_refl_0, id_refl_1);
-    spv_emit(ctx, 5, SpvOpFMul, tid_vec3, id_refl_3, id_refl_2, id_normal);
-    spv_emit(ctx, 5, SpvOpFMul, tid_vec3, id_refl_4, id_refl_3, id_2_v3);
-    spv_emit(ctx, 5, SpvOpFSub, tid_vec3, id_reflected, id_refl_4, id_eyeray);
+    spv_emit(ctx, 5, SpvOpDot, tid_float, id_dot_ne, id_normal, id_eyeray);
+    spv_emit(ctx, 5, SpvOpDot, tid_float, id_dot_nn, id_normal, id_normal);
+    spv_emit(ctx, 5, SpvOpFDiv, tid_float, id_ratio, id_dot_ne, id_dot_nn);
+    spv_emit(ctx, 5, SpvOpFMul, tid_float, id_factor, id_ratio, id_2);
+    spv_emit(ctx, 5, SpvOpVectorTimesScalar, tid_vec3, id_scaled, id_normal, id_factor);
+    spv_emit(ctx, 5, SpvOpFSub, tid_vec3, id_reflected, id_scaled, id_eyeray);
 
     return id_reflected;
 } // spv_reflect
