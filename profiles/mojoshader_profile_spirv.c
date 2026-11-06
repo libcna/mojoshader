@@ -2507,18 +2507,16 @@ void emit_SPIRV_sampler(Context *ctx, int stage, TextureType ttype, int texbem)
         return;
     } // if
     if ((stage < 0) ||
-        /* sampler_extras has four entries because it stores TEXBEM data, which exists only in
-         * pixel shader 1.x and therefore only for s0..s3. It is not the pixel-sampler register
-         * file: Shader Model 2/3 has sixteen samplers, represented by the patch table below.
-         * Comparing every shader against sampler_extras rejected a valid s4 or higher before
-         * the texbem-only block that actually indexes it. -CNA */
+        /* Six ps_1_4 BEM matrices; texture samplers have their independent SM2/3 limit. */
         (((size_t) stage) >= STATICARRAYLEN(ctx->spirv.patch_table.samplers)) ||
-        /* Preserve the narrower guard where the TEXBEM-only block really indexes that table. */
         (texbem && ((size_t) stage) >= STATICARRAYLEN(ctx->spirv.sampler_extras)))
     {
         fail(ctx, "Sampler stage is out of range.");
         return;
     } // if
+    // BEM advertises matrix state through a sampler entry but never samples its image.
+    // Give that implicit sampler a declaration ID even without an earlier texture load. -CNA
+    spv_check_read_reg_id(ctx, sampler_reg);
     result = sampler_reg->spirv.iddecl;
 
     push_output(ctx, &ctx->mainline_intro);
@@ -5073,15 +5071,82 @@ void emit_SPIRV_TEXCRD(Context *ctx)
     } // else
 } // emit_SPIRV_TEXCRD
 
-// !!! FIXME: The following are unimplemented even in the GLSL emitter.
+// Remaining legacy SPIR-V gaps; the GLSL emitter implements these.
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2AR)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2GB)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2RGB)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3TEX)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXM3X2DEPTH)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3)
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXDEPTH)
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(BEM)
+void emit_SPIRV_BEM(Context *ctx)
+{
+    const unsigned int stage = ctx->dest_arg.regnum;
+    if (stage >= STATICARRAYLEN(ctx->spirv.sampler_extras))
+    {
+        fail(ctx, "BEM matrix stage is out of range.");
+        return;
+    } // if
+    // D3D9 bem: src0.xy + (M00,M01)*src1.x + (M10,M11)*src1.y.
+    // Load both sources before the masked destination write (sources may alias it). -CNA
+    SpirvResult base = spv_load_srcarg(ctx, 0, 0x3);
+    SpirvResult bump = spv_load_srcarg(ctx, 1, 0x3);
+    uint32 offset = ctx->spirv.sampler_extras[stage].idtexbem;
+    if (!offset)
+    {
+        offset = spv_bumpid(ctx);
+        ctx->spirv.sampler_extras[stage].idtexbem = offset;
+    } // if
+    push_output(ctx, &ctx->mainline);
+    uint32 ptr = spv_access_uniform(ctx, STI_PTR_VEC4_U, REG_TYPE_CONST, offset);
+    SpirvResult matrix;
+    matrix.tid = spv_get_type(ctx, STI_VEC4);
+    matrix.id = spv_bumpid(ctx);
+    spv_emit(ctx, 4, SpvOpLoad, matrix.tid, matrix.id, ptr);
+    SpirvResult xy = spv_swizzle(ctx, matrix, 0x4, 0x3);
+    SpirvResult zw = spv_swizzle(ctx, matrix, 0xE, 0x3);
+    SpirvResult xx = spv_swizzle(ctx, bump, 0x0, 0x3);
+    SpirvResult yy = spv_swizzle(ctx, bump, 0x5, 0x3);
+    uint32 a = spv_bumpid(ctx), b = spv_bumpid(ctx), sum = spv_bumpid(ctx);
+    SpirvResult result;
+    result.tid = base.tid;
+    result.id = spv_bumpid(ctx);
+    spv_emit(ctx, 5, SpvOpFMul, base.tid, a, xy.id, xx.id);
+    spv_emit(ctx, 5, SpvOpFMul, base.tid, b, zw.id, yy.id);
+    spv_emit(ctx, 5, SpvOpFAdd, base.tid, sum, a, b);
+    spv_emit(ctx, 5, SpvOpFAdd, base.tid, result.id, base.id, sum);
+    // The shared masked-assignment helper expects a full vec4. The extra lanes here
+    // are ignored by BEM's mandatory .rg write mask; it preserves the destination .ba. -CNA
+    SpirvResult expanded;
+    expanded.tid = spv_get_type(ctx, STI_VEC4);
+    expanded.id = spv_bumpid(ctx);
+    spv_emit(ctx, 9, SpvOpVectorShuffle, expanded.tid, expanded.id,
+             result.id, result.id, 0, 1, 0, 1);
+    pop_output(ctx);
+    spv_assign_destarg(ctx, expanded);
+} // emit_SPIRV_BEM
+
+void emit_SPIRV_TEXDEPTH(Context *ctx)
+{
+    RegisterList *source = spv_getreg(ctx, REG_TYPE_TEMP, 5);
+    RegisterList *output = spv_getreg(ctx, REG_TYPE_DEPTHOUT, 0);
+    if (source == NULL || output == NULL) return;
+    spv_check_write_reg_id(ctx, output);
+    SpirvResult value = spv_loadreg(ctx, source);
+    uint32 tid_float = spv_get_type(ctx, STI_FLOAT);
+    uint32 tid_bool = spv_get_type(ctx, STI_BOOL);
+    uint32 zero = spv_getscalarf(ctx, 0.0f), one = spv_getscalarf(ctx, 1.0f);
+    uint32 x = spv_bumpid(ctx), y = spv_bumpid(ctx), iszero = spv_bumpid(ctx);
+    uint32 ratio = spv_bumpid(ctx), depth = spv_bumpid(ctx);
+    push_output(ctx, &ctx->mainline);
+    spv_emit(ctx, 5, SpvOpCompositeExtract, tid_float, x, value.id, 0);
+    spv_emit(ctx, 5, SpvOpCompositeExtract, tid_float, y, value.id, 1);
+    spv_emit(ctx, 5, SpvOpFOrdEqual, tid_bool, iszero, y, zero);
+    spv_emit(ctx, 5, SpvOpFDiv, tid_float, ratio, x, y);
+    // D3D9 texdepth defines a zero divisor (including -0) to produce depth 1. -CNA
+    spv_emit(ctx, 6, SpvOpSelect, tid_float, depth, iszero, one, ratio);
+    spv_emit(ctx, 3, SpvOpStore, output->spirv.iddecl, depth);
+    pop_output(ctx);
+} // emit_SPIRV_TEXDEPTH
 
 #endif  // SUPPORT_PROFILE_SPIRV
 

@@ -211,11 +211,11 @@ typedef struct SpirvContext
 
     SpirvPatchTable patch_table;
 
-    // Required only on ps_1_3 and below, which only has 4 registers for this purpose.
+    // TEXBEM/L use stages 0..3; ps_1_4 BEM can use any destination r0..r5.
     struct {
         uint32 idtexbem;
         uint32 idtexbeml;
-    } sampler_extras[4];
+    } sampler_extras[6];
 
     // TEX opcode in ps_1_3 and below has one implicit texcoord input attribute for each texture
     // register. We use this array to hold SSA id of this input attribute (see emit_SPIRV_global

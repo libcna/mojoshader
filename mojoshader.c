@@ -3544,7 +3544,12 @@ static void state_TEXDEPTH(Context *ctx)
     if ((ctx->pixel14_previous_phase_temp_xy & (1u << 5)) == 0)
         fail(ctx, "TEXDEPTH requires r5.xy initialized in the previous phase");
     if (!isfail(ctx))
+    {
         ctx->pixel14_texdepth_consumed = 1;
+        // TEXDEPTH writes an implicit oDepth, not its syntactic operand r5. -CNA
+        set_used_register(ctx, REG_TYPE_DEPTHOUT, 0, 1);
+        add_attribute_register(ctx, REG_TYPE_DEPTHOUT, 0, MOJOSHADER_USAGE_DEPTH, 0, 1, 0);
+    } // if
 } // state_TEXDEPTH
 
 
