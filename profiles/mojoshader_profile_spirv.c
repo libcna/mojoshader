@@ -3741,9 +3741,8 @@ void emit_SPIRV_TEXKILL(Context *ctx)
     uint32 zeros = spv_get_zero(ctx, vec3);
 
     // A predicated TEXKILL kills only the components its predicate selects:
-    // any(p0.swz.xyz && dst.xyz < 0), the predicate optionally negated. This profile used to
-    // ignore the predicate and kill unconditionally -- a silent wrong pixel, where predicated
-    // destinations at least fail by name. Same rule as the GLSL profile's CNA patch. -CNA
+    // any(p0.swz.xyz && dst.xyz < 0), the predicate optionally negated. Mask inactive float
+    // lanes to zero: Naga cannot resolve vector OpLogicalAnd even though Vulkan accepts it. -CNA
     SpirvResult predicate;
     predicate.tid = 0;
     predicate.id = 0;
@@ -3765,23 +3764,18 @@ void emit_SPIRV_TEXKILL(Context *ctx)
     uint32 res_any = spv_bumpid(ctx);
     uint32 label_true = spv_bumpid(ctx);
     uint32 label_merge = spv_bumpid(ctx);
-    spv_emit(ctx, 5, SpvOpFOrdLessThan, bvec3, res_lt, res_swiz, zeros);
-    uint32 res_cond = res_lt;
     if (ctx->predicated)
     {
         const SourceArgInfo *arg = &ctx->predicate_arg;
         uint32 res_pred = spv_emit_swizzle(ctx, predicate.id, bvec3, arg->swizzle, 0x7);
-        if (arg->src_mod == SRCMOD_NOT)
-        {
-            uint32 res_not = spv_bumpid(ctx);
-            spv_emit(ctx, 4, SpvOpLogicalNot, bvec3, res_not, res_pred);
-            res_pred = res_not;
-        } // if
-        uint32 res_and = spv_bumpid(ctx);
-        spv_emit(ctx, 5, SpvOpLogicalAnd, bvec3, res_and, res_pred, res_lt);
-        res_cond = res_and;
+        uint32 res_masked = spv_bumpid(ctx);
+        spv_emit(ctx, 6, SpvOpSelect, vec3, res_masked, res_pred,
+                 arg->src_mod == SRCMOD_NOT ? zeros : res_swiz,
+                 arg->src_mod == SRCMOD_NOT ? res_swiz : zeros);
+        res_swiz = res_masked;
     } // if
-    spv_emit(ctx, 4, SpvOpAny, spv_get_type(ctx, STI_BOOL), res_any, res_cond);
+    spv_emit(ctx, 5, SpvOpFOrdLessThan, bvec3, res_lt, res_swiz, zeros);
+    spv_emit(ctx, 4, SpvOpAny, spv_get_type(ctx, STI_BOOL), res_any, res_lt);
     spv_emit(ctx, 3, SpvOpSelectionMerge, label_merge, 0);
     spv_emit(ctx, 4, SpvOpBranchConditional, res_any, label_true, label_merge);
     spv_emit(ctx, 2, SpvOpLabel, label_true);
