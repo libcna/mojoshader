@@ -951,6 +951,7 @@ static void readsmallobjects(const uint32 numsmallobjects,
                              const unsigned int swizcount,
                              const MOJOSHADER_samplerMap *smap,
                              const unsigned int smapcount,
+                             uint8 *object_seen,
                              ErrorList *errors)
 {
     int i, j;
@@ -975,6 +976,14 @@ static void readsmallobjects(const uint32 numsmallobjects,
             return;
         } // if
 
+        // An object may be referenced many times, but its payload is defined only once.
+        // Keep this table shared with readlargeobjects, including empty small records. -CNA
+        if (object_seen[index])
+        {
+            errorlist_add(errors, NULL, 0, "Effect object payload is duplicated.");
+            return;
+        } // if
+        object_seen[index] = 1;
         MOJOSHADER_effectObject *object = &effect->objects[index];
         if (object->type == MOJOSHADER_SYMTYPE_STRING)
         {
@@ -1142,6 +1151,7 @@ static void readlargeobjects(const uint32 numlargeobjects,
                              const unsigned int swizcount,
                              const MOJOSHADER_samplerMap *smap,
                              const unsigned int smapcount,
+                             uint8 *object_seen,
                              ErrorList *errors)
 {
     int i, j;
@@ -1306,6 +1316,13 @@ static void readlargeobjects(const uint32 numlargeobjects,
         if (object->type == MOJOSHADER_SYMTYPE_PIXELSHADER
          || object->type == MOJOSHADER_SYMTYPE_VERTEXSHADER)
         {
+            // Do not overwrite the compiled shader or any of its owned tables. -CNA
+            if (object_seen[objectIndex])
+            {
+                errorlist_add(errors, NULL, 0, "Effect object payload is duplicated.");
+                return;
+            } // if
+            object_seen[objectIndex] = 1;
             object->shader.technique = technique;
             object->shader.pass = index;
 
@@ -1665,16 +1682,27 @@ MOJOSHADER_effect *MOJOSHADER_compileEffect(const unsigned char *buf,
     if (errors == NULL)
         goto parseEffect_outOfMemory;
 
+    // Parser-local occupancy, not the object type: readvalue already populated the types.
+    // No public layout change, and the same bytes cover both object readers. -CNA
+    uint8 *object_seen = (uint8 *) m(numobjects ? numobjects : 1, d);
+    if (object_seen == NULL)
+    {
+        errorlist_destroy(errors);
+        goto parseEffect_outOfMemory;
+    } // if
+    memset(object_seen, '\0', numobjects);
+
     /* Parse "small" object table */
     readsmallobjects(numsmallobjects, &ptr, &len, retval,
-                     swiz, swizcount, smap, smapcount, errors);
+                     swiz, swizcount, smap, smapcount, object_seen, errors);
     if (errorlist_count(errors) == 0)
     {
         /* Parse "large" object table. */
         readlargeobjects(numlargeobjects, numsmallobjects, &ptr, &len, retval,
-                         swiz, swizcount, smap, smapcount, errors);
+                         swiz, swizcount, smap, smapcount, object_seen, errors);
     } // if
 
+    f(object_seen, d);
     retval->error_count = errorlist_count(errors);
     retval->errors = errorlist_flatten(errors);
     errorlist_destroy(errors);
