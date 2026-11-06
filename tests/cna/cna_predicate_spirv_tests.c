@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Zlib */
-/* Independent numeric predicate truth tables and portable SPIR-V control flow. */
+/* Independent numeric predicate/result-modifier oracles and portable SPIR-V control flow. */
 #include <string.h>
 #include <math.h>
 #include "spirv/GLSL.std.450.h"
@@ -147,13 +147,13 @@ static void program_result(const MOJOSHADER_parseData *p,int expected,const floa
             if(matches && widths[var_type[i]]==output_width)
             {
                 int lane;observed++;
-                CNA_CHECK(memory[i].known==((1u<<output_width)-1),"all observed predicated destination lanes are defined");
+                CNA_CHECK(memory[i].known==((1u<<output_width)-1),"all observed destination lanes are defined");
                 for(lane=0;lane<output_width;lane++)
                     CNA_CHECK(fabsf(memory[i].v[lane]-output[lane])<.000001f,
-                              "predicate updates selected destination lanes and preserves old values");
+                              "numeric destination has the expected updated and preserved values");
             }
         }
-        CNA_CHECK(observed==1,"one observed numeric predicated destination");
+        CNA_CHECK(observed==1,"one observed numeric destination");
     }
 }
 static void predicated_kill(void)
@@ -269,9 +269,67 @@ static void predicated_writes(void)
         MOJOSHADER_freeParseData(p);cna_words_free(&w);
     }
 }
+
+static void shifted_results(void)
+{
+    static const char *profiles[]={"spirv","glspirv"};
+    static const unsigned int shifts[]={0,1,2,3,13,14,15},masks[]={15,7,8};
+    static const float scales[]={1,2,4,8,.125f,.25f,.5f};
+    int profile,minor,shift,mask_index,add,saturate;
+    /* Microsoft, Modifiers for ps_1_X:
+     * https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx9-graphics-reference-asm-ps-instructions-modifiers-ps-1-x
+     * Saturation follows any multiply/divide modifier. Only ps_1_4 adds x8/d4/d8.
+     * A final unmodified multiply by 1/4 keeps a wrong >1 result observable on a colour target. */
+    for(profile=0;profile<2;profile++) for(minor=1;minor<=4;minor++) for(shift=0;shift<7;shift++)
+        for(mask_index=0;mask_index<3;mask_index++) for(add=0;add<2;add++) for(saturate=0;saturate<2;saturate++)
+    {
+        CnaWords w={0};const MOJOSHADER_parseData *p;
+        float constants[3][4]={{-.125f,.375f,.5f,.75f},{.75f,.5f,-.5f,.125f},{.25f,.25f,.25f,.25f}};
+        float expected[4];int c,i;
+        if(minor<4 && (shifts[shift]==3 || shifts[shift]==13 || shifts[shift]==14)) continue;
+        if(!saturate)
+        {
+            const float small[]={.0625f,.125f,-.0625f,.03125f};
+            memcpy(constants[1],small,sizeof(small));
+        }
+        cna_words_push(&w,CNA_PS(1,minor));
+        for(c=0;c<3;c++)
+        {
+            cna_words_push(&w,CNA_OP(CNA_DEF,0));cna_words_push(&w,CNA_DST(CNA_CONST,c,15));
+            for(i=0;i<4;i++) push_float(&w,constants[c][i]);
+        }
+        /* x4 establishes old lanes outside [0,1] without out-of-range DEF constants.
+         * A later masked saturation must leave these lanes untouched. */
+        cna_words_push(&w,CNA_OP(CNA_MOV,0));cna_words_push(&w,CNA_DST(CNA_TEMP,0,15)|(2u<<24));
+        cna_words_push(&w,CNA_SRC(CNA_CONST,0));
+        cna_words_push(&w,CNA_OP(add?CNA_ADD:CNA_MOV,0));
+        cna_words_push(&w,CNA_DST(CNA_TEMP,0,masks[mask_index])|(shifts[shift]<<24)|(saturate?1u<<20:0));
+        cna_words_push(&w,CNA_SRC(CNA_CONST,1));
+        if(add) cna_words_push(&w,CNA_SRC(CNA_CONST,1));
+        cna_words_push(&w,CNA_OP(CNA_MUL,0));cna_words_push(&w,CNA_DST(CNA_TEMP,0,15));
+        cna_words_push(&w,CNA_SRC(CNA_TEMP,0));cna_words_push(&w,CNA_SRC(CNA_CONST,2));
+        cna_words_push(&w,CNA_END);
+        for(i=0;i<4;i++)
+        {
+            float result=constants[1][i]*(add?2:1)*scales[shift];
+            if(saturate) result=result<0?0:result>1?1:result;
+            expected[i]=((masks[mask_index]&(1u<<i))?result:constants[0][i]*4)*.25f;
+        }
+        p=cna_parse(profiles[profile],w.at,w.count*4);
+        CNA_CHECK(cna_report_errors("shifted result",p)==0,"legal ps_1_x result modifiers accepted");
+        if(p && !p->error_count)
+        {
+            program_result(p,-1,expected,0,4);
+            CNA_CHECK(cna_spirv_validate(p,"shifted_result")==1,"valid shifted-result module");
+        }
+        MOJOSHADER_freeParseData(p);cna_words_free(&w);
+    }
+}
+
 int main(void)
 {
     cna_test_run("predicated_kill_truth_table",predicated_kill);
     cna_test_run("predicated_destination_values",predicated_writes);
+    cna_test_run("shifted_saturated_results",shifted_results);
     return cna_test_finish();
 }

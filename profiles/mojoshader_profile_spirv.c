@@ -1365,24 +1365,6 @@ static void spv_assign_destarg(Context *ctx, SpirvResult value)
         return;
     } // if
 
-    if (arg->result_mod & MOD_SATURATE)
-    {
-        uint32 ext, zero, one, new_value;
-
-        // Don't inline these, compilers will run the varargs in different orders
-        new_value = spv_bumpid(ctx);
-        one = spv_get_one(ctx, value.tid);
-        zero = spv_get_zero(ctx, value.tid);
-        ext = spv_getext(ctx);
-
-        push_output(ctx, &ctx->mainline);
-        spv_emit(ctx, 5 + 3, SpvOpExtInst,
-            value.tid, new_value, ext, GLSLstd450FClamp, value.id, zero, one
-        );
-        pop_output(ctx);
-        value.id = new_value;
-    } // if
-
     // MSDN says MOD_PP is a hint and many implementations ignore it. So do we.
 
     // CENTROID only allowed in DCL opcodes, which shouldn't come through here.
@@ -1410,6 +1392,25 @@ static void spv_assign_destarg(Context *ctx, SpirvResult value)
         spv_emit(ctx, 5, SpvOpFMul, value.tid, id_new, value.id, id_factor);
         pop_output(ctx);
         value.id = id_new;
+    } // if
+
+    // Direct3D 9 ps_1_x applies saturation after result scaling. -CNA
+    if (arg->result_mod & MOD_SATURATE)
+    {
+        uint32 ext, zero, one, new_value;
+
+        // Don't inline these, compilers will run the varargs in different orders
+        new_value = spv_bumpid(ctx);
+        one = spv_get_one(ctx, value.tid);
+        zero = spv_get_zero(ctx, value.tid);
+        ext = spv_getext(ctx);
+
+        push_output(ctx, &ctx->mainline);
+        spv_emit(ctx, 5 + 3, SpvOpExtInst,
+            value.tid, new_value, ext, GLSLstd450FClamp, value.id, zero, one
+        );
+        pop_output(ctx);
+        value.id = new_value;
     } // if
 
     if (reg->regtype == REG_TYPE_DEPTHOUT
