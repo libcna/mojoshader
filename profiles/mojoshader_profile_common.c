@@ -310,6 +310,7 @@ RegisterList *reglist_insert(Context *ctx, RegisterList *prev,
         item->index = 0;
         item->writemask = 0;
         item->misc = 0;
+        item->sampler_used = 0;
         item->written = 0;
 #if SUPPORT_PROFILE_SPIRV
         item->spirv.iddecl = 0;

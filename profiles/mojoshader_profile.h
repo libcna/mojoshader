@@ -41,6 +41,7 @@ typedef struct RegisterList
     unsigned int index;
     int writemask;
     int misc;
+    int sampler_used;
     int written;
 #if SUPPORT_PROFILE_SPIRV
     struct {

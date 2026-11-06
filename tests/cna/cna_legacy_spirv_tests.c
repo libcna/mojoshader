@@ -300,7 +300,8 @@ static void check(const char *profile, int depth, int stage, int zero_divisor, i
         {
             CNA_CHECK(matrix_formula(p), "BEM has literal D3D9 column/swizzle dataflow");
             CNA_CHECK(p->sampler_count == 1 && p->samplers[0].index == stage &&
-                      p->samplers[0].texbem != 0, "matrix uniform belongs to destination-numbered stage");
+                      p->samplers[0].texbem == 2, "matrix uniform belongs to destination-numbered stage");
+            CNA_CHECK(p->samplers[0].matrix_only == 1, "BEM-only stage does not require an image");
         }
         /* Microsoft D3D9 bem/texdepth specs settle semantics; spirv-val settles module validity. */
         CNA_CHECK(cna_spirv_validate(p, depth ? "texdepth" : "bem") == 1, "valid pixel module");
@@ -369,8 +370,70 @@ static void bem_modifiers(void)
     for (variant = 1; variant <= 4; variant++)
     { check("spirv", 0, 2, 0, variant); check("glspirv", 0, 2, 0, variant); }
 }
+static void sampler_roles(void)
+{
+    static const char *profiles[] = {"spirv", "glspirv"};
+    size_t profile;
+    int lookup_first;
+    for (profile = 0; profile < sizeof (profiles) / sizeof (profiles[0]); profile++)
+    {
+        for (lookup_first = 0; lookup_first < 2; lookup_first++)
+        {
+            CnaWords w = {0};
+            const MOJOSHADER_parseData *p;
+            const uint32_t head[] = {
+                CNA_PS(1, 4), CNA_DEF, CNA_DST(CNA_CONST, 0, 15),
+                0x3e800000, 0x3e800000, 0, 0x3f800000
+            };
+            size_t i;
+            for (i = 0; i < sizeof (head) / sizeof (head[0]); i++) cna_words_push(&w, head[i]);
+            if (lookup_first)
+            {
+                cna_words_push(&w, CNA_TEXLD); cna_words_push(&w, CNA_DST(CNA_TEMP, 0, 15));
+                cna_words_push(&w, CNA_SRC(CNA_TEXTURE, 0));
+            }
+            cna_words_push(&w, CNA_MOV); cna_words_push(&w, CNA_DST(CNA_TEMP, 2, 15));
+            cna_words_push(&w, CNA_SRC(CNA_CONST, 0));
+            cna_words_push(&w, CNA_MOV); cna_words_push(&w, CNA_DST(CNA_TEMP, 0, 15));
+            cna_words_push(&w, CNA_SRC(CNA_CONST, 0));
+            cna_words_push(&w, 89); cna_words_push(&w, CNA_DST(CNA_TEMP, 0, 3));
+            cna_words_push(&w, CNA_SRC(CNA_CONST, 0)); cna_words_push(&w, CNA_SRC(CNA_TEMP, 2));
+            if (!lookup_first)
+            {
+                cna_words_push(&w, 0xfffd); /* phase */
+                cna_words_push(&w, CNA_TEXLD); cna_words_push(&w, CNA_DST(CNA_TEMP, 0, 15));
+                cna_words_push(&w, CNA_SRC(CNA_TEXTURE, 0));
+            }
+            cna_words_push(&w, CNA_END);
+            p = cna_parse(profiles[profile], w.at, w.count * 4);
+            CNA_CHECK(cna_report_errors("BEM plus lookup", p) == 0, "BEM and TEXLD may share a stage");
+            if (p && !p->error_count)
+            {
+                CNA_CHECK(p->sampler_count == 1 && p->samplers[0].texbem == 2,
+                          "real lookup retains BEM matrix layout");
+                CNA_CHECK(p->samplers[0].matrix_only == 0, "real lookup still requires an image in either order");
+                CNA_CHECK(cna_spirv_validate(p, "bem_with_lookup") == 1, "valid BEM plus texture module");
+            }
+            MOJOSHADER_freeParseData(p); cna_words_free(&w);
+        }
+        {
+            static const uint32_t texbem[] = {
+                CNA_PS(1, 3), CNA_TEXCRD, CNA_DST(CNA_TEXTURE, 0, 15),
+                67, CNA_DST(CNA_TEXTURE, 1, 15), CNA_SRC(CNA_TEXTURE, 0),
+                CNA_MOV, CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEXTURE, 1), CNA_END
+            };
+            const MOJOSHADER_parseData *p = cna_parse(profiles[profile], texbem, sizeof (texbem));
+            CNA_CHECK(cna_report_errors("TEXBEM lookup", p) == 0, "TEXBEM fixture accepted");
+            if (p && !p->error_count)
+                CNA_CHECK(p->sampler_count == 1 && p->samplers[0].texbem == 1 &&
+                          p->samplers[0].matrix_only == 0, "TEXBEM samples an image as well as its matrix");
+            MOJOSHADER_freeParseData(p);
+        }
+    }
+}
 int main(void)
 {
+    cna_test_run("bem_sampler_roles", sampler_roles);
     cna_test_run("bem_destination_stages", bem_stages);
     cna_test_run("bem_source_and_result_modifiers", bem_modifiers);
     cna_test_run("texdepth_guarded_ratio", texdepth_ratio);

@@ -217,6 +217,7 @@ typedef struct MOJOSHADER_sampler
     int index;
     const char *name;
     int texbem;
+    int matrix_only; /* Nonzero for BEM matrix state without a texture lookup. -CNA */
 } MOJOSHADER_sampler;
 
 

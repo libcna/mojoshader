@@ -168,6 +168,8 @@ static inline void add_sampler(Context *ctx, const int regnum,
 
     item->index = (int) ttype;
     item->misc |= texbem;
+    /* BEM carries only matrix state; another instruction may sample the same stage. -CNA */
+    item->sampler_used |= (texbem != 2);
 } // add_sampler
 
 static inline void adjust_token_position(Context *ctx, const int incr)
@@ -5472,6 +5474,7 @@ static MOJOSHADER_sampler *build_samplers(Context *ctx)
             retval[i].index = item->regnum;
             retval[i].name = alloc_varname(ctx, item);
             retval[i].texbem = item->misc;
+            retval[i].matrix_only = (item->misc == 2 && !item->sampler_used);
             item = item->next;
         } // for
     } // if
