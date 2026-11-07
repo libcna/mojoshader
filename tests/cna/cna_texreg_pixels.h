@@ -233,6 +233,7 @@ static int texreg_pixels_draw(TexRegPixels *f, MOJOSHADER_sdlContext *ctx,
     }
     SDL_zero(color);
     SDL_zero(binding);
+    color.clear_color = (SDL_FColor){.2f, .4f, .6f, .8f};
     color.texture = f->target;
     color.load_op = SDL_GPU_LOADOP_CLEAR;
     color.store_op = SDL_GPU_STOREOP_STORE;

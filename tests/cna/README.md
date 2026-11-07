@@ -75,3 +75,12 @@ wrong input registers and DP4. The native `texdp3_native_pixels` case checks
 all64 pixels in24 draws; TEXDP3's ordinary RGBA bytes are88/96/104 by destination
 stage, while signed output clamps to0. TEXDP3TEX checks literal texels selected
 at y=0. Run device cases with the private runner and `SDL_ASSERT=abort`.
+
+### Zero-result pixel observation (TQ-TEXREG-ZERO-01)
+
+Native targets start with a distinct nonzero RGBA clear color. A signed TEXDP3
+result of zero therefore requires an actual fragment write. A valid SPIR-V
+control-flow mutation that kills only those fragments passed with the former
+zero background; the nonzero background catches all six dropped-output cases.
+All existing literal color expectations remain in place. The mutation is restored
+byte-for-byte before the pristine native harness is run.
