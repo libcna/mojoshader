@@ -320,7 +320,7 @@ static void texdepth_ratio(void)
 static void texdepth_zero(void)
 { check("spirv", 1, 0, 1, 0); check("glspirv", 1, 0, 1, 0); }
 /* A D3D parse proves these token streams are legal. Register-remapping lookups now
- * execute; the three still-missing emitters retain their exact named refusals. */
+ * and dependent dots execute; the remaining depth emitter retains its exact named refusal. */
 static void instruction_envelope(void)
 {
     static const struct { unsigned int opcode; const char *name; } cases[] = {
@@ -356,9 +356,9 @@ static void instruction_envelope(void)
             char expected[80];
             snprintf(expected, sizeof (expected), "%s unimplemented in spirv profile", cases[i].name);
             p = cna_parse(profiles[j], w.at, w.count * 4);
-            if (cases[i].opcode == 69 || cases[i].opcode == 70 || cases[i].opcode == 82)
+            if (cases[i].opcode != 84)
             {
-                CNA_CHECK(cna_report_errors(cases[i].name, p) == 0, "register-remapping lookup is implemented");
+                CNA_CHECK(cna_report_errors(cases[i].name, p) == 0, "legacy lookup/dot instruction is implemented");
                 if (p && !p->error_count)
                     CNA_CHECK(cna_spirv_validate(p, "texreg_envelope") == 1, "implemented lookup module validates");
             }

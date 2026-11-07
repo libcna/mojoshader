@@ -20,27 +20,46 @@ static void numeric_lookup(const MOJOSHADER_parseData *p, int opcode, int source
 {
     static Value value[IR_LIMIT], memory[IR_LIMIT];
     static int width[IR_LIMIT], storage[IR_LIMIT], binding[IR_LIMIT], image[IR_LIMIT];
-    static int builtin[IR_LIMIT];
+    static int builtin[IR_LIMIT], input_stage[IR_LIMIT];
     static const float source[] = {.125f, .375f, .625f, .875f};
     static const float sampled[] = {.9375f, .6875f, .4375f, .1875f};
     const uint32_t *words = (const uint32_t *) p->output;
     const size_t count = cna_spirv_module_words(p);
     size_t at;
-    int i, source_reads = 0, destination_reads = 0, outputs = 0;
+    int i, source_reads = 0, destination_reads = 0, outputs = 0, dots = 0;
+    static const float plain_dot[] = {.34375f, .375f, .40625f};
+    static const float signed_dot[] = {-2.0625f, -2.25f, -2.4375f};
+    const float dot = (signed_source ? signed_dot : plain_dot)[destination_stage - 1];
     CNA_CHECK(words[3] < IR_LIMIT, "numeric lookup ID bound");
     if (words[3] >= IR_LIMIT) return;
     memset(value, 0, sizeof(value)); memset(memory, 0, sizeof(memory));
     memset(width, 0, sizeof(width)); memset(builtin, 0, sizeof(builtin));
-    for (i = 0; i < IR_LIMIT; i++) storage[i] = binding[i] = image[i] = -1;
+    for (i = 0; i < IR_LIMIT; i++) storage[i] = binding[i] = image[i] = input_stage[i] = -1;
     for (at = 5; at < count && (words[at] >> 16); at += words[at] >> 16)
     {
         const uint32_t *d = words + at;
         const unsigned int op = d[0] & 0xffff;
+        if (op == SpvOpName)
+        {
+            int stage;
+            if (sscanf((const char *)(d + 2), "ps_t%d", &stage) == 1 && stage >= 0 && stage < 4)
+                input_stage[d[1]] = stage;
+        }
         if (op == SpvOpDecorate && d[2] == SpvDecorationBinding) binding[d[1]] = d[3];
         if (op == SpvOpDecorate && d[2] == SpvDecorationBuiltIn) builtin[d[1]] = 1;
         if (op == SpvOpTypeFloat || op == SpvOpTypeInt) width[d[1]] = 1;
         if (op == SpvOpTypeVector) width[d[1]] = d[3];
-        if (op == SpvOpVariable) storage[d[2]] = d[3];
+        if (op == SpvOpVariable)
+        {
+            storage[d[2]] = d[3];
+            if (d[3] == SpvStorageClassInput && input_stage[d[2]] >= 0)
+            {
+                Value *v = &memory[d[2]];
+                v->lane[0] = 2.0f + input_stage[d[2]] * .25f;
+                v->lane[1] = 1; v->lane[2] = -.5f; v->lane[3] = 9;
+                v->width = 4; v->known = 15;
+            }
+        }
         if (op == SpvOpConstant)
         {
             memcpy(value[d[2]].lane, d + 3, sizeof(float));
@@ -93,6 +112,17 @@ static void numeric_lookup(const MOJOSHADER_parseData *p, int opcode, int source
                 v->lane[i] = op == SpvOpFMul ? a->lane[i] * b->lane[i] :
                     op == SpvOpFAdd ? a->lane[i] + b->lane[i] : a->lane[i] - b->lane[i];
         }
+        if (op == SpvOpDot)
+        {
+            Value *v = &value[d[2]], *a = &value[d[3]], *b = &value[d[4]];
+            dots++;
+            CNA_CHECK(a->width == 3 && b->width == 3, "dependent dot reads only RGB/UVW");
+            v->width = 1;
+            v->known = a->width > 0 && a->width <= 4 && a->width == b->width &&
+                (a->known & b->known) == (1u << a->width) - 1;
+            v->lane[0] = 0;
+            for (i = 0; i < a->width && i < 4; i++) v->lane[0] += a->lane[i] * b->lane[i];
+        }
         if (op == SpvOpImageSampleImplicitLod)
         {
             const int stage = image[d[3]];
@@ -114,7 +144,8 @@ static void numeric_lookup(const MOJOSHADER_parseData *p, int opcode, int source
                 for (i = 0; i < dimensions; i++)
                 {
                     const int component = opcode == 69 ? (i == 0 ? 3 : 0) : opcode == 70 ? i + 1 : i;
-                    const float expected = signed_source ? source[component] * 2 - 1 : source[component];
+                    const float expected = opcode == 83 ? (i == 0 ? dot : 0.0f) :
+                        signed_source ? source[component] * 2 - 1 : source[component];
                     CNA_CHECK(coordinate->lane[i] == expected, "literal remapped texture coordinate");
                 }
                 memcpy(result->lane, sampled, sizeof(sampled));
@@ -122,7 +153,8 @@ static void numeric_lookup(const MOJOSHADER_parseData *p, int opcode, int source
             result->known = 15; result->width = 4;
         }
     }
-    CNA_CHECK(source_reads == 1 && destination_reads == 1, "exactly one source and one dependent read");
+    CNA_CHECK(source_reads == 1 && destination_reads == (opcode == 85 ? 0 : 1), "exact source/dependent sample count");
+    CNA_CHECK(dots == (opcode == 83 || opcode == 85 ? 1 : 0), "one dot exactly when required");
     for (i = 1; i < IR_LIMIT; i++)
         if (storage[i] == SpvStorageClassOutput && !builtin[i])
         {
@@ -130,7 +162,7 @@ static void numeric_lookup(const MOJOSHADER_parseData *p, int opcode, int source
             outputs++;
             CNA_CHECK(memory[i].known == 15, "every final colour lane is defined");
             for (lane = 0; lane < 4; lane++)
-                CNA_CHECK(memory[i].lane[lane] == sampled[lane], "dependent sample reaches final colour");
+                CNA_CHECK(memory[i].lane[lane] == (opcode == 85 ? dot : sampled[lane]), "literal dot or dependent sample reaches every output lane");
         }
     CNA_CHECK(outputs == 1, "one final colour output");
 }
@@ -184,6 +216,56 @@ static void coordinate_lookups(void)
     CNA_CHECK(variants == 204, "all legal profile/version/stage/type/modifier combinations visited");
 }
 
+/* Microsoft TEXDP3/DP3TEX: dot(UVW,RGB), ignoring both alpha lanes.
+ * Input tk=(2+k/4,1,-1/2,9), source=(1/8,3/8,5/8,7/8):
+ * ordinary dot=5/16+k/32, signed dot=-15/8-3k/16.
+ * https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texdp3---ps
+ * https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texdp3tex---ps */
+static void dependent_dots(void)
+{
+    static const char *profiles[]={"spirv","glspirv"};
+    static const int opcodes[]={83,85};
+    int profile,opcode,minor,destination,source,modifier,variants=0;
+    for (profile=0; profile<2; profile++) for (opcode=0; opcode<2; opcode++)
+    for (minor=2; minor<=3; minor++) for (destination=1; destination<=3; destination++)
+    for (source=0; source<destination; source++) for (modifier=0; modifier<=4; modifier+=4)
+    {
+        uint32_t words[16];
+        const size_t n=shader(words,opcodes[opcode],minor,destination,source,modifier);
+        const MOJOSHADER_parseData *p,*control;
+        control=cna_parse("d3d",words,n*sizeof(uint32_t));
+        CNA_CHECK(cna_report_errors("D3D dependent dot control",control)==0,"legal dot bytecode control");
+        MOJOSHADER_freeParseData(control);
+        p=cna_parse(profiles[profile],words,n*sizeof(uint32_t));
+        CNA_CHECK(cna_report_errors("SPIR-V dependent dot",p)==0,"dependent dot instruction is implemented");
+        if(p && !p->error_count)
+        {
+            numeric_lookup(p,opcodes[opcode],source,destination,MOJOSHADER_SAMPLER_2D,modifier!=0);
+            CNA_CHECK(p->sampler_count==(opcodes[opcode]==85?1:2),"TEXDP3 does not declare a destination sampler");
+            CNA_CHECK(cna_spirv_validate(p,"dependent_dot")==1,"valid dependent dot module");
+        }
+        MOJOSHADER_freeParseData(p);variants++;
+    }
+    CNA_CHECK(variants==96,"all legal dot versions/stages/source modifiers/profiles visited");
+}
+
+static void dependent_dot_sampler_dimensions(void)
+{
+    static const char *profiles[]={"spirv","glspirv"};
+    int profile,dimension;
+    for(profile=0;profile<2;profile++)
+    for(dimension=MOJOSHADER_SAMPLER_CUBE;dimension<=MOJOSHADER_SAMPLER_VOLUME;dimension++)
+    {
+        uint32_t words[16];
+        const size_t n=shader(words,83,2,1,0,0);
+        MOJOSHADER_samplerMap map={1,(MOJOSHADER_samplerType)dimension};
+        const MOJOSHADER_parseData *p=MOJOSHADER_parse(profiles[profile],"main",(const unsigned char*)words,n*4,NULL,0,&map,1,NULL,NULL,NULL);
+        CNA_CHECK(p && p->error_count==1,"dependent dot lookup refuses non-2D map");
+        if(p && p->error_count==1) CNA_CHECK(strstr(p->errors[0].error,"TEXDP3TEX needs a 2D sampler")!=NULL,"specific dependent dot dimension refusal");
+        MOJOSHADER_freeParseData(p);
+    }
+}
+
 static void incompatible_sampler_types(void)
 {
     static const char *profiles[] = {"spirv", "glspirv"};
@@ -208,5 +290,7 @@ int main(void)
 {
     cna_test_run("texreg_literal_coordinates_and_sample_dataflow", coordinate_lookups);
     cna_test_run("texreg_two_coordinate_sampler_dimensions", incompatible_sampler_types);
+    cna_test_run("dependent_dot_literal_dataflow", dependent_dots);
+    cna_test_run("dependent_dot_sampler_dimensions", dependent_dot_sampler_dimensions);
     return cna_test_finish();
 }

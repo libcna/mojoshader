@@ -5156,9 +5156,63 @@ void emit_SPIRV_TEXREG2RGB(Context *ctx)
 } // emit_SPIRV_TEXREG2RGB
 
 // Remaining legacy SPIR-V gaps; the GLSL emitter implements these.
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3TEX)
+static SpirvResult spv_dependent_texture_dot(Context *ctx)
+{
+    RegisterList *destination = spv_getreg(ctx, REG_TYPE_TEXTURE, ctx->dest_arg.regnum);
+    SpirvResult coordinate = spv_loadreg(ctx, destination);
+    coordinate = spv_swizzle(ctx, coordinate, SPV_NO_SWIZZLE, 0x7);
+    SpirvResult source = spv_load_srcarg(ctx, 0, 0x7);
+    SpirvResult dot = {0};
+    if (coordinate.tid == 0 || coordinate.tid != source.tid)
+    {
+        fail(ctx, "Dependent texture dot operands do not share a type.");
+        return dot;
+    } // if
+    dot.tid = spv_get_type(ctx, STI_FLOAT);
+    dot.id = spv_bumpid(ctx);
+    push_output(ctx, &ctx->mainline);
+    spv_emit(ctx, 5, SpvOpDot, dot.tid, dot.id, coordinate.id, source.id);
+    pop_output(ctx);
+    return dot;
+} // spv_dependent_texture_dot
+
+void emit_SPIRV_TEXDP3TEX(Context *ctx)
+{
+    RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER, ctx->dest_arg.regnum);
+    if (sreg == NULL || sreg->index != TEXTURE_TYPE_2D)
+    {
+        fail(ctx, "TEXDP3TEX needs a 2D sampler");
+        return;
+    } // if
+    SpirvResult dot = spv_dependent_texture_dot(ctx);
+    if (dot.tid == 0) return;
+    SpirvResult sampler = spv_loadreg(ctx, sreg);
+    uint32 zero = spv_getscalarf(ctx, 0.0f);
+    uint32 coordinate_type = spv_get_type(ctx, STI_VEC2);
+    uint32 coordinate = spv_bumpid(ctx);
+    SpirvResult result;
+    result.tid = spv_get_type(ctx, STI_VEC4);
+    result.id = spv_bumpid(ctx);
+    push_output(ctx, &ctx->mainline);
+    spv_emit(ctx, 5, SpvOpCompositeConstruct, coordinate_type, coordinate, dot.id, zero);
+    spv_emit(ctx, 5, SpvOpImageSampleImplicitLod, result.tid, result.id, sampler.id, coordinate);
+    pop_output(ctx);
+    spv_assign_destarg(ctx, result);
+} // emit_SPIRV_TEXDP3TEX
+
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXM3X2DEPTH)
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3)
+
+void emit_SPIRV_TEXDP3(Context *ctx)
+{
+    SpirvResult dot = spv_dependent_texture_dot(ctx);
+    if (dot.tid == 0) return;
+    SpirvResult result;
+    result.tid = spv_get_type(ctx, STI_VEC4);
+    push_output(ctx, &ctx->mainline);
+    result.id = spv_vectorbroadcast(ctx, result.tid, dot.id);
+    pop_output(ctx);
+    spv_assign_destarg(ctx, result);
+} // emit_SPIRV_TEXDP3
 void emit_SPIRV_BEM(Context *ctx)
 {
     const unsigned int stage = ctx->dest_arg.regnum;

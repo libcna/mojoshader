@@ -15,8 +15,8 @@ library (glslang's HLSL front end; the runtime library is enough, no headers) is
 `cna_hlsl_metal_tests` compiles every HLSL source it produces. There is no Metal compiler to run, so
 Metal sources are checked by their structure only.
 
-A test needs only valid shader bytecode, written out as tokens in the test, and its expected
-translation. Nothing here renders.
+Device-free tests need valid shader bytecode, written out as tokens, and independent expected
+translation/dataflow. The opt-in SDL_GPU cases also render literal native pixel references.
 
 `cna_sdlgpu_tests` covers the SDL_GPU glue and is built only when CMake finds an SDL3 package
 (`-DCMAKE_PREFIX_PATH=<SDL3 install>`). It uses the dynamic SDL_shadercross path, and on Linux the
@@ -34,13 +34,15 @@ the stand-in, and the device cases then also link a program through it.
 result-dataflow variants across both SPIR-V profiles, valid shader versions,
 register pairs, mapped texture types and RGB signed scaling. It interprets standard
 SPIR-V operations, validates each module, and checks eight explicit refusals of
-cube/volume samplers for the two-coordinate AR/GB instructions. The other three
-legacy texture opcodes retain their exact named refusals.
+cube/volume samplers for the two-coordinate AR/GB instructions. It also checks
+96 TEXDP3/DP3TEX dot/dataflow variants and four explicit incompatible DP3TEX maps.
+Only TEXM3X2DEPTH still has its named missing-emitter refusal.
 
 The opt-in `texreg2_native_programs` SDL_GPU case creates 48 real SPIR-V program
 pairs and checks their mapped sampler reflection and allocation cleanup. These
-are module/dataflow and native shader-creation checks. Rendered pixel comparison
-through a consuming framework remains an integration step.
+are native shader-creation checks. The separately selectable `texreg2_native_pixels`
+and `texdp3_native_pixels` cases compare complete native images; downstream framework
+integration remains a separate qualification.
 
 ### Mapped dependent-texture native pixels (TQ-TEXREG-PIXELS-01)
 
@@ -58,3 +60,18 @@ native SPIR-V. It does not qualify FNA3D/CNA's inference of legacy sampler types
 from effect metadata or bound textures. Default device-free runs skip this GPU
 case; shader-creation-only coverage remains separately selectable as
 `texreg2_native_programs`. ShaderCross is not the route creating these shaders.
+
+### Dependent texture dots (TQ-TEXDP3-01)
+
+SPIR-V and GLSPIRV now emit `texdp3` as dot(UVW,RGB) broadcast to all RGBA lanes,
+and `texdp3tex` as a destination-stage lookup at (dot,0), using the existing 2D
+sampler representation for this one-dimensional lookup. Legal source `_bx2`
+scaling applies before the dot. No destination sampler is declared for TEXDP3.
+
+The numeric oracle covers both shader versions1.2/1.3, both profiles, every
+source<destination pair among t0..t3, and both source scaling modes:96 variants.
+Distinct per-stage input coordinates and a large alpha component distinguish
+wrong input registers and DP4. The native `texdp3_native_pixels` case checks
+all64 pixels in24 draws; TEXDP3's ordinary RGBA bytes are88/96/104 by destination
+stage, while signed output clamps to0. TEXDP3TEX checks literal texels selected
+at y=0. Run device cases with the private runner and `SDL_ASSERT=abort`.
