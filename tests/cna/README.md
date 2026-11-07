@@ -29,3 +29,15 @@ belongs on a private display, not on a desktop someone is using; under AddressSa
 
 `-DMOJOSHADER_CNA_SDL_SHADERCROSS_DIR=<dir>` puts a real `libSDL3_shadercross.so.0` there instead of
 the stand-in, and the device cases then also link a program through it.
+
+`cna_texreg_spirv_tests` checks TEXREG2AR/GB/RGB with 204 literal coordinate and
+result-dataflow variants across both SPIR-V profiles, valid shader versions,
+register pairs, mapped texture types and RGB signed scaling. It interprets standard
+SPIR-V operations, validates each module, and checks eight explicit refusals of
+cube/volume samplers for the two-coordinate AR/GB instructions. The other three
+legacy texture opcodes retain their exact named refusals.
+
+The opt-in `texreg2_native_programs` SDL_GPU case creates 48 real SPIR-V program
+pairs and checks their mapped sampler reflection and allocation cleanup. These
+are module/dataflow and native shader-creation checks. Rendered pixel comparison
+through a consuming framework remains an integration step.

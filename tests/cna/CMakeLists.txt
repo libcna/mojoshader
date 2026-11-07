@@ -113,6 +113,7 @@ mojoshader_cna_test(cna_spirv_tests)
 
 mojoshader_cna_test(cna_ps14_tests)
 mojoshader_cna_test(cna_legacy_spirv_tests)
+mojoshader_cna_test(cna_texreg_spirv_tests)
 mojoshader_cna_test(cna_specular_spirv_tests)
 mojoshader_cna_test(cna_sampler_swizzle_spirv_tests)
 mojoshader_cna_test(cna_predicate_spirv_tests)

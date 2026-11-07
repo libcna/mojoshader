@@ -5096,10 +5096,66 @@ void emit_SPIRV_TEXCRD(Context *ctx)
     } // else
 } // emit_SPIRV_TEXCRD
 
+static void spv_texreg2(Context *ctx, const char *opcode, const int swizzle,
+                         const int allow_three_dimensions)
+{
+    RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER,
+                                     ctx->dest_arg.regnum);
+    if (sreg == NULL)
+    {
+        failf(ctx, "%s using undeclared sampler", opcode);
+        return;
+    } // if
+
+    int coordinate_mask;
+    switch ((TextureType) sreg->index)
+    {
+        case TEXTURE_TYPE_2D:
+            coordinate_mask = 0x3;
+            break;
+        case TEXTURE_TYPE_CUBE:
+        case TEXTURE_TYPE_VOLUME:
+            if (!allow_three_dimensions)
+            {
+                failf(ctx, "%s requires a 2D sampler", opcode);
+                return;
+            } // if
+            coordinate_mask = 0x7;
+            break;
+        default:
+            failf(ctx, "%s using unknown texture type", opcode);
+            return;
+    } // switch
+
+    SpirvResult sampler = spv_loadreg(ctx, sreg);
+    SpirvResult coordinate = spv_load_srcarg_full(ctx, 0);
+    coordinate = spv_swizzle(ctx, coordinate, swizzle, coordinate_mask);
+    SpirvResult result;
+    result.tid = spv_get_type(ctx, STI_VEC4);
+    result.id = spv_bumpid(ctx);
+    push_output(ctx, &ctx->mainline);
+    spv_emit(ctx, 5, SpvOpImageSampleImplicitLod, result.tid, result.id,
+             sampler.id, coordinate.id);
+    pop_output(ctx);
+    spv_assign_destarg(ctx, result);
+} // spv_texreg2
+
+void emit_SPIRV_TEXREG2AR(Context *ctx)
+{
+    spv_texreg2(ctx, "TEXREG2AR", 3 | (0 << 2), 0);
+} // emit_SPIRV_TEXREG2AR
+
+void emit_SPIRV_TEXREG2GB(Context *ctx)
+{
+    spv_texreg2(ctx, "TEXREG2GB", 1 | (2 << 2), 0);
+} // emit_SPIRV_TEXREG2GB
+
+void emit_SPIRV_TEXREG2RGB(Context *ctx)
+{
+    spv_texreg2(ctx, "TEXREG2RGB", SPV_NO_SWIZZLE, 1);
+} // emit_SPIRV_TEXREG2RGB
+
 // Remaining legacy SPIR-V gaps; the GLSL emitter implements these.
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2AR)
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2GB)
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXREG2RGB)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3TEX)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXM3X2DEPTH)
 EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXDP3)

@@ -319,9 +319,9 @@ static void texdepth_ratio(void)
 { check("spirv", 1, 0, 0, 0); check("glspirv", 1, 0, 0, 0); }
 static void texdepth_zero(void)
 { check("spirv", 1, 0, 1, 0); check("glspirv", 1, 0, 1, 0); }
-/* Keep the owner's uncommissioned six-opcode envelope explicit. A D3D parse first proves
- * these token streams are valid; only the missing SPIR-V emitter may reject each one. */
-static void remaining_refusals(void)
+/* A D3D parse proves these token streams are legal. Register-remapping lookups now
+ * execute; the three still-missing emitters retain their exact named refusals. */
+static void instruction_envelope(void)
 {
     static const struct { unsigned int opcode; const char *name; } cases[] = {
         {69, "TEXREG2AR"}, {70, "TEXREG2GB"}, {82, "TEXREG2RGB"},
@@ -356,9 +356,18 @@ static void remaining_refusals(void)
             char expected[80];
             snprintf(expected, sizeof (expected), "%s unimplemented in spirv profile", cases[i].name);
             p = cna_parse(profiles[j], w.at, w.count * 4);
-            CNA_CHECK(p && p->error_count == 1, "one named remaining-opcode refusal");
-            if (p && p->error_count == 1)
-                CNA_CHECK(!strcmp(p->errors[0].error, expected), "only the missing emitter refuses the shader");
+            if (cases[i].opcode == 69 || cases[i].opcode == 70 || cases[i].opcode == 82)
+            {
+                CNA_CHECK(cna_report_errors(cases[i].name, p) == 0, "register-remapping lookup is implemented");
+                if (p && !p->error_count)
+                    CNA_CHECK(cna_spirv_validate(p, "texreg_envelope") == 1, "implemented lookup module validates");
+            }
+            else
+            {
+                CNA_CHECK(p && p->error_count == 1, "one named remaining-opcode refusal");
+                if (p && p->error_count == 1)
+                    CNA_CHECK(!strcmp(p->errors[0].error, expected), "only the missing emitter refuses the shader");
+            }
             MOJOSHADER_freeParseData(p);
         }
         cna_words_free(&w);
@@ -438,6 +447,6 @@ int main(void)
     cna_test_run("bem_source_and_result_modifiers", bem_modifiers);
     cna_test_run("texdepth_guarded_ratio", texdepth_ratio);
     cna_test_run("texdepth_zero_divisor", texdepth_zero);
-    cna_test_run("six_remaining_opcodes_refuse_by_name", remaining_refusals);
+    cna_test_run("legacy_texture_opcode_envelope", instruction_envelope);
     return cna_test_finish();
 }

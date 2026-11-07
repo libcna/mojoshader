@@ -823,6 +823,66 @@ static void test_shadercross_links_on_device(void)
     CNA_CHECK(shadercross_loaded() != 1, "the context unloads the library it loaded");
 } // test_shadercross_links_on_device
 
+/* Create native SPIR-V programs for each dependent register pair and mapped texture type.
+ * Literal coordinate/result semantics are checked by cna_texreg_spirv_tests. */
+static void test_texreg2_programs(void)
+{
+    static const uint32_t vertex[] = {
+        CNA_VS(2, 0), CNA_OP(CNA_DCL_OP, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+        CNA_OP(CNA_MOV, 2), CNA_DST(CNA_RASTOUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+        CNA_OP(CNA_MOV, 2), CNA_DST(CNA_TEXCRDOUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+        CNA_OP(CNA_MOV, 2), CNA_DST(CNA_TEXCRDOUT, 1, 15), CNA_SRC(CNA_INPUT, 0),
+        CNA_OP(CNA_MOV, 2), CNA_DST(CNA_TEXCRDOUT, 2, 15), CNA_SRC(CNA_INPUT, 0),
+        CNA_OP(CNA_MOV, 2), CNA_DST(CNA_TEXCRDOUT, 3, 15), CNA_SRC(CNA_INPUT, 0), CNA_END
+    };
+    static const int opcodes[] = {69, 70, 82};
+    CountingAllocator a;
+    MOJOSHADER_sdlContext *ctx = make_context(gpu_device, &a);
+    MOJOSHADER_sdlShaderData *vs;
+    int opcode, destination, source, dimension, modifier, linked = 0;
+    if (ctx == NULL) { CNA_CHECK(0, "dependent-texture context is made"); return; }
+    vs = compile(ctx, vertex, sizeof(vertex));
+    CNA_CHECK(vs != NULL, "dependent-texture vertex shader compiles");
+    if (vs != NULL)
+    for (opcode = 0; opcode < 3; opcode++) for (destination = 1; destination <= 3; destination++)
+    for (source = 0; source < destination; source++)
+    for (dimension = MOJOSHADER_SAMPLER_2D; dimension <= (opcode == 2 ? MOJOSHADER_SAMPLER_VOLUME : MOJOSHADER_SAMPLER_2D); dimension++)
+    for (modifier = 0; modifier <= (opcode == 2 ? 4 : 0); modifier += 4)
+    {
+        const uint32_t words[] = {
+            CNA_PS(1, 2), CNA_TEX, CNA_DST(CNA_TEXTURE, source, 15),
+            opcodes[opcode], CNA_DST(CNA_TEXTURE, destination, 15),
+            CNA_SRC(CNA_TEXTURE, source) | ((uint32_t) modifier << 24),
+            CNA_MOV, CNA_DST(CNA_TEMP, 0, 15), CNA_SRC(CNA_TEXTURE, destination), CNA_END
+        };
+        MOJOSHADER_samplerMap map = {destination, (MOJOSHADER_samplerType) dimension};
+        MOJOSHADER_sdlShaderData *ps = MOJOSHADER_sdlCompileShader(ctx, "main",
+            (const unsigned char *) words, sizeof(words), NULL, 0, &map, 1);
+        CNA_CHECK(ps != NULL, "dependent-texture pixel shader compiles");
+        if (ps != NULL)
+        {
+            SDL_GPUShader *gvs = NULL, *gps = NULL;
+            const MOJOSHADER_parseData *pd = MOJOSHADER_sdlGetShaderParseData(ps);
+            int i, reflected = 0;
+            MOJOSHADER_sdlProgram *program = link_pair(ctx, vs, ps);
+            CNA_CHECK(program != NULL, "dependent-texture pair creates a native program");
+            MOJOSHADER_sdlGetShaders(ctx, &gvs, &gps);
+            CNA_CHECK(gvs != NULL && gps != NULL, "both native GPU shaders exist");
+            if (pd != NULL)
+                for (i = 0; i < pd->sampler_count; i++)
+                    if (pd->samplers[i].index == destination)
+                    { reflected++; CNA_CHECK(pd->samplers[i].type == dimension, "native program retains mapped sampler type"); }
+            CNA_CHECK(reflected == 1, "native program reflects the destination sampler");
+            if (program != NULL && gvs != NULL && gps != NULL) linked++;
+        }
+        MOJOSHADER_sdlDeleteShader(ctx, ps);
+    }
+    CNA_CHECK(linked == 48, "all dependent register/type/modifier combinations create native programs");
+    MOJOSHADER_sdlDeleteShader(ctx, vs);
+    MOJOSHADER_sdlDestroyContext(ctx);
+    CNA_CHECK(a.live == 0, "dependent-texture context returns all MojoShader allocations");
+} // test_texreg2_programs
+
 /* -- Driver -------------------------------------------------------------------------------- */
 
 static int open_device(void)
@@ -884,6 +944,7 @@ static const TestCase test_cases[] = {
     { "shadercross_outlives_another_context", test_shadercross_outlives_another_context, 0 },
     { "link_and_cache", test_link_and_cache, 1 },
     { "texbem_uniforms", test_texbem_uniforms, 1 },
+    { "texreg2_native_programs", test_texreg2_programs, 1 },
     { "delete_program_then_relink", test_delete_program_then_relink, 1 },
     { "delete_program_then_delete_shaders", test_delete_program_then_delete_shaders, 1 },
     { "delete_program_then_destroy_context", test_delete_program_then_destroy_context, 1 },
