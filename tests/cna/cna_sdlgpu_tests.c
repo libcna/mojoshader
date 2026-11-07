@@ -883,6 +883,8 @@ static void test_texreg2_programs(void)
     CNA_CHECK(a.live == 0, "dependent-texture context returns all MojoShader allocations");
 } // test_texreg2_programs
 
+#include "cna_texreg_pixels.h"
+
 /* -- Driver -------------------------------------------------------------------------------- */
 
 static int open_device(void)
@@ -945,6 +947,7 @@ static const TestCase test_cases[] = {
     { "link_and_cache", test_link_and_cache, 1 },
     { "texbem_uniforms", test_texbem_uniforms, 1 },
     { "texreg2_native_programs", test_texreg2_programs, 1 },
+    { "texreg2_native_pixels", test_texreg2_pixels, 1 },
     { "delete_program_then_relink", test_delete_program_then_relink, 1 },
     { "delete_program_then_delete_shaders", test_delete_program_then_delete_shaders, 1 },
     { "delete_program_then_destroy_context", test_delete_program_then_destroy_context, 1 },

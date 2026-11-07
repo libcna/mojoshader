@@ -41,3 +41,20 @@ The opt-in `texreg2_native_programs` SDL_GPU case creates 48 real SPIR-V program
 pairs and checks their mapped sampler reflection and allocation cleanup. These
 are module/dataflow and native shader-creation checks. Rendered pixel comparison
 through a consuming framework remains an integration step.
+
+### Mapped dependent-texture native pixels (TQ-TEXREG-PIXELS-01)
+
+`cna_sdlgpu_tests texreg2_native_pixels` is an opt-in real SDL_GPU test
+(`MOJOSHADER_CNA_SDLGPU_DEVICE=1`, private display, `SDL_ASSERT=abort`). It exercises
+TEXREG2AR/GB in 2D and TEXREG2RGB in 2D, cube and volume forms, including RGB_bx2,
+through all six legal t0..t3 register pairs: 48 draws, each checking all 8x8 pixels.
+A `(32,96,160,224)` source selects a literal texel in distinct point-clamped
+lookup images. Cube face/coordinates follow Vulkan's cube-map selection table;
+volume texels use floor(4*coordinate), then clamp. The source arithmetic and
+literal expected colors are recorded in `cna_texreg_pixels.h`.
+
+This invokes MojoShader's existing explicit sampler-map API and renders actual
+native SPIR-V. It does not qualify FNA3D/CNA's inference of legacy sampler types
+from effect metadata or bound textures. Default device-free runs skip this GPU
+case; shader-creation-only coverage remains separately selectable as
+`texreg2_native_programs`. ShaderCross is not the route creating these shaders.
