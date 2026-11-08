@@ -4828,9 +4828,29 @@ void emit_SPIRV_BREAK(Context *ctx)
     spv_emit(ctx, 2, SpvOpLabel, id_label_merge);
 } // emit_SPIRV_BREAK
 
+static SpirvResult spv_dependent_texture_dot(Context *ctx)
+{
+    RegisterList *destination = spv_getreg(ctx, REG_TYPE_TEXTURE, ctx->dest_arg.regnum);
+    SpirvResult coordinate = spv_loadreg(ctx, destination);
+    coordinate = spv_swizzle(ctx, coordinate, SPV_NO_SWIZZLE, 0x7);
+    SpirvResult source = spv_load_srcarg(ctx, 0, 0x7);
+    SpirvResult dot = {0};
+    if (coordinate.tid == 0 || coordinate.tid != source.tid)
+    {
+        fail(ctx, "Dependent texture dot operands do not share a type.");
+        return dot;
+    } // if
+    dot.tid = spv_get_type(ctx, STI_FLOAT);
+    dot.id = spv_bumpid(ctx);
+    push_output(ctx, &ctx->mainline);
+    spv_emit(ctx, 5, SpvOpDot, dot.tid, dot.id, coordinate.id, source.id);
+    pop_output(ctx);
+    return dot;
+} // spv_dependent_texture_dot
+
 void emit_SPIRV_TEXM3X2PAD(Context *ctx)
 {
-    // no-op ... work happens in emit_SPIRV_TEXM3X2TEX().
+    ctx->spirv.idtexm3x2pad = spv_dependent_texture_dot(ctx).id;
 } // emit_SPIRV_TEXM3X2PAD
 
 void emit_SPIRV_TEXM3X2TEX(Context *ctx)
@@ -5155,27 +5175,7 @@ void emit_SPIRV_TEXREG2RGB(Context *ctx)
     spv_texreg2(ctx, "TEXREG2RGB", SPV_NO_SWIZZLE, 1);
 } // emit_SPIRV_TEXREG2RGB
 
-// Remaining legacy SPIR-V gaps; the GLSL emitter implements these.
-static SpirvResult spv_dependent_texture_dot(Context *ctx)
-{
-    RegisterList *destination = spv_getreg(ctx, REG_TYPE_TEXTURE, ctx->dest_arg.regnum);
-    SpirvResult coordinate = spv_loadreg(ctx, destination);
-    coordinate = spv_swizzle(ctx, coordinate, SPV_NO_SWIZZLE, 0x7);
-    SpirvResult source = spv_load_srcarg(ctx, 0, 0x7);
-    SpirvResult dot = {0};
-    if (coordinate.tid == 0 || coordinate.tid != source.tid)
-    {
-        fail(ctx, "Dependent texture dot operands do not share a type.");
-        return dot;
-    } // if
-    dot.tid = spv_get_type(ctx, STI_FLOAT);
-    dot.id = spv_bumpid(ctx);
-    push_output(ctx, &ctx->mainline);
-    spv_emit(ctx, 5, SpvOpDot, dot.tid, dot.id, coordinate.id, source.id);
-    pop_output(ctx);
-    return dot;
-} // spv_dependent_texture_dot
-
+// Legacy dependent texture instructions.
 void emit_SPIRV_TEXDP3TEX(Context *ctx)
 {
     RegisterList *sreg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER, ctx->dest_arg.regnum);
@@ -5200,7 +5200,24 @@ void emit_SPIRV_TEXDP3TEX(Context *ctx)
     spv_assign_destarg(ctx, result);
 } // emit_SPIRV_TEXDP3TEX
 
-EMIT_SPIRV_OPCODE_UNIMPLEMENTED_FUNC(TEXM3X2DEPTH)
+void emit_SPIRV_TEXM3X2DEPTH(Context *ctx)
+{
+    RegisterList *output = spv_getreg(ctx, REG_TYPE_DEPTHOUT, 0);
+    SpirvResult denominator = spv_dependent_texture_dot(ctx);
+    if (output == NULL || denominator.tid == 0) return;
+    spv_check_write_reg_id(ctx, output);
+    uint32 tid_float = spv_get_type(ctx, STI_FLOAT);
+    uint32 tid_bool = spv_get_type(ctx, STI_BOOL);
+    uint32 zero = spv_getscalarf(ctx, 0.0f), one = spv_getscalarf(ctx, 1.0f);
+    uint32 iszero = spv_bumpid(ctx), ratio = spv_bumpid(ctx), depth = spv_bumpid(ctx);
+    push_output(ctx, &ctx->mainline);
+    spv_emit(ctx, 5, SpvOpFOrdEqual, tid_bool, iszero, denominator.id, zero);
+    spv_emit(ctx, 5, SpvOpFDiv, tid_float, ratio, ctx->spirv.idtexm3x2pad, denominator.id);
+    // D3D9 defines w == 0 as depth one; out-of-range z/w has undefined depth. -CNA
+    spv_emit(ctx, 6, SpvOpSelect, tid_float, depth, iszero, one, ratio);
+    spv_emit(ctx, 3, SpvOpStore, output->spirv.iddecl, depth);
+    pop_output(ctx);
+} // emit_SPIRV_TEXM3X2DEPTH
 
 void emit_SPIRV_TEXDP3(Context *ctx)
 {

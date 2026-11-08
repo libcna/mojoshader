@@ -2669,7 +2669,12 @@ void emit_GLSL_TEXREG2GB(Context *ctx)
 
 void emit_GLSL_TEXM3X2PAD(Context *ctx)
 {
-    // no-op ... work happens in emit_GLSL_TEXM3X2TEX().
+    char row[64], source[256];
+    get_GLSL_destarg_varname(ctx, row, sizeof (row));
+    make_GLSL_srcarg_string_full(ctx, 0, source, sizeof (source));
+    // Capture this instruction's modified source before the final row is evaluated. -CNA
+    output_line(ctx, "float texm3x2pad%d = dot(%s.xyz, (%s).xyz);",
+                ctx->dest_arg.regnum, row, source);
 } // emit_GLSL_TEXM3X2PAD
 
 void emit_GLSL_TEXM3X2TEX(Context *ctx)
@@ -3040,18 +3045,15 @@ void emit_GLSL_TEXM3X2DEPTH(Context *ctx)
     if (ctx->texm3x2pad_src0 == -1)
         return;
 
-    char vector[64];
-    char numeratorRow[64];
-    char denominatorRow[64];
-    get_GLSL_varname_in_buf(ctx, REG_TYPE_TEXTURE, ctx->texm3x2pad_src0,
-                            vector, sizeof (vector));
-    get_GLSL_varname_in_buf(ctx, REG_TYPE_TEXTURE, ctx->texm3x2pad_dst0,
-                            numeratorRow, sizeof (numeratorRow));
-    get_GLSL_destarg_varname(ctx, denominatorRow, sizeof (denominatorRow));
+    char source[256], row[64];
+    make_GLSL_srcarg_string_full(ctx, 0, source, sizeof (source));
+    get_GLSL_destarg_varname(ctx, row, sizeof (row));
+    output_line(ctx, "float texm3x2denominator%d = dot(%s.xyz, (%s).xyz);",
+                ctx->dest_arg.regnum, row, source);
     output_line(ctx,
-        "gl_FragDepth = (dot(%s.xyz, %s.xyz) == 0.0) ? 1.0 : "
-        "(dot(%s.xyz, %s.xyz) / dot(%s.xyz, %s.xyz));",
-        denominatorRow, vector, numeratorRow, vector, denominatorRow, vector);
+        "gl_FragDepth = (texm3x2denominator%d == 0.0) ? 1.0 : "
+        "(texm3x2pad%d / texm3x2denominator%d);",
+        ctx->dest_arg.regnum, ctx->texm3x2pad_dst0, ctx->dest_arg.regnum);
 } // emit_GLSL_TEXM3X2DEPTH
 void emit_GLSL_TEXDP3(Context *ctx)
 {

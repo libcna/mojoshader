@@ -173,6 +173,7 @@ typedef struct SpirvContext
     uint32 idext;
     uint32 idmax;
     uint32 idmain;
+    uint32 idtexm3x2pad;  // First row, captured with the PAD instruction's source modifier.
     uint32 id_func_lit;
     uint32 inoutcount;
     uint32 id_var_fragcoord;

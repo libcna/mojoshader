@@ -1040,6 +1040,11 @@ static int parse_destination_token(Context *ctx, DestArgInfo *info)
     validate_constant_control_register(ctx, info->regtype, info->regnum);
 
     if (!isfail(ctx) && shader_is_pixel(ctx) &&
+        (info->regtype == REG_TYPE_TEXTURE) && (info->regnum < 32) &&
+        ((ctx->texm3x2depth_consumed & (1u << info->regnum)) != 0))
+        failf(ctx, "Texture register t%d was consumed by TEXM3X2DEPTH", info->regnum);
+
+    if (!isfail(ctx) && shader_is_pixel(ctx) &&
         shader_version_exactly(ctx, 1, 4) && ctx->pixel14_texdepth_consumed &&
         (info->regtype == REG_TYPE_TEMP) && (info->regnum == 5))
     {
@@ -1622,6 +1627,11 @@ static int parse_source_token(Context *ctx, SourceArgInfo *info)
         default:
             fail(ctx, "Unknown source modifier");
     } // switch
+
+    if (!isfail(ctx) && shader_is_pixel(ctx) &&
+        (info->regtype == REG_TYPE_TEXTURE) && (info->regnum < 32) &&
+        ((ctx->texm3x2depth_consumed & (1u << info->regnum)) != 0))
+        failf(ctx, "Texture register t%d was consumed by TEXM3X2DEPTH", info->regnum);
 
     // !!! FIXME: docs say this for sm3 ... check these!
     //  "The negate modifier cannot be used on second source register of these
@@ -3443,6 +3453,13 @@ static void state_TEXM3X2DEPTH(Context *ctx)
     if (ctx->dest_arg.regnum != ctx->texm3x2pad_dst0 + 1)
         fail(ctx, "TEXM3X2DEPTH destination does not follow matching TEXM3X2PAD");
     ctx->reset_texmpad = 1;
+    if (!isfail(ctx))
+    {
+        ctx->texm3x2depth_consumed |= 1u << ctx->dest_arg.regnum;
+        // D3D9 replaces fragment depth and makes the syntactic destination unavailable. -CNA
+        set_used_register(ctx, REG_TYPE_DEPTHOUT, 0, 1);
+        add_attribute_register(ctx, REG_TYPE_DEPTHOUT, 0, MOJOSHADER_USAGE_DEPTH, 0, 1, 0);
+    } // if
 } // state_TEXM3X2DEPTH
 
 static void state_TEXM3X3PAD(Context *ctx)

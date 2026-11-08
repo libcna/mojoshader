@@ -167,6 +167,7 @@ typedef struct Context
     int pixel14_texkill_before_phase;
     uint32 pixel1_texture_stages;
     int pixel14_texdepth_consumed;
+    uint32 texm3x2depth_consumed;
     uint32 pixel14_texture_writes;
     uint32 pixel14_texture_value_writes;
     uint32 pixel14_texture_selector_seen;

@@ -36,7 +36,7 @@ register pairs, mapped texture types and RGB signed scaling. It interprets stand
 SPIR-V operations, validates each module, and checks eight explicit refusals of
 cube/volume samplers for the two-coordinate AR/GB instructions. It also checks
 96 TEXDP3/DP3TEX dot/dataflow variants and four explicit incompatible DP3TEX maps.
-Only TEXM3X2DEPTH still has its named missing-emitter refusal.
+TEXM3X2DEPTH also has a numeric depth implementation; illegal forms retain validation refusals.
 
 The opt-in `texreg2_native_programs` SDL_GPU case creates 48 real SPIR-V program
 pairs and checks their mapped sampler reflection and allocation cleanup. These
@@ -84,3 +84,27 @@ control-flow mutation that kills only those fragments passed with the former
 zero background; the nonzero background catches all six dropped-output cases.
 All existing literal color expectations remain in place. The mutation is restored
 byte-for-byte before the pristine native harness is run.
+
+
+### Matrix depth (TQ-TEXM3X2DEPTH-01)
+
+`cna_texm3x2depth_tests` checks legal ps_1_3 tokens before translation, illegal
+versions/stages/registers/modifiers, and both source and syntactic-destination
+uses of the consumed register. A literal SPIR-V evaluator checks 78 modules
+across both profiles: 24 ordinary/signed/mixed fractions, 48 zero-denominator
+controls, and six out-of-range IR controls. The latter assert an unmodified
+quotient in the translation only; Microsoft leaves native out-of-range depth
+undefined. Every module is checked with spirv-val when configured.
+
+For source RGBA (32,96,160,224)/255 and rows (1,0,0), (0,4,0), the depth
+is (32/255)/(384/255)=1/12. Both `_bx2` operands give
+(-191/255)/(-252/255)=191/252. With numerator row (-1,0,0), PAD-only
+`_bx2` gives 191/384 and DEPTH-only `_bx2` gives 8/63. Each instruction
+captures its own modified source; mixed-modifier legality follows from the
+per-instruction Microsoft modifier contract. GLSL checks cover the same pair
+capture, correcting its previous omission of signed scaling.
+
+The FNA3D candidate's `fna3d_cna_texreg_tests` adds 48 full-image depth probes
+per driver, comparing these fractions against known depth clears and retaining
+a distinct nonzero color sentinel. Those GPU probes require the private runner;
+device-free translation alone is not native pixel qualification.
