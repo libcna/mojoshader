@@ -1349,13 +1349,52 @@ static void test_xna4_wrapper_truncated_after_skip(void)
     expect_rejected(bytes, len, "truncated XNA4 wrapper");
 } // test_xna4_wrapper_truncated_after_skip
 
+/* Fixture-only token walk, independent of the production metadata scanner and its
+ * instruction table. ps_1_2 DEF has 5 operands, TEX 1, TEXREG2RGB/MOV 2;
+ * COMMENT's high word counts payload words. DEF's CTAB-looking immediate is data. */
+typedef struct InferenceMetadataCheck { int stripped; int inspected; } InferenceMetadataCheck;
+static uint32_t inference_word(const unsigned char *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+}
+static int inference_ctab_count(const unsigned char *tokens, unsigned int bytes)
+{
+    unsigned int at=4;
+    int count=0;
+    while(at+4<=bytes)
+    {
+        const uint32_t token=inference_word(tokens+at), opcode=token&0xFFFF;
+        unsigned int operands;
+        at+=4;
+        if(opcode==0xFFFF) return at==bytes ? count : -1;
+        if(opcode==0xFFFE)
+        {
+            operands=(token>>16)&0x7FFF;
+            if(operands && operands<=(bytes-at)/4 && inference_word(tokens+at)==0x42415443)count++;
+        }
+        else if(opcode==81)operands=5;
+        else if(opcode==66)operands=1;
+        else if(opcode==82 || opcode==1)operands=2;
+        else return -1;
+        if(operands>(bytes-at)/4)return -1;
+        at+=operands*4;
+    }
+    return -1;
+}
+
 /* The independent declaration oracle is the fixture's TEXTURE2D/3D/CUBE parameter,
  * reached through sampler_state Texture=<name>; CTAB deliberately says generic SAMPLER. */
 static void *MOJOSHADERCALL inference_compile(const void *ctx, const char *mainfn,
     const unsigned char *tokens, unsigned int bytes, const MOJOSHADER_swizzle *swiz,
     unsigned int swizcount, const MOJOSHADER_samplerMap *map, unsigned int count)
 {
-    (void) ctx;
+    if(ctx && bytes>=4 && inference_word(tokens)==0xFFFF0102)
+    {
+        InferenceMetadataCheck *check=(InferenceMetadataCheck *)ctx;
+        ++check->inspected;
+        CNA_CHECK(inference_ctab_count(tokens,bytes)==(check->stripped?0:1),
+                  "shader token boundaries prove CTAB presence or absence");
+    }
     return (void *) MOJOSHADER_parse("spirv", mainfn, tokens, bytes, swiz, swizcount,
                                    map, count, cna_alloc_malloc, cna_alloc_free, NULL);
 }
@@ -1371,14 +1410,17 @@ static void inference_case(uint32_t type, int reverse, int large, int late, int 
     MOJOSHADER_effect *effect;
     const MOJOSHADER_parseData *pd;
     int i, saw=0;
+    InferenceMetadataCheck metadata={(reverse&8)!=0,0};
     const MOJOSHADER_samplerType wanted=explicitMap || type==MOJOSHADER_SYMTYPE_TEXTURE ||
         type==MOJOSHADER_SYMTYPE_TEXTURE2D ? MOJOSHADER_SAMPLER_2D :
         type==MOJOSHADER_SYMTYPE_TEXTURECUBE ? MOJOSHADER_SAMPLER_CUBE : MOJOSHADER_SAMPLER_VOLUME;
     cna_sampler_effect(&code,type,reverse,large,late);
     ctx.compileShader=inference_compile; ctx.deleteShader=inference_delete;
     ctx.getParseData=inference_parse; ctx.m=cna_alloc_malloc; ctx.f=cna_alloc_free;
+    ctx.shaderContext=&metadata;
     effect=MOJOSHADER_compileEffect((const unsigned char *)code.words,code.length,
                                   NULL,0,explicitMap?&map:NULL,explicitMap?1:0,&ctx);
+    CNA_CHECK(metadata.inspected==1,"pixel shader metadata checked exactly once");
     CNA_CHECK(effect && !effect->error_count,"typed effect with generic shader samplers compiles");
     if(effect && effect->error_count) fprintf(stderr,"inference: %s\n",effect->errors[0].error);
     if(effect && !effect->error_count)
@@ -1540,8 +1582,8 @@ static void test_effect_sampler_inference(void)
         for(late=0;late<2;late++) for(explicitMap=0;explicitMap<2;explicitMap++)
             inference_case(types[i],reverse,large,late,explicitMap);
     for(i=0;i<4;i++)for(reverse=0;reverse<2;reverse++)for(large=0;large<2;large++)
-        for(explicitMap=0;explicitMap<2;explicitMap++)
-            inference_case(types[i],reverse|2|8,large,0,explicitMap);
+        for(late=0;late<2;late++) for(explicitMap=0;explicitMap<2;explicitMap++)
+            inference_case(types[i],reverse|2|8,large,late,explicitMap);
 }
 
 int main(void)

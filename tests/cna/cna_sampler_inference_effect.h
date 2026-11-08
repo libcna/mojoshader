@@ -33,7 +33,8 @@ static void cna_fx_blob(CnaFxBytes *b, uint32_t index, const void *data, uint32_
     while(b->length%4) b->bytes[b->length++]=0;
 }
 /* kind is a MOJOSHADER_SYMTYPE_TEXTURE*. large places the pixel shader in the large table.
- * late places CTAB after a DEF containing a comment-looking immediate; both are legal. */
+ * reverse bit 1 adds a pass sampler binding; bit 3 omits CTAB entirely.
+ * late emits a DEF with comment-looking immediates before any real CTAB. */
 static void cna_sampler_effect(CnaSamplerEffect *out, uint32_t kind, int reverse, int large, int late)
 {
     CnaFxBytes b={{0},0}, c={{0},0}, ps={{0},0}, f={{0},0};
@@ -95,11 +96,14 @@ static void cna_sampler_effect(CnaSamplerEffect *out, uint32_t kind, int reverse
     if(late)
     {
         cna_fx_word(&ps,81); cna_fx_word(&ps,0xA00F0000);
-        cna_fx_word(&ps,0x0001FFFE); cna_fx_word(&ps,stripped?0x454E4F4E:0x42415443);
+        cna_fx_word(&ps,0x0001FFFE); cna_fx_word(&ps,0x42415443);
         cna_fx_word(&ps,0); cna_fx_word(&ps,0);
     }
-    cna_fx_word(&ps,((c.length/4+1)<<16)|0xFFFE); cna_fx_word(&ps,0x42415443);
-    memcpy(ps.bytes+ps.length,c.bytes,c.length); ps.length+=c.length;
+    if(!stripped)
+    {
+        cna_fx_word(&ps,((c.length/4+1)<<16)|0xFFFE); cna_fx_word(&ps,0x42415443);
+        memcpy(ps.bytes+ps.length,c.bytes,c.length); ps.length+=c.length;
+    }
     cna_fx_word(&ps,66); cna_fx_word(&ps,0xB00F0000); /* tex t0 */
     cna_fx_word(&ps,82); cna_fx_word(&ps,0xB00F0001); cna_fx_word(&ps,0xB0E40000);
     cna_fx_word(&ps,1); cna_fx_word(&ps,0x800F0000); cna_fx_word(&ps,0xB0E40001);
