@@ -1163,8 +1163,14 @@ DECLSPEC int MOJOSHADER_glMaxUniforms(MOJOSHADER_shaderType shader_type);
  *
  *   (tokenbuf) is a buffer of Direct3D shader bytecode.
  *   (bufsize) is the size, in bytes, of the bytecode buffer.
- *   (swiz), (swizcount), (smap), and (smapcount) are passed to
- *   MOJOSHADER_parse() unmolested.
+ *   (swiz) and (swizcount) are forwarded to the shader compiler. Explicit (smap)
+ *   entries take precedence. For ps_1.x, otherwise-unmapped stages are inferred
+ *   from sampler_state Texture bindings to typed effect texture parameters,
+ *   using shader CTAB names or explicit pass Sampler[n] assignments. Typed CTAB
+ *   sampler declarations are a fallback. Generic texture/sampler declarations
+ *   retain the normal 2D default; runtime texture assignments are not guessed.
+ *   Incompatible dimensions for one shader object across passes, and inferred
+ *   sampler arrays, return named errors. No public structure layout changes.
  *
  * Returns NULL on error, or a shader handle on success.
  *

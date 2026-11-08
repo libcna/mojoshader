@@ -943,6 +943,357 @@ static int readtechniques(const uint32 numtechniques,
     return 1;
 } // readtechniques
 
+/* Shader spans borrow the caller's effect buffer. -CNA */
+typedef struct PendingEffectShader
+{
+    const uint8 *tokens;
+    uint32 length;
+} PendingEffectShader;
+
+/* Only ps_1.x needs inference. Use the parser's instruction table to walk comments at token
+ * boundaries, including CTABs after instructions; never mistake DEF's float bits for metadata.
+ * The normal shader parser still validates the complete CTAB and instruction stream. -CNA */
+static uint32 legacy_u32(const uint8 *ptr)
+{
+    uint32 value;
+    memcpy(&value, ptr, sizeof (value));
+    return SWAP32(value);
+}
+
+static uint16 legacy_u16(const uint8 *ptr)
+{
+    uint16 value;
+    memcpy(&value, ptr, sizeof (value));
+    return SWAP16(value);
+}
+
+static const uint8 *legacy_shader_metadata(const uint8 *tokens, uint32 length,
+                                           uint32 *bytes, uint32 *sampler_mask)
+{
+    uint32 version, count, opcode;
+    const uint8 *table = NULL;
+    int minor;
+    if (length < 4) return NULL;
+    version = readui32(&tokens, &length);
+    if ((version & 0xFFFFFF00u) != 0xFFFF0100u) return NULL;
+    minor = version & 0xFF;
+    if ((minor < 1) || (minor > 4)) return NULL;
+    while (length >= 4)
+    {
+        const uint32 token = readui32(&tokens, &length);
+        opcode = token & 0xFFFF;
+        if (opcode == 0xFFFF) return table;
+        if (opcode == 0xFFFE)
+        {
+            count = (token >> 16) & 0x7FFF;
+            if (count > length / 4) return NULL;
+            if ((count >= 8) && (legacy_u32(tokens) == CTAB_ID))
+            {
+                *bytes = count * 4 - 4;
+                table = tokens + 4;
+            } // if
+        } // if
+        else if (opcode == 0xFFFD) count = 0; /* PHASE */
+        else
+        {
+            enum { ARGS_NULL=0, ARGS_D=1, ARGS_S=1, ARGS_SS=2, ARGS_DS=2,
+                   ARGS_DSS=3, ARGS_DSSS=4, ARGS_DSSSS=5, ARGS_DEF=5,
+                   ARGS_DEFI=5, ARGS_DEFB=2, ARGS_DCL=2, ARGS_DSSS_SGN=4,
+                   ARGS_SINCOS=4, ARGS_TEXCRD=1, ARGS_TEXLD=1 };
+            static const uint8 args[] = {
+#define MOJOSHADER_DO_INSTRUCTION_TABLE 1
+#define INSTRUCTION(op, str, slots, a, type, mask) ARGS_##a,
+#define INSTRUCTION_STATE INSTRUCTION
+#include "mojoshader_internal.h"
+            };
+            if (opcode >= STATICARRAYLEN(args)) return NULL;
+            count = args[opcode];
+            if (((opcode == OPCODE_TEXCRD) || (opcode == OPCODE_TEXLD)) && (minor == 4))
+                count = 2;
+            if (count > length / 4) return NULL;
+            switch (opcode)
+            {
+                case 66: case 67: case 68: case 69: case 70: /* TEX, TEXBEM/L, TEXREG2AR/GB */
+                case 72: case 74: case 76: case 77: /* TEXM3X2TEX, TEXM3X3TEX/SPEC/VSPEC */
+                case 82: case 83: /* TEXREG2RGB, TEXDP3TEX */
+                {
+                    const uint32 stage = legacy_u32(tokens) & 0x7FF;
+                    if (stage < 6) *sampler_mask |= 1u << stage;
+                    break;
+                }
+                default: break;
+            } // switch
+        } // else
+        tokens += count * 4;
+        length -= count * 4;
+    } // while
+    return NULL;
+} // legacy_shader_metadata
+
+static MOJOSHADER_samplerType legacy_texture_type(MOJOSHADER_symbolType type)
+{
+    switch (type)
+    {
+        case MOJOSHADER_SYMTYPE_TEXTURE2D: return MOJOSHADER_SAMPLER_2D;
+        case MOJOSHADER_SYMTYPE_TEXTURE3D: return MOJOSHADER_SAMPLER_VOLUME;
+        case MOJOSHADER_SYMTYPE_TEXTURECUBE: return MOJOSHADER_SAMPLER_CUBE;
+        default: return MOJOSHADER_SAMPLER_UNKNOWN;
+    } // switch
+} // legacy_texture_type
+
+static MOJOSHADER_samplerType legacy_sampler_type(const MOJOSHADER_effect *effect,
+                                                   const char *name)
+{
+    int i, j, k;
+    if (name == NULL) return MOJOSHADER_SAMPLER_UNKNOWN;
+    for (i = 0; i < effect->param_count; i++)
+    {
+        const MOJOSHADER_effectValue *sampler = &effect->params[i].value;
+        if (!value_is_sampler(sampler) || !sampler->name || strcmp(sampler->name, name))
+            continue;
+        for (j = 0; j < sampler->value_count; j++)
+        {
+            const MOJOSHADER_effectSamplerState *state = &sampler->valuesSS[j];
+            if ((state->type != MOJOSHADER_SAMP_TEXTURE) || !state->value.values ||
+                (state->value.value_count != 1)) continue;
+            const uint32 index = state->value.valuesI[0];
+            if (index >= (uint32) effect->object_count) continue;
+            if ((effect->objects[index].type < MOJOSHADER_SYMTYPE_TEXTURE) ||
+                (effect->objects[index].type > MOJOSHADER_SYMTYPE_SAMPLERCUBE)) continue;
+            const char *texture = effect->objects[index].mapping.name;
+            if (!texture) continue;
+            for (k = 0; k < effect->param_count; k++)
+            {
+                const MOJOSHADER_effectValue *param = &effect->params[k].value;
+                if (param->name && !strcmp(param->name, texture))
+                    return legacy_texture_type(param->type.parameter_type);
+            } // for
+        } // for
+    } // for
+    return MOJOSHADER_SAMPLER_UNKNOWN;
+} // legacy_sampler_type
+
+static void compile_effect_shader(MOJOSHADER_effect *effect, uint32 index,
+                                   const PendingEffectShader *pending,
+                                   const MOJOSHADER_swizzle *swiz, uint32 swizcount,
+                                   const MOJOSHADER_samplerMap *smap, uint32 smapcount,
+                                   ErrorList *errors)
+{
+    MOJOSHADER_effectObject *object = &effect->objects[index];
+    MOJOSHADER_malloc m = effect->ctx.m;
+    void *d = effect->ctx.malloc_data;
+    MOJOSHADER_parseData *pd;
+    MOJOSHADER_samplerMap inferred[6];
+    uint32 inferredcount = 0, bytes = 0, used_samplers = 0, j;
+    const uint8 *ctab = legacy_shader_metadata(pending->tokens, pending->length, &bytes, &used_samplers);
+    if (ctab && (bytes >= CTAB_SIZE) && (legacy_u32(ctab) == CTAB_SIZE) &&
+        (legacy_u32(ctab + 8) == legacy_u32(pending->tokens)))
+    {
+        const uint32 constants = legacy_u32(ctab + 12);
+        const uint32 offset = legacy_u32(ctab + 16);
+        if ((constants <= 1000000) && (offset <= bytes) && (constants <= (bytes - offset) / 20))
+        {
+            for (j = 0; j < constants; j++)
+            {
+                const uint8 *info = ctab + offset + j * 20;
+                const uint32 name = legacy_u32(info);
+                const uint16 regset = legacy_u16(info + 4);
+                const uint16 regidx = legacy_u16(info + 6);
+                const uint16 regcnt = legacy_u16(info + 8);
+                uint32 k;
+                if (regset != MOJOSHADER_SYMREGSET_SAMPLER) continue;
+                if ((name >= bytes) || !memchr(ctab + name, '\0', bytes - name)) continue;
+                for (k = 0; k < smapcount; k++)
+                    if (smap[k].index == regidx) break;
+                if (k < smapcount) continue; /* Explicit public map wins. */
+                MOJOSHADER_samplerType type = legacy_sampler_type(effect, (const char *) ctab + name);
+                /* Preserve typed CTAB declarations when an effect texture parameter is generic.
+                 * A generic SAMPLER carries no dimension and must retain the usual 2D default. */
+                if (type == MOJOSHADER_SAMPLER_UNKNOWN)
+                {
+                    const uint32 typeoffset = legacy_u32(info + 12);
+                    if ((typeoffset <= bytes) && (bytes - typeoffset >= 16))
+                    {
+                        const uint16 declared = legacy_u16(ctab + typeoffset + 2);
+                        switch (declared)
+                        {
+                            case MOJOSHADER_SYMTYPE_SAMPLER2D: type = MOJOSHADER_SAMPLER_2D; break;
+                            case MOJOSHADER_SYMTYPE_SAMPLER3D: type = MOJOSHADER_SAMPLER_VOLUME; break;
+                            case MOJOSHADER_SYMTYPE_SAMPLERCUBE: type = MOJOSHADER_SAMPLER_CUBE; break;
+                            default: break;
+                        } // switch
+                    } // if
+                } // if
+                if (type == MOJOSHADER_SAMPLER_UNKNOWN) continue;
+                /* Sampler arrays have no per-element effect state table here. Do not guess. */
+                if ((regcnt != 1) || (regidx >= 6))
+                {
+                    errorlist_add(errors, NULL, 0, "Legacy sampler inference: sampler arrays or register out of range unsupported.");
+                    return;
+                } // if
+                for (k = 0; k < inferredcount; k++)
+                    if (inferred[k].index == regidx) break;
+                if (k < inferredcount)
+                {
+                    if (inferred[k].type == type) continue;
+                    errorlist_add(errors, NULL, 0, "Legacy sampler inference: conflicting texture dimensions.");
+                    return;
+                } // if
+                inferred[inferredcount].index = regidx;
+                inferred[inferredcount++].type = type;
+            } // for
+        } // if
+    } // if
+    /* An assembly shader can lack CTAB entirely: an explicit pass Sampler[n]=<parameter>
+     * still names the stage. The mapping prepass resolves those large-table references too.
+     * One shader object reused with incompatible pass dimensions cannot have one static type. */
+    if ((pending->length >= 4) &&
+        ((legacy_u32(pending->tokens) & 0xFFFFFF00u) == 0xFFFF0100u))
+    {
+        int technique, pass, state;
+        for (technique = 0; technique < effect->technique_count; technique++)
+        for (pass = 0; pass < effect->techniques[technique].pass_count; pass++)
+        {
+            const MOJOSHADER_effectPass *p = &effect->techniques[technique].passes[pass];
+            int uses_shader = 0;
+            for (state = 0; state < p->state_count; state++)
+            {
+                const MOJOSHADER_effectState *assignment = &p->states[state];
+                if ((assignment->type == MOJOSHADER_RS_PIXELSHADER) &&
+                    (assignment->value.value_count == 1) && assignment->value.values &&
+                    ((uint32) assignment->value.valuesI[0] == index)) uses_shader = 1;
+            } // for
+            if (!uses_shader) continue;
+            for (state = 0; state < p->state_count; state++)
+            {
+                const MOJOSHADER_effectState *assignment = &p->states[state];
+                if (assignment->type != MOJOSHADER_RS_SETSAMPLER) continue;
+                const int par = assignment->referenced_parameter;
+                if ((par < 0) || (par >= effect->param_count) ||
+                    !value_is_sampler(&effect->params[par].value)) continue;
+                const MOJOSHADER_samplerType type = legacy_sampler_type(effect, effect->params[par].value.name);
+                if (type == MOJOSHADER_SAMPLER_UNKNOWN) continue;
+                const uint32 regidx = assignment->index;
+                uint32 k;
+                for (k = 0; k < smapcount; k++)
+                    if (smap[k].index == regidx) break;
+                if (k < smapcount) continue;
+                /* Passes may bind unused stages. Those bindings cannot constrain this shader. */
+                if ((regidx >= 6) || !(used_samplers & (1u << regidx))) continue;
+                for (k = 0; k < inferredcount; k++)
+                    if (inferred[k].index == regidx) break;
+                if (k < inferredcount)
+                {
+                    if (inferred[k].type == type) continue;
+                    errorlist_add(errors, NULL, 0, "Legacy sampler inference: conflicting texture dimensions across passes.");
+                    return;
+                } // if
+                inferred[inferredcount].index = regidx;
+                inferred[inferredcount++].type = type;
+            } // for
+        } // for
+    } // if
+    MOJOSHADER_samplerMap *map = NULL;
+    if (inferredcount)
+    {
+        if (smapcount > (0x7FFFFFFFu / sizeof (*map)) - inferredcount)
+        {
+            errorlist_add(errors, NULL, 0, "Legacy sampler map is too large.");
+            return;
+        } // if
+        map = (MOJOSHADER_samplerMap *) m((smapcount + inferredcount) * sizeof (*map), d);
+        if (!map)
+        {
+            errorlist_add(errors, NULL, 0, "Legacy sampler map allocation failed.");
+            return;
+        } // if
+        if (smapcount) memcpy(map, smap, smapcount * sizeof (*map));
+        memcpy(map + smapcount, inferred, inferredcount * sizeof (*map));
+    } // if
+    char mainfn[32];
+    snprintf(mainfn, sizeof (mainfn), "ShaderFunction%u", (unsigned int) index);
+    object->shader.shader = effect->ctx.compileShader(effect->ctx.shaderContext,
+        mainfn, pending->tokens, pending->length, swiz, swizcount,
+        map ? map : smap, smapcount + inferredcount);
+    effect->ctx.f(map, d);
+    if (object->shader.shader == NULL)
+    {
+        // Bail ASAP, so we can get the error to the application
+        errorlist_add(errors, NULL, 0, effect->ctx.getError(effect->ctx.shaderContext));
+        return;
+    } // if
+    pd = effect->ctx.getParseData(object->shader.shader);
+    if (pd->error_count > 0)
+    {
+        // Bail ASAP, so we can get the error to the application
+        push_errors(errors, pd->errors, pd->error_count);
+        return;
+    } // if
+
+    for (j = 0; j < pd->symbol_count; j++)
+        if (pd->symbols[j].register_set == MOJOSHADER_SYMREGSET_SAMPLER)
+            object->shader.sampler_count++;
+    object->shader.param_count = pd->symbol_count;
+    object->shader.params = (uint32 *) m(object->shader.param_count * sizeof (uint32), d);
+    object->shader.samplers = (MOJOSHADER_samplerStateRegister *) m(object->shader.sampler_count * sizeof (MOJOSHADER_samplerStateRegister), d);
+    if (((object->shader.param_count > 0) && (object->shader.params == NULL)) ||
+        ((object->shader.sampler_count > 0) && (object->shader.samplers == NULL)))
+    {
+        errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+        return;
+    } // if
+    uint32 curSampler = 0;
+    for (j = 0; j < pd->symbol_count; j++)
+    {
+        int par = findparameter(effect->params,
+                                effect->param_count,
+                                pd->symbols[j].name,
+                                errors);
+        if (par < 0)
+            return;
+        object->shader.params[j] = par;
+        if (pd->symbols[j].register_set == MOJOSHADER_SYMREGSET_SAMPLER)
+        {
+            // The shader's constant table matched this sampler symbol to an effect
+            // parameter by name alone. If that parameter is not actually a sampler, its
+            // value storage is not an array of sampler states, and reinterpreting it as
+            // one reads far past the end. -CNA
+            if (!value_is_sampler(&effect->params[par].value))
+            {
+                errorlist_add(errors, NULL, 0,
+                              "Shader sampler names a parameter that is not a sampler.");
+                return;
+            } // if
+            object->shader.samplers[curSampler].sampler_name = effect->params[par].value.name;
+            object->shader.samplers[curSampler].sampler_register = pd->symbols[j].register_index;
+            object->shader.samplers[curSampler].sampler_state_count = effect->params[par].value.value_count;
+            object->shader.samplers[curSampler].sampler_states = effect->params[par].value.valuesSS;
+            curSampler++;
+        } // if
+    } // for
+    if (pd->preshader)
+    {
+        object->shader.preshader_param_count = pd->preshader->symbol_count;
+        object->shader.preshader_params = (uint32 *) m(object->shader.preshader_param_count * sizeof (uint32), d);
+        if ((object->shader.preshader_param_count > 0) &&
+            (object->shader.preshader_params == NULL))
+        {
+            errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+            return;
+        } // if
+        for (j = 0; j < pd->preshader->symbol_count; j++)
+        {
+            int par = findparameter(effect->params,
+                                    effect->param_count,
+                                    pd->preshader->symbols[j].name,
+                                    errors);
+            if (par < 0)
+                return;
+            object->shader.preshader_params[j] = par;
+        } // for
+    } // if
+} // compile_effect_shader
+
 static void readsmallobjects(const uint32 numsmallobjects,
                              const uint8 **ptr,
                              uint32 *len,
@@ -951,11 +1302,11 @@ static void readsmallobjects(const uint32 numsmallobjects,
                              const unsigned int swizcount,
                              const MOJOSHADER_samplerMap *smap,
                              const unsigned int smapcount,
+                             int mappings_only,
                              uint8 *object_seen,
                              ErrorList *errors)
 {
-    int i, j;
-    MOJOSHADER_parseData *pd;
+    int i;
     MOJOSHADER_malloc m = effect->ctx.m;
     void *d = effect->ctx.malloc_data;
 
@@ -978,16 +1329,16 @@ static void readsmallobjects(const uint32 numsmallobjects,
 
         // An object may be referenced many times, but its payload is defined only once.
         // Keep this table shared with readlargeobjects, including empty small records. -CNA
-        if (object_seen[index])
+        if (!mappings_only && object_seen[index])
         {
             errorlist_add(errors, NULL, 0, "Effect object payload is duplicated.");
             return;
         } // if
-        object_seen[index] = 1;
+        if (!mappings_only) object_seen[index] = 1;
         MOJOSHADER_effectObject *object = &effect->objects[index];
         if (object->type == MOJOSHADER_SYMTYPE_STRING)
         {
-            if (length > 0)
+            if (!mappings_only && length > 0)
             {
                 char *str = (char *) m(length, d);
                 if (str == NULL)
@@ -1010,12 +1361,18 @@ static void readsmallobjects(const uint32 numsmallobjects,
               || object->type == MOJOSHADER_SYMTYPE_SAMPLER3D
               || object->type == MOJOSHADER_SYMTYPE_SAMPLERCUBE)
         {
-            if (length > 0)
+            if (length > 0 && object->mapping.name == NULL)
             {
                 char *str = (char *) m(length, d);
                 if (str == NULL)
                 {
                     errorlist_add(errors, NULL, 0, "Effect object allocation failed.");
+                    return;
+                } // if
+                if (memchr(*ptr, '\0', length) == NULL)
+                {
+                    effect->ctx.f(str, d);
+                    errorlist_add(errors, NULL, 0, "Effect texture mapping is not a bounded string.");
                     return;
                 } // if
                 memcpy(str, *ptr, length);
@@ -1025,96 +1382,18 @@ static void readsmallobjects(const uint32 numsmallobjects,
         else if (object->type == MOJOSHADER_SYMTYPE_PIXELSHADER
               || object->type == MOJOSHADER_SYMTYPE_VERTEXSHADER)
         {
-            char mainfn[32];
-            // A zero-length program tells MOJOSHADER_parse the size is unknown, which makes it
-            // scan for an end token with no bound at all and walk off the payload. -CNA
-            if (length == 0)
+            if (!mappings_only)
             {
-                errorlist_add(errors, NULL, 0, "Effect shader object is empty.");
-                return;
-            } // if
-            snprintf(mainfn, sizeof(mainfn), "ShaderFunction%u", (unsigned int) index);
-            object->shader.technique = -1;
-            object->shader.pass = -1;
-            object->shader.shader = effect->ctx.compileShader(effect->ctx.shaderContext,
-                                                              mainfn, *ptr, length,
-                                                              swiz, swizcount,
-                                                              smap, smapcount);
-            if (object->shader.shader == NULL)
-            {
-                // Bail ASAP, so we can get the error to the application
-                errorlist_add(errors, NULL, 0, effect->ctx.getError(effect->ctx.shaderContext));
-                return;
-            } // if
-            pd = effect->ctx.getParseData(object->shader.shader);
-            if (pd->error_count > 0)
-            {
-                // Bail ASAP, so we can get the error to the application
-                push_errors(errors, pd->errors, pd->error_count);
-                return;
-            } // if
-
-            for (j = 0; j < pd->symbol_count; j++)
-                if (pd->symbols[j].register_set == MOJOSHADER_SYMREGSET_SAMPLER)
-                    object->shader.sampler_count++;
-            object->shader.param_count = pd->symbol_count;
-            object->shader.params = (uint32 *) m(object->shader.param_count * sizeof (uint32), d);
-            object->shader.samplers = (MOJOSHADER_samplerStateRegister *) m(object->shader.sampler_count * sizeof (MOJOSHADER_samplerStateRegister), d);
-            if (((object->shader.param_count > 0) && (object->shader.params == NULL)) ||
-                ((object->shader.sampler_count > 0) && (object->shader.samplers == NULL)))
-            {
-                errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
-                return;
-            } // if
-            uint32 curSampler = 0;
-            for (j = 0; j < pd->symbol_count; j++)
-            {
-                int par = findparameter(effect->params,
-                                        effect->param_count,
-                                        pd->symbols[j].name,
-                                        errors);
-                if (par < 0)
-                    return;
-                object->shader.params[j] = par;
-                if (pd->symbols[j].register_set == MOJOSHADER_SYMREGSET_SAMPLER)
+                if (length == 0)
                 {
-                    // The shader's constant table matched this sampler symbol to an effect
-                    // parameter by name alone. If that parameter is not actually a sampler, its
-                    // value storage is not an array of sampler states, and reinterpreting it as
-                    // one reads far past the end. -CNA
-                    if (!value_is_sampler(&effect->params[par].value))
-                    {
-                        errorlist_add(errors, NULL, 0,
-                                      "Shader sampler names a parameter that is not a sampler.");
-                        return;
-                    } // if
-                    object->shader.samplers[curSampler].sampler_name = effect->params[par].value.name;
-                    object->shader.samplers[curSampler].sampler_register = pd->symbols[j].register_index;
-                    object->shader.samplers[curSampler].sampler_state_count = effect->params[par].value.value_count;
-                    object->shader.samplers[curSampler].sampler_states = effect->params[par].value.valuesSS;
-                    curSampler++;
-                } // if
-            } // for
-            if (pd->preshader)
-            {
-                object->shader.preshader_param_count = pd->preshader->symbol_count;
-                object->shader.preshader_params = (uint32 *) m(object->shader.preshader_param_count * sizeof (uint32), d);
-                if ((object->shader.preshader_param_count > 0) &&
-                    (object->shader.preshader_params == NULL))
-                {
-                    errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
+                    errorlist_add(errors, NULL, 0, "Effect shader object is empty.");
                     return;
                 } // if
-                for (j = 0; j < pd->preshader->symbol_count; j++)
-                {
-                    int par = findparameter(effect->params,
-                                            effect->param_count,
-                                            pd->preshader->symbols[j].name,
-                                            errors);
-                    if (par < 0)
-                        return;
-                    object->shader.preshader_params[j] = par;
-                } // for
+                PendingEffectShader pending = { *ptr, length };
+                object->shader.technique = -1;
+                object->shader.pass = -1;
+                compile_effect_shader(effect, index, &pending, swiz, swizcount, smap, smapcount, errors);
+                if (errorlist_count(errors)) return;
             } // if
         } // else if
         else
@@ -1151,11 +1430,11 @@ static void readlargeobjects(const uint32 numlargeobjects,
                              const unsigned int swizcount,
                              const MOJOSHADER_samplerMap *smap,
                              const unsigned int smapcount,
+                             int mappings_only,
                              uint8 *object_seen,
                              ErrorList *errors)
 {
     int i, j;
-    MOJOSHADER_parseData *pd;
     MOJOSHADER_malloc m = effect->ctx.m;
     MOJOSHADER_free f = effect->ctx.f;
     void *d = effect->ctx.malloc_data;
@@ -1239,6 +1518,12 @@ static void readlargeobjects(const uint32 numlargeobjects,
 
             if ((passState->type == MOJOSHADER_RS_PIXELSHADERCONSTANT) && (type == 0))
             {
+                if (mappings_only)
+                {
+                    *ptr += blocklen;
+                    *len -= blocklen;
+                    continue;
+                } // if
                 if (length == 0)
                 {
                     errorlist_add(errors, NULL, 0,
@@ -1313,16 +1598,24 @@ static void readlargeobjects(const uint32 numlargeobjects,
         } // if
 
         MOJOSHADER_effectObject *object = &effect->objects[objectIndex];
+        if (mappings_only &&
+            ((object->type == MOJOSHADER_SYMTYPE_PIXELSHADER) ||
+             (object->type == MOJOSHADER_SYMTYPE_VERTEXSHADER)))
+        {
+            *ptr += blocklen;
+            *len -= blocklen;
+            continue;
+        } // if
         if (object->type == MOJOSHADER_SYMTYPE_PIXELSHADER
          || object->type == MOJOSHADER_SYMTYPE_VERTEXSHADER)
         {
             // Do not overwrite the compiled shader or any of its owned tables. -CNA
-            if (object_seen[objectIndex])
+            if (!mappings_only && object_seen[objectIndex])
             {
                 errorlist_add(errors, NULL, 0, "Effect object payload is duplicated.");
                 return;
             } // if
-            object_seen[objectIndex] = 1;
+            if (!mappings_only) object_seen[objectIndex] = 1;
             object->shader.technique = technique;
             object->shader.pass = index;
 
@@ -1395,98 +1688,14 @@ static void readlargeobjects(const uint32 numlargeobjects,
             } // if
             else
             {
-                char mainfn[32];
-                // Same as readsmallobjects: an empty program means "size unknown" to the shader
-                // parser, and it then reads past the effect payload looking for an end token.
                 if (length == 0)
                 {
                     errorlist_add(errors, NULL, 0, "Effect shader object is empty.");
                     return;
                 } // if
-                snprintf(mainfn, sizeof (mainfn), "ShaderFunction%u", (unsigned int) objectIndex);
-                object->shader.shader = effect->ctx.compileShader(effect->ctx.shaderContext,
-                                                                  mainfn, *ptr, length,
-                                                                  swiz, swizcount,
-                                                                  smap, smapcount);
-                if (object->shader.shader == NULL)
-                {
-                    // Bail ASAP, so we can get the error to the application
-                    errorlist_add(errors, NULL, 0, effect->ctx.getError(effect->ctx.shaderContext));
-                    return;
-                } // if
-                pd = effect->ctx.getParseData(object->shader.shader);
-                if (pd->error_count > 0)
-                {
-                    // Bail ASAP, so we can get the error to the application
-                    push_errors(errors, pd->errors, pd->error_count);
-                    return;
-                } // if
-
-                for (j = 0; j < pd->symbol_count; j++)
-                    if (pd->symbols[j].register_set == MOJOSHADER_SYMREGSET_SAMPLER)
-                        object->shader.sampler_count++;
-                object->shader.param_count = pd->symbol_count;
-                object->shader.params = (uint32 *) m(object->shader.param_count * sizeof (uint32), d);
-                object->shader.samplers = (MOJOSHADER_samplerStateRegister *) m(object->shader.sampler_count * sizeof (MOJOSHADER_samplerStateRegister), d);
-                if (((object->shader.param_count > 0) && (object->shader.params == NULL)) ||
-                    ((object->shader.sampler_count > 0) && (object->shader.samplers == NULL)))
-                {
-                    errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
-                    return;
-                } // if
-                uint32 curSampler = 0;
-                for (j = 0; j < pd->symbol_count; j++)
-                {
-                    int par = findparameter(effect->params,
-                                            effect->param_count,
-                                            pd->symbols[j].name,
-                                            errors);
-                    if (par < 0)
-                        return;
-                    object->shader.params[j] = par;
-                    if (pd->symbols[j].register_set == MOJOSHADER_SYMREGSET_SAMPLER)
-                    {
-                        // The shader's constant table matched this sampler symbol to an effect
-                        // parameter by name alone. If that parameter is not actually a sampler, its
-                        // value storage is not an array of sampler states, and reinterpreting it as
-                        // one reads far past the end. -CNA
-                        if ((effect->params[par].value.type.parameter_type <
-                             MOJOSHADER_SYMTYPE_SAMPLER) ||
-                            (effect->params[par].value.type.parameter_type >
-                             MOJOSHADER_SYMTYPE_SAMPLERCUBE))
-                        {
-                            errorlist_add(errors, NULL, 0,
-                                          "Shader sampler names a parameter that is not a sampler.");
-                            return;
-                        } // if
-                        object->shader.samplers[curSampler].sampler_name = effect->params[par].value.name;
-                        object->shader.samplers[curSampler].sampler_register = pd->symbols[j].register_index;
-                        object->shader.samplers[curSampler].sampler_state_count = effect->params[par].value.value_count;
-                        object->shader.samplers[curSampler].sampler_states = effect->params[par].value.valuesSS;
-                        curSampler++;
-                    } // if
-                } // for
-                if (pd->preshader)
-                {
-                    object->shader.preshader_param_count = pd->preshader->symbol_count;
-                    object->shader.preshader_params = (uint32 *) m(object->shader.preshader_param_count * sizeof (uint32), d);
-                    if ((object->shader.preshader_param_count > 0) &&
-                        (object->shader.preshader_params == NULL))
-                    {
-                        errorlist_add(errors, NULL, 0, "Effect shader table allocation failed.");
-                        return;
-                    } // if
-                    for (j = 0; j < pd->preshader->symbol_count; j++)
-                    {
-                        int par = findparameter(effect->params,
-                                                effect->param_count,
-                                                pd->preshader->symbols[j].name,
-                                                errors);
-                        if (par < 0)
-                            return;
-                        object->shader.preshader_params[j] = par;
-                    } // for
-                } // if
+                PendingEffectShader pending = { *ptr, length };
+                compile_effect_shader(effect, objectIndex, &pending, swiz, swizcount, smap, smapcount, errors);
+                if (errorlist_count(errors)) return;
             }
         } // if
         else if (object->type == MOJOSHADER_SYMTYPE_TEXTURE
@@ -1500,12 +1709,18 @@ static void readlargeobjects(const uint32 numlargeobjects,
               || object->type == MOJOSHADER_SYMTYPE_SAMPLER3D
               || object->type == MOJOSHADER_SYMTYPE_SAMPLERCUBE)
         {
-            if (length > 0)
+            if (length > 0 && object->mapping.name == NULL)
             {
                 char *str = (char *) m(length, d);
                 if (str == NULL)
                 {
                     errorlist_add(errors, NULL, 0, "Effect object allocation failed.");
+                    return;
+                } // if
+                if (memchr(*ptr, '\0', length) == NULL)
+                {
+                    effect->ctx.f(str, d);
+                    errorlist_add(errors, NULL, 0, "Effect texture mapping is not a bounded string.");
                     return;
                 } // if
                 memcpy(str, *ptr, length);
@@ -1692,15 +1907,24 @@ MOJOSHADER_effect *MOJOSHADER_compileEffect(const unsigned char *buf,
     } // if
     memset(object_seen, '\0', numobjects);
 
-    /* Parse "small" object table */
+    /* Texture-name objects may follow a shader, even in the other object table. Load those
+     * mappings first; the normal readers keep shader compilation and duplicate rejection in
+     * their original order. This also works when bytecode/GLSL profiles are compiled out. -CNA */
+    const uint8 *objects_ptr = ptr;
+    const uint32 objects_len = len;
     readsmallobjects(numsmallobjects, &ptr, &len, retval,
-                     swiz, swizcount, smap, smapcount, object_seen, errors);
+                     swiz, swizcount, smap, smapcount, 1, object_seen, errors);
     if (errorlist_count(errors) == 0)
-    {
-        /* Parse "large" object table. */
         readlargeobjects(numlargeobjects, numsmallobjects, &ptr, &len, retval,
-                         swiz, swizcount, smap, smapcount, object_seen, errors);
-    } // if
+                         swiz, swizcount, smap, smapcount, 1, object_seen, errors);
+    ptr = objects_ptr;
+    len = objects_len;
+    if (errorlist_count(errors) == 0)
+        readsmallobjects(numsmallobjects, &ptr, &len, retval,
+                         swiz, swizcount, smap, smapcount, 0, object_seen, errors);
+    if (errorlist_count(errors) == 0)
+        readlargeobjects(numlargeobjects, numsmallobjects, &ptr, &len, retval,
+                         swiz, swizcount, smap, smapcount, 0, object_seen, errors);
 
     f(object_seen, d);
     retval->error_count = errorlist_count(errors);

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "cna_test.h"
+#include "cna_sampler_inference_effect.h"
 
 /* No test here compiles a shader: an effect without techniques never asks the backend for one. */
 static void *MOJOSHADERCALL no_compile(const void *ctx, const char *mainfn,
@@ -1348,8 +1349,208 @@ static void test_xna4_wrapper_truncated_after_skip(void)
     expect_rejected(bytes, len, "truncated XNA4 wrapper");
 } // test_xna4_wrapper_truncated_after_skip
 
+/* The independent declaration oracle is the fixture's TEXTURE2D/3D/CUBE parameter,
+ * reached through sampler_state Texture=<name>; CTAB deliberately says generic SAMPLER. */
+static void *MOJOSHADERCALL inference_compile(const void *ctx, const char *mainfn,
+    const unsigned char *tokens, unsigned int bytes, const MOJOSHADER_swizzle *swiz,
+    unsigned int swizcount, const MOJOSHADER_samplerMap *map, unsigned int count)
+{
+    (void) ctx;
+    return (void *) MOJOSHADER_parse("spirv", mainfn, tokens, bytes, swiz, swizcount,
+                                   map, count, cna_alloc_malloc, cna_alloc_free, NULL);
+}
+static void MOJOSHADERCALL inference_delete(const void *ctx, void *shader)
+{ (void) ctx; MOJOSHADER_freeParseData((const MOJOSHADER_parseData *) shader); }
+static MOJOSHADER_parseData *MOJOSHADERCALL inference_parse(void *shader)
+{ return (MOJOSHADER_parseData *) shader; }
+static void inference_case(uint32_t type, int reverse, int large, int late, int explicitMap)
+{
+    CnaSamplerEffect code;
+    MOJOSHADER_effectShaderContext ctx=backend();
+    MOJOSHADER_samplerMap map={1,MOJOSHADER_SAMPLER_2D};
+    MOJOSHADER_effect *effect;
+    const MOJOSHADER_parseData *pd;
+    int i, saw=0;
+    const MOJOSHADER_samplerType wanted=explicitMap || type==MOJOSHADER_SYMTYPE_TEXTURE ||
+        type==MOJOSHADER_SYMTYPE_TEXTURE2D ? MOJOSHADER_SAMPLER_2D :
+        type==MOJOSHADER_SYMTYPE_TEXTURECUBE ? MOJOSHADER_SAMPLER_CUBE : MOJOSHADER_SAMPLER_VOLUME;
+    cna_sampler_effect(&code,type,reverse,large,late);
+    ctx.compileShader=inference_compile; ctx.deleteShader=inference_delete;
+    ctx.getParseData=inference_parse; ctx.m=cna_alloc_malloc; ctx.f=cna_alloc_free;
+    effect=MOJOSHADER_compileEffect((const unsigned char *)code.words,code.length,
+                                  NULL,0,explicitMap?&map:NULL,explicitMap?1:0,&ctx);
+    CNA_CHECK(effect && !effect->error_count,"typed effect with generic shader samplers compiles");
+    if(effect && effect->error_count) fprintf(stderr,"inference: %s\n",effect->errors[0].error);
+    if(effect && !effect->error_count)
+    {
+        pd=ctx.getParseData(effect->objects[3].shader.shader);
+        for(i=0;i<pd->sampler_count;i++) if(pd->samplers[i].index==1)
+        { saw++; CNA_CHECK(pd->samplers[i].type==wanted,"effect texture declaration reaches legacy sampler map"); }
+        CNA_CHECK(saw==1,"destination sampler is present exactly once");
+        CNA_CHECK(cna_spirv_validate(pd,"effect-inferred-sampler"),"inferred SPIR-V validates");
+    }
+    MOJOSHADER_deleteEffect(effect);
+    CNA_CHECK(cna_alloc_live()==0,"inferred effect releases all allocations");
+}
+static void test_effect_sampler_inference_allocations(void)
+{
+    CnaSamplerEffect code;
+    int fail, complete=0;
+    cna_sampler_effect(&code,MOJOSHADER_SYMTYPE_TEXTURECUBE,1,1,1);
+    for(fail=1;fail<1024;fail++)
+    {
+        MOJOSHADER_effectShaderContext ctx=backend();
+        MOJOSHADER_effect *effect;
+        ctx.compileShader=inference_compile;ctx.deleteShader=inference_delete;
+        ctx.getParseData=inference_parse;ctx.m=cna_alloc_malloc;ctx.f=cna_alloc_free;
+        cna_alloc_reset(fail);
+        effect=MOJOSHADER_compileEffect((const unsigned char *)code.words,code.length,NULL,0,NULL,0,&ctx);
+        if(!cna_alloc_hit())
+        {
+            CNA_CHECK(effect && !effect->error_count,"allocation sweep reaches a valid inferred effect");
+            complete=1;
+        }
+        MOJOSHADER_deleteEffect(effect);
+        CNA_CHECK(cna_alloc_live()==0,"inferred effect releases every partial shader/map allocation");
+        if(complete) break;
+    }
+    CNA_CHECK(complete,"inference allocation sweep completes");
+    cna_alloc_reset(0);
+}
+static void test_effect_sampler_array_refusal(void)
+{
+    CnaSamplerEffect code;
+    MOJOSHADER_effectShaderContext ctx=backend();
+    MOJOSHADER_effect *effect;
+    unsigned int i;
+    cna_sampler_effect(&code,MOJOSHADER_SYMTYPE_TEXTURE3D,0,0,0);
+    for(i=0;i+15<code.length/4;i++) if(code.words[i]==0x42415443)
+    { code.words[i+15]=2; break; } /* CTAB + 56: second RegisterCount */
+    ctx.compileShader=inference_compile;ctx.deleteShader=inference_delete;ctx.getParseData=inference_parse;
+    effect=MOJOSHADER_compileEffect((const unsigned char *)code.words,code.length,NULL,0,NULL,0,&ctx);
+    CNA_CHECK(effect && effect->error_count==1,"legacy sampler array refuses");
+    if(effect && effect->error_count)
+        CNA_CHECK(strstr(effect->errors[0].error,"sampler arrays")!=NULL,"array refusal names unsupported form");
+    MOJOSHADER_deleteEffect(effect);
+}
+
+/* Legal passes reuse s1: pass 0 binds LookupSampler (cube), pass 1 SourceSampler (2D).
+ * A single effect-wide register map cannot represent this declaration oracle. */
+static void test_effect_sampler_map_per_shader(void)
+{
+    CnaSamplerEffect original, code;
+    uint32_t second[256], *w=original.words, *out=code.words;
+    unsigned int structure, pass, objects, pos, secondPass, n=0, words=0, i;
+    MOJOSHADER_effectShaderContext ctx=backend();
+    MOJOSHADER_effect *effect;
+    cna_sampler_effect(&original,MOJOSHADER_SYMTYPE_TEXTURECUBE,0,0,0);
+    structure=2+w[1]/4; pass=structure+23; objects=pass+11;
+    pos=objects+2;
+    for(i=0;i<w[objects];i++)
+    {
+        const unsigned int size=w[pos+1]/4;
+        if(w[pos]==3) { memcpy(second,w+pos+2,size*4);words=size; }
+        pos+=2+(w[pos+1]+3)/4;
+    }
+    CNA_CHECK(words>9,"original pixel shader span found");
+    if(words<=9)return;
+    for(i=0;i+10<words;i++) if(second[i]==0x42415443)
+    { second[i+4]=1;second[i+9]=3|(1u<<16);break; } /* SourceSampler -> s1 */
+    words-=9;
+    second[words++]=66;second[words++]=0xB00F0001; /* tex t1 */
+    second[words++]=1;second[words++]=0x800F0000;second[words++]=0xB0E40001;
+    second[words++]=0xFFFF;
+    out[n++]=w[0];out[n++]=w[1]+4;
+    memcpy(out+n,w+2,(structure-2)*4);n+=structure-2;
+    out[n++]=5; /* New object value in the base region, before its structure table. */
+    memcpy(out+n,w+structure,23*4);out[n+3]=6;out[n+22]=3;n+=23;
+    memcpy(out+n,w+pass,11*4);n+=11;
+    secondPass=n;
+    memcpy(out+n,w+pass,11*4);out[n+6]=w[1];out[n+2]=3;n+=11;
+    out[n++]=MOJOSHADER_RS_SETSAMPLER;out[n++]=1;
+    out[n++]=w[1]-24;out[n++]=w[1]-4; /* Empty sampler state value in fixture base. */
+    /* A third pass keeps object 5 declared when the conflict control reuses object 3. */
+    memcpy(out+n,w+pass,11*4);out[n+6]=w[1];n+=11;
+    out[n++]=5;out[n++]=1;
+    memcpy(out+n,w+objects+2,(original.length/4-objects-2)*4);n+=original.length/4-objects-2;
+    out[n++]=5;out[n++]=words*4;
+    memcpy(out+n,second,words*4);n+=words;
+    out[n++]=0;out[n++]=1;out[n++]=0;out[n++]=2;out[n++]=1;
+    out[n++]=sizeof("SourceSampler");
+    memset(out+n,0,16);memcpy(out+n,"SourceSampler",sizeof("SourceSampler"));n+=4;
+    code.length=n*4;
+    ctx.compileShader=inference_compile;ctx.deleteShader=inference_delete;ctx.getParseData=inference_parse;
+    effect=MOJOSHADER_compileEffect((const unsigned char *)code.words,code.length,NULL,0,NULL,0,&ctx);
+    CNA_CHECK(effect && !effect->error_count,"two-pass stage reuse compiles");
+    if(effect && effect->error_count)fprintf(stderr,"per-shader: %s\n",effect->errors[0].error);
+    if(effect && !effect->error_count) for(i=0;i<2;i++)
+    {
+        int sampler,saw=0;
+        const MOJOSHADER_parseData *pd=ctx.getParseData(effect->objects[i?5:3].shader.shader);
+        for(sampler=0;sampler<pd->sampler_count;sampler++)if(pd->samplers[sampler].index==1)
+        {
+            saw++;
+            CNA_CHECK(pd->samplers[sampler].type==(i?MOJOSHADER_SAMPLER_2D:MOJOSHADER_SAMPLER_CUBE),
+                      "each shader infers its own s1 dimension");
+        }
+        CNA_CHECK(saw==1,"each pass shader exposes s1");
+    }
+    MOJOSHADER_deleteEffect(effect);
+    /* Reuse the cube shader object in the 2D pass. Both declarations are present but
+     * incompatible: refusing is required until per-pass shader variants exist. */
+    out[secondPass+6]=w[pass+6];
+    effect=MOJOSHADER_compileEffect((const unsigned char *)code.words,code.length,NULL,0,NULL,0,&ctx);
+    CNA_CHECK(effect && effect->error_count==1,"shared shader with incompatible pass types refuses");
+    if(effect && effect->error_count)
+        CNA_CHECK(strstr(effect->errors[0].error,"conflicting texture dimensions across passes")!=NULL,
+                  "conflicting pass dimension refusal names the unsupported form");
+    MOJOSHADER_deleteEffect(effect);
+}
+
+static void test_effect_inferred_unsupported_opcodes(void)
+{
+    static const uint32_t kinds[]={MOJOSHADER_SYMTYPE_TEXTURECUBE,MOJOSHADER_SYMTYPE_TEXTURE3D};
+    static const uint32_t opcodes[]={69,70,83};
+    static const char *names[]={"TEXREG2AR requires a 2D sampler","TEXREG2GB requires a 2D sampler",
+                                "TEXDP3TEX needs a 2D sampler"};
+    unsigned int kind, op, i;
+    for(kind=0;kind<2;kind++)for(op=0;op<3;op++)
+    {
+        CnaSamplerEffect code;
+        MOJOSHADER_effectShaderContext ctx=backend();
+        MOJOSHADER_effect *effect;
+        cna_sampler_effect(&code,kinds[kind],0,0,0);
+        for(i=0;i+1<code.length/4;i++)if(code.words[i]==82 && code.words[i+1]==0xB00F0001)
+        { code.words[i]=opcodes[op];break; }
+        ctx.compileShader=inference_compile;ctx.deleteShader=inference_delete;ctx.getParseData=inference_parse;
+        effect=MOJOSHADER_compileEffect((const unsigned char *)code.words,code.length,NULL,0,NULL,0,&ctx);
+        CNA_CHECK(effect && effect->error_count>0,"inferred incompatible instruction refuses");
+        if(effect && effect->error_count)
+            CNA_CHECK(strstr(effect->errors[0].error,names[op])!=NULL,"inferred refusal names opcode and required dimension");
+        MOJOSHADER_deleteEffect(effect);
+    }
+}
+
+static void test_effect_sampler_inference(void)
+{
+    const uint32_t types[]={MOJOSHADER_SYMTYPE_TEXTURE2D,MOJOSHADER_SYMTYPE_TEXTURECUBE,
+                            MOJOSHADER_SYMTYPE_TEXTURE3D,MOJOSHADER_SYMTYPE_TEXTURE};
+    int i,reverse,large,late,explicitMap;
+    for(i=0;i<4;i++) for(reverse=0;reverse<2;reverse++) for(large=0;large<2;large++)
+        for(late=0;late<2;late++) for(explicitMap=0;explicitMap<2;explicitMap++)
+            inference_case(types[i],reverse,large,late,explicitMap);
+    for(i=0;i<4;i++)for(reverse=0;reverse<2;reverse++)for(large=0;large<2;large++)
+        for(explicitMap=0;explicitMap<2;explicitMap++)
+            inference_case(types[i],reverse|2|8,large,0,explicitMap);
+}
+
 int main(void)
 {
+    cna_test_run("effect_legacy_sampler_inference", test_effect_sampler_inference);
+    cna_test_run("effect_legacy_sampler_per_shader", test_effect_sampler_map_per_shader);
+    cna_test_run("effect_legacy_sampler_opcode_refusals", test_effect_inferred_unsupported_opcodes);
+    cna_test_run("effect_legacy_sampler_array_refusal", test_effect_sampler_array_refusal);
+    cna_test_run("effect_legacy_sampler_allocations", test_effect_sampler_inference_allocations);
     cna_test_run("struct_member_defaults", test_struct_member_defaults);
     cna_test_run("no_technique_effect", test_no_technique_effect);
     cna_test_run("error_effects_are_deletable", test_error_effects_are_deletable);
