@@ -14,6 +14,7 @@
 #include "../../mojoshader_d3d11.c"
 
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include "cna_test.h"
@@ -386,13 +387,13 @@ static void test_fog_pair_rewrite(void)
         {
             CNA_CHECK(strstr(source, "float m_o1_fog : FOG;") != NULL,
                       "the input struct is the vertex shader's, FOG a float member");
-            CNA_CHECK(strstr(source, "float4 o1 = float4(0.0, 0.0, 0.0, 1.0);") != NULL,
-                      "the input register is renamed to the vertex output's");
-            CNA_CHECK(strstr(source, "o1.z = input.m_o1_fog;") != NULL,
+            CNA_CHECK(strstr(source, "float4 v0 = float4(0.0, 0.0, 0.0, 1.0);") != NULL,
+                      "the pixel register keeps its identity");
+            CNA_CHECK(strstr(source, "v0.z = input.m_o1_fog;") != NULL,
                       "FOG fills its lane from the vertex shader's member");
-            CNA_CHECK(strstr(source, "oC0 = o1.zzzz;") != NULL, "the FOG lane is read");
+            CNA_CHECK(strstr(source, "oC0 = v0.zzzz;") != NULL, "the FOG lane is read");
             CNA_CHECK(strstr(source, "m_v0") == NULL, "no pixel-side member name is left");
-            if (strstr(source, "o1.z = input.m_o1_fog;") == NULL)
+            if (strstr(source, "v0.z = input.m_o1_fog;") == NULL)
                 fprintf(stderr, "%s\n", source);
             ctx->free_fn(source, ctx->malloc_data);
         } // if
@@ -509,12 +510,131 @@ static void test_depth_vertex_input(void)
     free(ctx);
 } // test_depth_vertex_input
 
+
+/* D3D9 SM3 oracle: semantic/index links stages, register numbers do not.
+ * FOG comes from o1.x, TEXCOORD0 from o2.yzw, assembled into the single v0. */
+static const uint32_t split_vs3[] = {
+    CNA_VS(3, 0),
+    CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+    CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+    CNA_OP(31, 2), CNA_DCL(11, 0), CNA_DST(CNA_OUTPUT, 1, 1),
+    CNA_OP(31, 2), CNA_DCL(5, 0), CNA_DST(CNA_OUTPUT, 2, 14),
+    CNA_OP(1, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(1, 2), CNA_DST(CNA_OUTPUT, 1, 1), CNA_SRC(CNA_INPUT, 0),
+    CNA_OP(1, 2), CNA_DST(CNA_OUTPUT, 2, 14), CNA_SRC(CNA_INPUT, 0), CNA_END
+};
+static const uint32_t split_ps3[] = {
+    CNA_PS(3, 0),
+    CNA_OP(31, 2), CNA_DCL(11, 0), CNA_DST(CNA_INPUT, 0, 1),
+    CNA_OP(31, 2), CNA_DCL(5, 0), CNA_DST(CNA_INPUT, 0, 14),
+    CNA_OP(1, 2), CNA_DST(CNA_COLOROUT, 0, 15), CNA_SRC(CNA_INPUT, 0), CNA_END
+};
+static void save_hlsl(const char *source, const char *name)
+{
+    const char *dir = getenv("MOJOSHADER_CNA_TEST_DIR");
+    char path[1024];
+    FILE *file;
+    if (!dir) return;
+    snprintf(path, sizeof(path), "%s/%s.hlsl", dir, name);
+    mkdir(dir, 0777);
+    file = fopen(path, "wb");
+    CNA_CHECK(file != NULL, "generated HLSL can be saved");
+    if (file) { fputs(source, file); fclose(file); }
+}
+static void test_split_semantics(void)
+{
+    MOJOSHADER_d3d11Context *ctx;
+    cna_alloc_reset(0);
+    ctx = make_context();
+    MOJOSHADER_d3d11Shader *vs = compile(ctx, split_vs3, sizeof(split_vs3));
+    MOJOSHADER_d3d11Shader *ps = compile(ctx, split_ps3, sizeof(split_ps3));
+    CNA_CHECK(vs && ps, "legal split semantic shaders translate");
+    if (vs && ps)
+    {
+        char *source = rewritePixelShader(ctx, vs, ps);
+        CNA_CHECK(strstr(source, "v0.x = input.m_o1_fog;") != NULL, "FOG reads its scalar vertex member");
+        CNA_CHECK(strstr(source, "v0.yzw = input.m_o2.yzw;") != NULL, "TEXCOORD reads the separate vertex member");
+        CNA_CHECK(strstr(source, "oC0 = v0;") != NULL, "the assembled register is read whole");
+        CNA_CHECK(strstr(source, "input.m_v0") == NULL, "all pixel members are mapped");
+        save_hlsl(source, "split_pixel");
+        ctx->free_fn(source, ctx->malloc_data);
+    }
+    if (vs) MOJOSHADER_d3d11DeleteShader(ctx, vs);
+    if (ps) MOJOSHADER_d3d11DeleteShader(ctx, ps);
+    free(ctx);
+}
+/* Exact semantic-name/index matching: DEPTH10 precedes DEPTH1, with two
+ * integer formats of opposite signedness. The output declaration is a decoy. */
+static void test_integer_semantic_tokens(void)
+{
+    uint32_t tokens[] = {
+        CNA_VS(3, 0),
+        CNA_OP(31, 2), CNA_DCL(12, 10), CNA_DST(CNA_INPUT, 0, 15),
+        CNA_OP(31, 2), CNA_DCL(12, 1), CNA_DST(CNA_INPUT, 1, 15),
+        CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+        CNA_OP(2, 3), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0), CNA_SRC(CNA_INPUT, 1), CNA_END
+    };
+    D3D11_INPUT_ELEMENT_DESC elements[3] = {
+        { "DEPTH", 1, DXGI_FORMAT_R32G32B32A32_SINT, 0, 0, 0, 0 },
+        { "DEPTH", 10, DXGI_FORMAT_R32G32B32A32_UINT, 0, 0, 0, 0 },
+        { "TEXCOORD", 9, DXGI_FORMAT_R32_UINT, 0, 0, 0, 0 }
+    };
+    MOJOSHADER_d3d11Context *ctx;
+    cna_alloc_reset(0);
+    ctx = make_context();
+    MOJOSHADER_d3d11Shader *vs = compile(ctx, tokens, sizeof(tokens));
+    CNA_CHECK(vs != NULL, "legal DEPTH1 and DEPTH10 inputs translate");
+    if (vs)
+    {
+        char *source = rewriteVertexInputs(ctx, vs, elements, 3);
+        CNA_CHECK(strstr(source, "  int4 m_v1 : DEPTH1;") != NULL, "DEPTH1 is signed");
+        CNA_CHECK(strstr(source, " uint4 m_v0 : DEPTH10;") != NULL, "DEPTH10 is unsigned");
+        CNA_CHECK(strstr(source, "float4 m_o0 : SV_Position;") != NULL, "output type stays float");
+        save_hlsl(source, "integer_vertex");
+        ctx->free_fn(source, ctx->malloc_data);
+        MOJOSHADER_d3d11DeleteShader(ctx, vs);
+    }
+    free(ctx);
+}
+
+
+/* An omitted zero semantic index is equivalent to an explicit 0: the PSIZE0
+ * layout must find PSIZE. POSITIONT also omits its zero index. */
+static void test_psize_integer_spelling(void)
+{
+    uint32_t tokens[sizeof(depth_input_vs3)/sizeof(uint32_t)];
+    D3D11_INPUT_ELEMENT_DESC elements[2] = {
+        { "PSIZE", 0, DXGI_FORMAT_R32G32B32A32_UINT, 0, 0, 0, 0 },
+        { "POSITIONT", 0, DXGI_FORMAT_R32G32B32A32_SINT, 0, 0, 0, 0 }
+    };
+    MOJOSHADER_d3d11Context *ctx;
+    MOJOSHADER_d3d11Shader *vs;
+    cna_alloc_reset(0); ctx = make_context();
+    memcpy(tokens, depth_input_vs3, sizeof(tokens));
+    tokens[2] = CNA_DCL(9, 0); tokens[5] = CNA_DCL(4, 0);
+    vs = compile(ctx, tokens, sizeof(tokens));
+    CNA_CHECK(vs != NULL, "legal PSIZE/POSITIONT vertex inputs translate");
+    if (vs)
+    {
+        char *source = rewriteVertexInputs(ctx, vs, elements, 2);
+        CNA_CHECK(strstr(source, " uint4 m_v1 : PSIZE;") != NULL, "PSIZE0 layout rewrites index-zero PSIZE input");
+        CNA_CHECK(strstr(source, "  int4 m_v0 : POSITIONT;") != NULL, "omitted POSITIONT index means zero");
+        save_hlsl(source, "psize_vertex");
+        ctx->free_fn(source, ctx->malloc_data);
+        MOJOSHADER_d3d11DeleteShader(ctx, vs);
+    }
+    free(ctx);
+}
+
 int main(void)
 {
     cna_test_run("texbem_zero_state", test_texbem_zero_state);
     cna_test_run("uniform_zero_state", test_uniform_zero_state);
     cna_test_run("refused_buffer_fails_compile", test_refused_buffer_fails_compile);
     cna_test_run("compile_allocation_failures", test_compile_allocation_failures);
+    cna_test_run("psize_integer_spelling", test_psize_integer_spelling);
+    cna_test_run("split_semantics", test_split_semantics);
+    cna_test_run("integer_semantic_tokens", test_integer_semantic_tokens);
     cna_test_run("fog_pair_rewrite", test_fog_pair_rewrite);
     cna_test_run("vface_pair_rewrite", test_vface_pair_rewrite);
     cna_test_run("depth_vertex_input", test_depth_vertex_input);

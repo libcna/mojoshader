@@ -435,7 +435,8 @@ static void replaceVarname(
     size_t replace_len = strlen(replace);
 
     #define IS_PARTIAL_TOKEN(token) \
-        (isalnum(*(token + find_len)) || isalnum(*(token-1)))
+        (isalnum((unsigned char) *(token + find_len)) || *(token + find_len) == '_' || \
+         ((token != srcbuf) && (isalnum((unsigned char) *(token-1)) || *(token-1) == '_')))
 
     // How many times does `find` occur in the source buffer?
     int count = 0;
@@ -505,6 +506,56 @@ static void replaceVarname(
     *source = newbuf;
 } // replaceVarname
 
+/* Find an exact semantic in a generated HLSL struct. An omitted index means zero.
+ * Return the declaration's type and, optionally, its member name. -CNA */
+static char *findSemantic(char *source, const char *name, unsigned int index,
+                          char *member, size_t memberlen)
+{
+    char *colon;
+    const char *end = strchr(source, '}');
+    const size_t namelen = strlen(name);
+    for (colon = strchr(source, ':'); colon && (!end || colon < end);
+         colon = strchr(colon + 1, ':'))
+    {
+        char *semantic = colon + 1, *tail, *first, *last;
+        size_t n;
+        while (isspace((unsigned char) *semantic)) semantic++;
+        for (n = 0; n < namelen; n++)
+            if (toupper((unsigned char) semantic[n]) != toupper((unsigned char) name[n])) break;
+        if (n != namelen) continue;
+        tail = semantic + namelen;
+        if ((unsigned int) strtoul(tail, &tail, 10) != index) continue;
+        while (isspace((unsigned char) *tail)) tail++;
+        if (*tail != ';') continue;
+        last = colon;
+        while (last > source && isspace((unsigned char) last[-1])) last--;
+        first = last;
+        while (first > source && (isalnum((unsigned char) first[-1]) || first[-1] == '_')) first--;
+        if (member)
+        {
+            if ((size_t) (last - first) >= memberlen) return NULL;
+            memcpy(member, first, last - first);
+            member[last - first] = '\0';
+        }
+        while (first > source && isspace((unsigned char) first[-1])) first--;
+        while (first > source && (isalnum((unsigned char) first[-1]) || first[-1] == '_')) first--;
+        return first;
+    }
+    return NULL;
+}
+
+static int varyingMember(char *source, MOJOSHADER_usage usage, int index,
+                          char *member, size_t len)
+{
+    static const char *names[] = { "POSITION", "BLENDWEIGHT", "BLENDINDICES", "NORMAL",
+        "PSIZE", "TEXCOORD", "TANGENT", "BINORMAL", "TESSFACTOR", "POSITIONT",
+        "COLOR", "FOG", "DEPTH", "SAMPLE" };
+    if (usage == MOJOSHADER_USAGE_POSITION && index == 0 &&
+        findSemantic(source, "SV_Position", 0, member, len)) return 1;
+    return ((unsigned int) usage < STATICARRAYLEN(names)) &&
+        findSemantic(source, names[usage], index, member, len) != NULL;
+}
+
 static char *rewritePixelShader(
     MOJOSHADER_d3d11Context *ctx,
     MOJOSHADER_d3d11Shader *vshader,
@@ -550,7 +601,7 @@ static char *rewritePixelShader(
     // Find matching semantics
     int i, j;
     int vfaceidx = -1;
-    const char *pvarname, *vvarname;
+    char pmember[128], vmember[128], pfind[144], vreplace[144];
     for (i = 0; i < ppd->attribute_count; i++)
     {
         int found_matching_vs_output_for_ps_input = 0;
@@ -560,20 +611,26 @@ static char *rewritePixelShader(
                 ppd->attributes[i].index == vpd->outputs[j].index)
             {
                 found_matching_vs_output_for_ps_input = 1;
-                pvarname = ppd->attributes[i].name;
-                vvarname = vpd->outputs[j].name;
-                if (strcmp(pvarname, vvarname) != 0)
-                    replaceVarname(ctx, pvarname, vvarname, &pend);
+                /* Keep the pixel register local: its lanes may come from several
+                 * vertex registers. Only the interface member changes. -CNA */
+                if (varyingMember(strstr(psrc, _Input), ppd->attributes[i].usage,
+                                  ppd->attributes[i].index, pmember, sizeof(pmember)) &&
+                    varyingMember((char *) vout, vpd->outputs[j].usage,
+                                  vpd->outputs[j].index, vmember, sizeof(vmember)))
+                {
+                    snprintf(pfind, sizeof(pfind), "input.%s", pmember);
+                    snprintf(vreplace, sizeof(vreplace), "input.%s", vmember);
+                    replaceVarname(ctx, pfind, vreplace, &pend);
+                }
             } // if
             else if (strcmp(ppd->attributes[i].name, "vPos") == 0 &&
                      vpd->outputs[j].usage == MOJOSHADER_USAGE_POSITION &&
                      vpd->outputs[j].index == 0)
             {
                 found_matching_vs_output_for_ps_input = 1;
-                pvarname = ppd->attributes[i].name;
-                vvarname = vpd->outputs[j].name;
-                if (strcmp(pvarname, vvarname) != 0)
-                    replaceVarname(ctx, pvarname, vvarname, &pend);
+                snprintf(pfind, sizeof(pfind), "input.m_vPos");
+                snprintf(vreplace, sizeof(vreplace), "input.m_%s", vpd->outputs[j].name);
+                replaceVarname(ctx, pfind, vreplace, &pend);
             } // else if
         } // for
 
@@ -1020,6 +1077,47 @@ int MOJOSHADER_d3d11GetVertexAttribLocation(MOJOSHADER_d3d11Shader *vert,
     return -1;
 } // MOJOSHADER_d3d11GetVertexAttribLocation
 
+static char *rewriteVertexInputs(MOJOSHADER_d3d11Context *ctx,
+                                  MOJOSHADER_d3d11Shader *vshader,
+                                  void *elements, int elementCount)
+{
+    // Check for and replace non-float types
+    D3D11_INPUT_ELEMENT_DESC *d3dElements = (D3D11_INPUT_ELEMENT_DESC*) elements;
+    const char *origSource = vshader->parseData->output;
+    int srcLength = vshader->parseData->output_len;
+    char *newSource = (char*) origSource;
+    for (int i = 0; i < elementCount; i += 1)
+    {
+        D3D11_INPUT_ELEMENT_DESC e = d3dElements[i];
+
+        const char *replace;
+        if (element_is_uint(e.Format))
+            replace = " uint4";
+        else if (element_is_int(e.Format))
+            replace = "  int4";
+        else
+            replace = NULL;
+
+        if (replace != NULL)
+        {
+            if (newSource == origSource)
+            {
+                newSource = (char *) ctx->malloc_fn(srcLength + 1,
+                                                    ctx->malloc_data);
+                strcpy(newSource, origSource);
+            } // if
+
+            char *input = strstr(newSource, "_Input" ENDLINE_STR "{" ENDLINE_STR);
+            char *ptr = input ? findSemantic(input, e.SemanticName, e.SemanticIndex, NULL, 0) : NULL;
+            /* Unused input-layout elements have no declaration to rewrite. */
+            if (ptr && strncmp(ptr, "float4", 6) == 0)
+                memcpy(ptr, replace, 6);
+        } // if
+    } // for
+
+    return newSource;
+}
+
 int MOJOSHADER_d3d11CompileVertexShader(
     MOJOSHADER_d3d11Context *ctx,
     unsigned long long inputLayoutHash,
@@ -1044,46 +1142,9 @@ int MOJOSHADER_d3d11CompileVertexShader(
         } // if
     } // for
 
-    // Check for and replace non-float types
-    D3D11_INPUT_ELEMENT_DESC *d3dElements = (D3D11_INPUT_ELEMENT_DESC*) elements;
     const char *origSource = vshader->parseData->output;
     int srcLength = vshader->parseData->output_len;
-    char *newSource = (char*) origSource;
-    for (int i = 0; i < elementCount; i += 1)
-    {
-        D3D11_INPUT_ELEMENT_DESC e = d3dElements[i];
-
-        const char *replace;
-        if (element_is_uint(e.Format))
-            replace = " uint4";
-        else if (element_is_int(e.Format))
-            replace = "  int4";
-        else
-            replace = NULL;
-
-        if (replace != NULL)
-        {
-            char sem[16];
-            memset(sem, '\0', sizeof(sem));
-            snprintf(sem, sizeof(sem), "%s%d", e.SemanticName, e.SemanticIndex);
-            // !!! FIXME: POSITIONT has no index. What to do? -caleb
-
-            if (newSource == origSource)
-            {
-                newSource = (char *) ctx->malloc_fn(srcLength + 1,
-                                                    ctx->malloc_data);
-                strcpy(newSource, origSource);
-            } // if
-
-            char *ptr = strstr(newSource, sem);
-            assert(ptr != NULL && "Could not find semantic in shader source!");
-
-            int spaces = 0;
-            while (spaces < 3)
-                if (*(--ptr) == ' ') spaces++;
-            memcpy(ptr - strlen("float4"), replace, strlen(replace));
-        } // if
-    } // for
+    char *newSource = rewriteVertexInputs(ctx, vshader, elements, elementCount);
 
     vs = compileVertexShader(ctx, vshader, newSource, srcLength, &blob);
     if (newSource != origSource)
