@@ -343,6 +343,14 @@ const char *make_ARB1_destarg_string(Context *ctx, char *buf,
 
     *buf = '\0';
 
+    if (shader_is_vertex(ctx) && shader_version_atleast(ctx, 3, 0) &&
+        arg->regtype == REG_TYPE_OUTPUT)
+    {
+        const RegisterList *reg = reglist_find(&ctx->attributes, arg->regtype, arg->regnum);
+        if (reg && reg->usage == MOJOSHADER_USAGE_POINTSIZE && (arg->writemask & 1) == 0)
+            failf(ctx, "PSIZE writes without x unsupported in %s profile", ctx->profile->name);
+    }
+
     const char *sat_str = "";
     if (arg->result_mod & MOD_SATURATE)
     {
@@ -877,7 +885,8 @@ void emit_ARB1_attribute(Context *ctx, RegisterType regtype, int regnum,
             if (regtype == REG_TYPE_RASTOUT)
             {
                 regtype = REG_TYPE_OUTPUT;
-                index = regnum;
+                index = 0;
+                index_str[0] = '\0';
                 switch ((const RastOutType) regnum)
                 {
                     case RASTOUT_TYPE_POSITION:
@@ -1050,6 +1059,11 @@ void emit_ARB1_attribute(Context *ctx, RegisterType regtype, int regnum,
                 else
                     fail(ctx, "unsupported color index");
             } // else if
+            else if (usage == MOJOSHADER_USAGE_FOG)
+            {
+                /* No scalar-to-register lane assembly on the ARB1 path. -CNA */
+                failf(ctx, "FOG pixel input unsupported in %s profile", ctx->profile->name);
+            }
         } // else if
 
         else if (regtype == REG_TYPE_MISCTYPE)

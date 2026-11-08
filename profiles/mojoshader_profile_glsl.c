@@ -823,13 +823,13 @@ static void emit_GLSL_vertex_epilogue(Context *ctx)
                 get_GLSL_writemask_suffix(item->writemask, mask, sizeof (mask));
                 if ((item->usage == MOJOSHADER_USAGE_POINTSIZE) && (item->index == 0))
                     output_line(ctx, "%s = %s.x;", semantic, reg);
-                // gl_FogFragCoord is a float: FOG's one lane, the first it declares, whether
-                //  FOG is alone in the register or shares it. -CNA
-                else if ((item->usage == MOJOSHADER_USAGE_FOG) && builtin)
+                // FOG is scalar: transport its first declared lane in the built-in
+                // float or a user varying's canonical x, independent of pixel lanes. -CNA
+                else if (item->usage == MOJOSHADER_USAGE_FOG)
                 {
                     const int wm = item->writemask;
                     const int lane = (wm & 0x1) ? 0 : (wm & 0x2) ? 1 : (wm & 0x4) ? 2 : 3;
-                    output_line(ctx, "%s = %s.%c;", semantic, reg, swizzle_channels[lane]);
+                    output_line(ctx, "%s%s = %s.%c;", semantic, builtin ? "" : ".x", reg, swizzle_channels[lane]);
                 } // else if
                 else if (item->usage == MOJOSHADER_USAGE_COLOR)
                     output_line(ctx, "%s%s = clamp(%s%s, 0.0, 1.0);",
@@ -847,7 +847,10 @@ static void emit_GLSL_vertex_epilogue(Context *ctx)
                     get_GLSL_centroid_macro(
                         item->usage, item->index, centroid_macro, sizeof (centroid_macro));
                     output_line(ctx, "#ifdef %s", centroid_macro);
-                    if (item->usage == MOJOSHADER_USAGE_COLOR)
+                    if (item->usage == MOJOSHADER_USAGE_FOG)
+                        output_line(ctx, "%s.x = %s.%c;", centroid, reg, swizzle_channels[
+                            (item->writemask & 1) ? 0 : (item->writemask & 2) ? 1 : (item->writemask & 4) ? 2 : 3]);
+                    else if (item->usage == MOJOSHADER_USAGE_COLOR)
                         output_line(ctx, "%s%s = clamp(%s%s, 0.0, 1.0);",
                                     centroid, mask, reg, mask);
                     else
@@ -1324,13 +1327,13 @@ void emit_GLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
             if (first_register_declaration)
                 output_line(ctx, "%s = vec4(0.0, 0.0, 0.0, 1.0);", var);
             // gl_FogFragCoord is a float, which takes no swizzle: it fills FOG's lanes. -CNA
-            if ((usage == MOJOSHADER_USAGE_FOG) && builtin)
+            if (usage == MOJOSHADER_USAGE_FOG)
             {
                 const int lanes = vecsize_from_writemask(wmask);
                 if (lanes == 1)
-                    output_line(ctx, "%s%s = %s;", var, mask, semantic);
+                    output_line(ctx, "%s%s = %s%s;", var, mask, semantic, builtin ? "" : ".x");
                 else
-                    output_line(ctx, "%s%s = vec%d(%s);", var, mask, lanes, semantic);
+                    output_line(ctx, "%s%s = vec%d(%s%s);", var, mask, lanes, semantic, builtin ? "" : ".x");
             } // if
             else
                 output_line(ctx, "%s%s = %s%s;", var, mask, semantic, mask);

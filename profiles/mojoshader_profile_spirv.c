@@ -1794,7 +1794,8 @@ static int spv_register_is_packed(Context *ctx, const RegisterType regtype, cons
     {
         if ((item->regtype != regtype) || (item->regnum != regnum))
             continue;
-        if ((++count > 1) || (item->usage == MOJOSHADER_USAGE_FOG))
+        if ((++count > 1) || ((item->usage == MOJOSHADER_USAGE_FOG) ||
+                              (item->usage == MOJOSHADER_USAGE_POINTSIZE)))
             return 1;
     } // for
     return 0;
@@ -1821,7 +1822,7 @@ static void spv_emit_packed_vs_outputs(Context *ctx)
         uint32 id_value = spv_bumpid(ctx);
         push_output(ctx, &ctx->mainline);
         spv_emit(ctx, 4, SpvOpLoad, tid_vec4, id_value, r->spirv.iddecl);
-        if (item->usage == MOJOSHADER_USAGE_FOG)  // a float: the first of FOG's lanes -CNA
+        if (item->usage == MOJOSHADER_USAGE_FOG || item->usage == MOJOSHADER_USAGE_POINTSIZE)
         {
             const int wm = item->writemask;
             const uint32 lane = (wm & 0x1) ? 0 : (wm & 0x2) ? 1 : (wm & 0x4) ? 2 : 3;
@@ -2595,13 +2596,6 @@ static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterTyp
             first = scan;
         if ((scan->usage == usage) && (scan->index == (unsigned int) index))
             item = scan;
-        // A point size is declared with a full mask, so the parser refuses it in a register
-        //  any other semantic shares; this is never reached. -CNA
-        if (scan->usage == MOJOSHADER_USAGE_POINTSIZE)
-        {
-            fail(ctx, "Point size cannot share a register with another semantic.");
-            return;
-        } // if
     } // for
     if (item == NULL)
     {
@@ -2647,10 +2641,9 @@ static void spv_emit_packed_attribute(Context *ctx, RegisterList *r, RegisterTyp
 
     if (shader_is_vertex(ctx))
     {
-        // FOG is a float output; spv_emit_packed_vs_outputs() stores the first of its lanes
-        //  to it. -CNA
+        // Scalar FOG/PSIZE export the first declared lane from their vec4 register. -CNA
         push_output(ctx, &ctx->mainline_intro);
-        tid = spv_get_type(ctx, (usage == MOJOSHADER_USAGE_FOG) ? STI_PTR_FLOAT_O : STI_PTR_VEC4_O);
+        tid = spv_get_type(ctx, (usage == MOJOSHADER_USAGE_FOG || usage == MOJOSHADER_USAGE_POINTSIZE) ? STI_PTR_FLOAT_O : STI_PTR_VEC4_O);
         spv_emit(ctx, 4, SpvOpVariable, tid, item->spirv.iddecl, SpvStorageClassOutput);
         pop_output(ctx);
         spv_link_vs_attributes(ctx, item->spirv.iddecl, usage, index);

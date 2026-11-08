@@ -432,7 +432,7 @@ static void test_packed_fog_output(void)
         CNA_CHECK(cna_output_contains(pd, metal ? "output.o1_texcoord0.xyz = o1.xyz;"
                                                 : "output.m_o1_texcoord0.xyz = o1.xyz;"),
                   "TEXCOORD0's lanes are copied");
-        CNA_CHECK(cna_output_contains(pd, metal ? "output.o1_fog.w = o1.w;" : "output.m_o1_fog = o1.w;"),
+        CNA_CHECK(cna_output_contains(pd, metal ? "output.o1_fog.x = o1.w;" : "output.m_o1_fog = o1.w;"),
                   "FOG is copied from its own lane");
         cna_check_hlsl_compiles(pd, profile, "packed_fog_w");
         MOJOSHADER_freeParseData(pd);
@@ -453,8 +453,7 @@ static const uint32_t fog_alone_w_ps3[] = CNA_FOG_ALONE_PS3(0x8, 0xFF);
  * ps_3_0 input. The parser narrowed every write to such an output to .x, so `mov o1.z, v0` was
  * emitted `o1 = v0.x;` -- v0.x where FOG is v0.z -- and HLSL declared the pixel input a float
  * member read as `input.m_v0.zzzz`, which does not compile. HLSL now treats the register as a
- * packed one: a float4 whose FOG lane is copied to (or filled from) the float FOG member; Metal's
- * member is a float4 in which the lane keeps its position.
+ * packed one: a float4 whose FOG lane is copied to (or filled from) the float FOG member; Metal transports the scalar in its varying's canonical x component.
  */
 static void test_standalone_fog_lanes(void)
 {
@@ -482,8 +481,12 @@ static void test_standalone_fog_lanes(void)
             CNA_CHECK(pd->output != NULL, "there is source");
             CNA_CHECK(cna_output_contains(pd, write), "the FOG write keeps its lane");
             if (metal)
-                CNA_CHECK(cna_output_contains(pd, "float4 o1 [[user(fog)]];"),
-                          "the FOG member is a float4, its lanes in place");
+            {
+                snprintf(copy, sizeof(copy), "output.o1_fog.x = o1.%c;", c);
+                CNA_CHECK(cna_output_contains(pd, "float4 o1_fog [[user(fog)]];"),
+                          "FOG has a canonical interface independent of register lanes");
+                CNA_CHECK(cna_output_contains(pd, copy), "FOG's scalar travels in x");
+            }
             else
             {
                 CNA_CHECK(cna_output_contains(pd, "float m_o1_fog : FOG;"), "FOG is a float member");
@@ -500,7 +503,12 @@ static void test_standalone_fog_lanes(void)
             pd = cna_translate(profile, lanes[j].ps, lanes[j].ps_bytes, name);
             CNA_CHECK(pd->output != NULL, "there is source");
             CNA_CHECK(cna_output_contains(pd, read), "the FOG lane is read");
-            if (!metal)
+            if (metal)
+            {
+                snprintf(fill, sizeof(fill), "v0.%c = input.v0_fog.x;", c);
+                CNA_CHECK(cna_output_contains(pd, fill), "canonical FOG fills the declared pixel lane");
+            }
+            else
             {
                 CNA_CHECK(cna_output_contains(pd, "float m_v0_fog : FOG;"), "FOG is a float member");
                 CNA_CHECK(cna_output_contains(pd, "float4 v0 = float4(0.0, 0.0, 0.0, 1.0);"),
@@ -1082,10 +1090,131 @@ static void test_texbeml_luminance(void)
 
 /* With an argument, runs only the case of that name (one case per process, so an abort on an
  * unfixed tree does not hide the others). */
+
+/* Scalar FOG's stage interface is independent of DCL register lane. Check all
+ * 16 vertex/pixel lane pairs, using the D3D9 semantic/index linkage contract. */
+static void test_cross_lane_fog_interfaces(void)
+{
+    const char *profiles[] = { "glsles", "glsles3", "metal" };
+    unsigned v, f, k;
+    for (k = 0; k < 3; k++) for (v = 0; v < 4; v++) for (f = 0; f < 4; f++)
+    {
+        uint32_t vs[] = CNA_FOG_ALONE_VS3(1u << v);
+        uint32_t ps[] = CNA_FOG_ALONE_PS3(1u << f, f * 0x55);
+        const MOJOSHADER_parseData *vp = cna_parse(profiles[k], vs, sizeof(vs));
+        const MOJOSHADER_parseData *fp = cna_parse(profiles[k], ps, sizeof(ps));
+        char out[80], in[80];
+        CNA_CHECK(cna_report_errors("cross-lane vertex", vp) == 0 &&
+                  cna_report_errors("cross-lane pixel", fp) == 0, "legal FOG tokens translate");
+        if (k == 2)
+        {
+            snprintf(out, sizeof(out), "output.o1_fog.x = o1.%c;", "xyzw"[v]);
+            snprintf(in, sizeof(in), "v0.%c = input.v0_fog.x;", "xyzw"[f]);
+            CNA_CHECK(cna_output_contains(vp, "float4 o1_fog [[user(fog)]];") &&
+                      cna_output_contains(fp, "float4 v0_fog [[user(fog)]];"),
+                      "Metal FOG interface name/type match");
+        }
+        else
+        {
+            snprintf(out, sizeof(out), "io_11_0.x = vs_o1.%c;", "xyzw"[v]);
+            snprintf(in, sizeof(in), "ps_v0.%c = io_11_0.x;", "xyzw"[f]);
+            CNA_CHECK(cna_output_contains(vp, "highp vec4 io_11_0;") &&
+                      cna_output_contains(fp, "highp vec4 io_11_0;"), "ES FOG interface types match");
+        }
+        CNA_CHECK(cna_output_contains(vp, out), "the source FOG lane enters canonical x");
+        CNA_CHECK(cna_output_contains(fp, in), "canonical x fills the destination FOG lane");
+        MOJOSHADER_freeParseData(vp); MOJOSHADER_freeParseData(fp);
+    }
+}
+/* PSIZE is declared with a full mask. Its exported value is x: after writing
+ * x=2, writing z=7 must preserve x=2. D3D9 masked-register arithmetic oracle.
+ * HLSL/Metal/GL export x, SPIR-V must retain a valid float PointSize interface. */
+static void test_psize_masked_writes(void)
+{
+    uint32_t tokens[] = {
+        CNA_VS(3, 0),
+        CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+        CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+        CNA_OP(31, 2), CNA_DCL(4, 0), CNA_DST(CNA_OUTPUT, 1, 15),
+        CNA_OP(81, 5), CNA_DST(CNA_CONST, 0, 15), 0x40000000, 0x40800000, 0x40e00000, 0x41100000,
+        CNA_OP(1, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+        CNA_OP(1, 2), CNA_DST(CNA_OUTPUT, 1, 1), CNA_SRC(CNA_CONST, 0),
+        CNA_OP(1, 2), CNA_DST(CNA_OUTPUT, 1, 4), CNA_SRC(CNA_CONST, 0), CNA_END
+    };
+    const char *profiles[] = { "d3d", "hlsl", "metal", "glsl", "glsles", "glsles3", "spirv", "glspirv", "arb1" };
+    unsigned i;
+    for (i = 0; i < sizeof(profiles)/sizeof(profiles[0]); i++)
+    {
+        const MOJOSHADER_parseData *pd = cna_parse(profiles[i], tokens, sizeof(tokens));
+        if (i == 8)
+            CNA_CHECK(pd->error_count > 0 && strstr(pd->errors[0].error, "PSIZE writes without x"),
+                      "ARB1 refuses an unrepresentable point-size write by name");
+        else
+        {
+            CNA_CHECK(cna_report_errors("masked PSIZE", pd) == 0, "legal PSIZE shader translates");
+            if (i == 0)
+                CNA_CHECK(cna_output_contains(pd, "mov o1.z, c0"), "D3D tokens retain the z mask");
+            else if (i == 1 || i == 2)
+            {
+                CNA_CHECK(cna_output_contains(pd, "o1.z = "), "the z write keeps its destination mask");
+                CNA_CHECK(cna_output_contains(pd, i == 1 ? "output.m_o1_psize = o1.x;" :
+                                               "output.o1_point_size = o1.x;"), "only x is exported");
+                cna_check_hlsl_compiles(pd, profiles[i], "masked_psize");
+            }
+            else if (i < 6)
+                CNA_CHECK(cna_output_contains(pd, "vs_o1.z = ") &&
+                          cna_output_contains(pd, "gl_PointSize = vs_o1.x;"), "GL preserves x across the z write");
+            else
+                CNA_CHECK(cna_spirv_validate(pd, profiles[i]) != 0, "SPIR-V masked PSIZE module validates");
+        }
+        MOJOSHADER_freeParseData(pd);
+    }
+}
+static void test_named_vertex_refusals(void)
+{
+    const unsigned usages[] = { 11, 13, 8 };
+    const char *names[] = { "FOG", "SAMPLE", "TESSFACTOR" };
+    unsigned i;
+    for (i = 0; i < 3; i++)
+    {
+        uint32_t tokens[] = {
+            CNA_VS(3, 0),
+            CNA_OP(31, 2), CNA_DCL(usages[i], 0), CNA_DST(CNA_INPUT, 0, 15),
+            CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(CNA_OUTPUT, 0, 15),
+            CNA_OP(1, 2), CNA_DST(CNA_OUTPUT, 0, 15), CNA_SRC(CNA_INPUT, 0), CNA_END
+        };
+        const MOJOSHADER_parseData *pd = cna_parse("hlsl", tokens, sizeof(tokens));
+        CNA_CHECK(pd->error_count > 0 && strstr(pd->errors[0].error, names[i]) &&
+                  strstr(pd->errors[0].error, "unsupported in hlsl"), "HLSL names the refused vertex semantic");
+        MOJOSHADER_freeParseData(pd);
+    }
+}
+static void test_arb1_legacy_semantics(void)
+{
+    const uint32_t tokens[] = {
+        CNA_VS(2, 0), CNA_OP(31, 2), CNA_DCL(0, 0), CNA_DST(CNA_INPUT, 0, 15),
+        CNA_OP(1, 2), CNA_DST(CNA_RASTOUT, 0, 15), CNA_SRC(CNA_INPUT, 0),
+        CNA_OP(1, 2), CNA_DST(CNA_RASTOUT, 1, 1), CNA_SRC(CNA_INPUT, 0),
+        CNA_OP(1, 2), CNA_DST(CNA_RASTOUT, 2, 1), CNA_SRC(CNA_INPUT, 0), CNA_END
+    };
+    const MOJOSHADER_parseData *pd = cna_parse("arb1", tokens, sizeof(tokens));
+    const MOJOSHADER_parseData *ps = cna_parse("arb1", fog_alone_x_ps3, sizeof(fog_alone_x_ps3));
+    CNA_CHECK(cna_report_errors("legacy ARB1", pd) == 0, "legacy output tokens translate");
+    CNA_CHECK(cna_output_contains(pd, "= result.fogcoord;") &&
+              cna_output_contains(pd, "= result.pointsize;"), "legacy built-ins have no numeric suffix");
+    CNA_CHECK(ps->error_count && strstr(ps->errors[0].error, "FOG pixel input unsupported"),
+              "ARB1 refuses FOG input instead of leaving it unbound");
+    MOJOSHADER_freeParseData(pd); MOJOSHADER_freeParseData(ps);
+}
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; void (*test)(void); } cases[] = {
         { "loop_counts_iterations", test_loop_counts_iterations },
+        { "cross_lane_fog_interfaces", test_cross_lane_fog_interfaces },
+        { "psize_masked_writes", test_psize_masked_writes },
+        { "named_vertex_refusals", test_named_vertex_refusals },
+        { "arb1_legacy_semantics", test_arb1_legacy_semantics },
         { "packed_vertex_outputs", test_packed_vertex_outputs },
         { "packed_fog_output", test_packed_fog_output },
         { "standalone_fog_lanes", test_standalone_fog_lanes },

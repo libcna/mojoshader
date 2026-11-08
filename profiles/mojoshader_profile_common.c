@@ -423,32 +423,11 @@ void set_dstarg_writemask(DestArgInfo *dst, const int mask)
 int isscalar(Context *ctx, const MOJOSHADER_shaderType shader_type,
              const RegisterType rtype, const int rnum)
 {
-    const int uses_psize = ctx->uses_pointsize;
-    if ( (rtype == REG_TYPE_OUTPUT) && (uses_psize) )
-    {
-        // A vs_3_0 output is scalar only when PSIZE is its one semantic. A DCL declares its
-        //  own lanes, whatever was declared before it, and since every DCL precedes the first
-        //  instruction, an instruction sees all of the register's semantics. Judged by its
-        //  first semantic alone, a register packing TEXCOORD after FOG had that DCL and every
-        //  write narrowed to .x.
-        //
-        //  FOG never makes a register scalar: FOG declared alone in o1.z, say, is that
-        //  register's z, so `mov o1.z, v0` writes v0.z there -- narrowed to .x, it wrote v0.x
-        //  to a lane FOG is not read from. The profiles take FOG's declared lane where the
-        //  shader returns, as they do when FOG shares the register. -CNA
-        if (ctx->current_opcode == OPCODE_DCL)
-            return 0;
-        const RegisterList *reg = reglist_find(&ctx->attributes, rtype, rnum);
-        if (reg != NULL)
-        {
-            const MOJOSHADER_usage usage = reg->usage;
-            // add_attribute_register() keeps the semantics of one register together.
-            if ((reg->next != NULL) && (reg->next->regtype == rtype) &&
-                (reg->next->regnum == rnum))
-                return 0;
-            return (usage == MOJOSHADER_USAGE_POINTSIZE);
-        } // if
-    } // if
+    /* SM3 output registers retain all four lanes, even when only their x is
+     * exported as PSIZE. A masked y/z/w write must never overwrite x. -CNA */
+    if (shader_is_vertex(ctx) && shader_version_atleast(ctx, 3, 0) &&
+        rtype == REG_TYPE_OUTPUT)
+        return 0;
 
     return scalar_register(shader_type, rtype, rnum);
 } // isscalar

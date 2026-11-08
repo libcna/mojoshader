@@ -95,7 +95,7 @@ const char *get_HLSL_uniform_array_varname(Context *ctx,
 //  is translated as the GLSL profile translates it: a float4 local of main, one struct member
 //  per semantic, and copies of each semantic's lanes (lane positions kept) at the end of main
 //  for outputs and at its start for inputs. A register with one semantic keeps the usual
-//  macro for its struct member -- unless that semantic is FOG, a float member: the register
+//  macro for its struct member -- unless that semantic is FOG or PSIZE, a float member: the register
 //  is a float4 whose declared FOG lane is copied to the member (an output) or filled from it
 //  (an input), so `o1.z = v0.z;` or a read of v0.zzzz names a lane the float has not. -CNA
 static int is_HLSL_packed_register(Context *ctx, const RegisterType regtype,
@@ -115,7 +115,8 @@ static int is_HLSL_packed_register(Context *ctx, const RegisterType regtype,
     {
         if ((item->regtype != regtype) || (item->regnum != regnum))
             continue;
-        if ((++semantics > 1) || (item->usage == MOJOSHADER_USAGE_FOG))
+        if ((++semantics > 1) || ((item->usage == MOJOSHADER_USAGE_FOG) ||
+                                (item->usage == MOJOSHADER_USAGE_POINTSIZE)))
             return 1;
     } // for
     return 0;
@@ -1275,7 +1276,10 @@ void emit_HLSL_attribute(Context *ctx, RegisterType regtype, int regnum,
                     output_line(ctx, "float4 m_%s : TEXCOORD%d;", var, index);
                     break;
                 default:
-                    fail(ctx, "Unknown vertex input semantic type!");
+                    failf(ctx, "Vertex input semantic %s unsupported in hlsl profile",
+                          usage == MOJOSHADER_USAGE_FOG ? "FOG" :
+                          usage == MOJOSHADER_USAGE_SAMPLE ? "SAMPLE" :
+                          usage == MOJOSHADER_USAGE_TESSFACTOR ? "TESSFACTOR" : "UNKNOWN");
                     break;
             } // case
             pop_output(ctx);

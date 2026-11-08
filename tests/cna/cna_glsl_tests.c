@@ -192,7 +192,7 @@ static void test_packed_fog(void)
     static const char *const fog_w_desktop[] = {
         "vs_o1 = vs_v0;", "gl_TexCoord[0].xyz = vs_o1.xyz;", "gl_FogFragCoord = vs_o1.w;" };
     static const char *const fog_w_es[] = {
-        "vs_o1 = vs_v0;", "io_5_0.xyz = vs_o1.xyz;", "io_11_0.w = vs_o1.w;" };
+        "vs_o1 = vs_v0;", "io_5_0.xyz = vs_o1.xyz;", "io_11_0.x = vs_o1.w;" };
     static const char *const alone_desktop[] = { "gl_FogFragCoord = vs_o1.x;" };
     static const char *const ps_desktop[] = {
         "ps_v0.x = gl_FogFragCoord;", "ps_v0.yzw = gl_TexCoord[0].yzw;" };
@@ -234,6 +234,8 @@ static const uint32_t fog_alone_z_full_vs3[] = {
  * v0.z) and GLSL ES copied the never-written z to its varying. The write keeps its lane and
  * FOG is copied from it.
  */
+/* FOG is a scalar semantic: its canonical varying component is x, irrespective
+ * of the source register lane (D3D9 semantic linkage oracle). */
 static void test_standalone_fog_lanes(void)
 {
     static const struct { const char *lane; const uint32_t *tokens; size_t bytes; } vs[] = {
@@ -248,7 +250,7 @@ static void test_standalone_fog_lanes(void)
         const char *desktop[2], *es[2];
         snprintf(write, sizeof (write), "vs_o1.%s = vs_v0.%s;", vs[i].lane, vs[i].lane);
         snprintf(desktop_copy, sizeof (desktop_copy), "gl_FogFragCoord = vs_o1.%s;", vs[i].lane);
-        snprintf(es_copy, sizeof (es_copy), "io_11_0.%s = vs_o1.%s;", vs[i].lane, vs[i].lane);
+        snprintf(es_copy, sizeof (es_copy), "io_11_0.x = vs_o1.%s;", vs[i].lane);
         desktop[0] = es[0] = write;
         desktop[1] = desktop_copy;
         es[1] = es_copy;
@@ -261,7 +263,7 @@ static void test_standalone_fog_lanes(void)
     } // for
     {
         static const char *const desktop[] = { "vs_o1 = vs_v0;", "gl_FogFragCoord = vs_o1.z;" };
-        static const char *const es[] = { "vs_o1 = vs_v0;", "io_11_0.z = vs_o1.z;" };
+        static const char *const es[] = { "vs_o1 = vs_v0;", "io_11_0.x = vs_o1.z;" };
         for (j = 0; j < sizeof (glsl_profiles) / sizeof (glsl_profiles[0]); j++)
         {
             const int is_es = (strncmp(glsl_profiles[j], "glsles", 6) == 0);

@@ -120,7 +120,11 @@ static int is_METAL_packed_register(Context *ctx, const RegisterType regtype,
     for (item = ctx->attributes.next; item != NULL; item = item->next)
     {
         if ((item->regtype == regtype) && (item->regnum == regnum))
+        {
+            if (item->usage == MOJOSHADER_USAGE_FOG || item->usage == MOJOSHADER_USAGE_POINTSIZE)
+                return 1;
             semantics++;
+        }
     } // for
     return (semantics > 1);
 } // is_METAL_packed_register
@@ -1123,13 +1127,20 @@ static void emit_METAL_packed_attribute(Context *ctx, const RegisterType regtype
     const int first_semantic = (first != NULL) && (first->usage == usage) &&
                                (first->index == index);
     char var[64];
-    char varying[32];
+    char varying[32] = { 0 };
     char member[128];
     char mask[6];
     int passed;
+    const int fog = usage == MOJOSHADER_USAGE_FOG;
+    const int pointsize = usage == MOJOSHADER_USAGE_POINTSIZE;
 
     get_METAL_varname_in_buf(ctx, regtype, regnum, var, sizeof (var));
     passed = get_METAL_varying_name(usage, index, varying, sizeof (varying));
+    if (pointsize)
+    {
+        snprintf(varying, sizeof(varying), "point_size");
+        passed = 1;
+    }
     snprintf(member, sizeof (member), "%s_%s", var, varying);
     get_METAL_writemask_suffix(wmask, mask, sizeof (mask));
 
@@ -1144,7 +1155,10 @@ static void emit_METAL_packed_attribute(Context *ctx, const RegisterType regtype
             output_line(ctx, "{");
         } // if
         ctx->indent++;
-        output_line(ctx, "float4 %s [[user(%s)]];", member, varying);
+        if (pointsize)
+            output_line(ctx, "float %s [[point_size]];", member);
+        else
+            output_line(ctx, "float4 %s [[user(%s)]];", member, varying);
         pop_output(ctx);
     } // if
 
@@ -1157,7 +1171,15 @@ static void emit_METAL_packed_attribute(Context *ctx, const RegisterType regtype
                     var, vertex_output ? "0.0" : "1.0");
     } // if
     if (passed && !vertex_output)
-        output_line(ctx, "%s%s = input.%s%s;", var, mask, member, mask);
+    {
+        if (fog && vecsize_from_writemask(wmask) == 1)
+            output_line(ctx, "%s%s = input.%s.x;", var, mask, member);
+        else if (fog)
+            output_line(ctx, "%s%s = float%d(input.%s.x);", var, mask,
+                        vecsize_from_writemask(wmask), member);
+        else
+            output_line(ctx, "%s%s = input.%s%s;", var, mask, member, mask);
+    }
     pop_output(ctx);
 
     // A vertex output is copied out at the end of main: finalize appends "return output;"
@@ -1166,7 +1188,11 @@ static void emit_METAL_packed_attribute(Context *ctx, const RegisterType regtype
     {
         push_output(ctx, &ctx->mainline);
         ctx->indent++;
-        output_line(ctx, "output.%s%s = %s%s;", member, mask, var, mask);
+        if (fog || pointsize)
+            output_line(ctx, "output.%s%s = %s.%c;", member, fog ? ".x" : "", var,
+                        swizzle_channels[(wmask & 1) ? 0 : (wmask & 2) ? 1 : (wmask & 4) ? 2 : 3]);
+        else
+            output_line(ctx, "output.%s%s = %s%s;", member, mask, var, mask);
         pop_output(ctx);
     } // if
 } // emit_METAL_packed_attribute
