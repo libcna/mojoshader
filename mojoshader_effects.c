@@ -1314,6 +1314,13 @@ static void readsmallobjects(const uint32 numsmallobjects,
 
     for (i = 1; i < numsmallobjects + 1; i++)
     {
+        // readui32 returns zero at EOF, which would fabricate an empty payload for
+        // object 0. Require the complete record header before using either field. -CNA
+        if (*len < 2 * sizeof (uint32))
+        {
+            errorlist_add(errors, NULL, 0, "Effect small object header is truncated.");
+            return;
+        } // if
         const uint32 index = readui32(ptr, len);
         const uint32 length = readui32(ptr, len);
 
@@ -1398,7 +1405,10 @@ static void readsmallobjects(const uint32 numsmallobjects,
         } // else if
         else
         {
-            assert(0 && "Small object type unknown!");
+            // Unreferenced object slots have no type; their presence in the payload
+            // table is malformed input, not an internal invariant. -CNA
+            errorlist_add(errors, NULL, 0, "Effect small object type is unknown.");
+            return;
         } // else
 
         /* Object block is always a multiple of four */
@@ -1444,6 +1454,12 @@ static void readlargeobjects(const uint32 numlargeobjects,
     int numobjects = numsmallobjects + numlargeobjects + 1;
     for (i = numsmallobjects + 1; i < numobjects; i++)
     {
+        // As with small objects, missing header words must not become zero fields. -CNA
+        if (*len < 6 * sizeof (uint32))
+        {
+            errorlist_add(errors, NULL, 0, "Effect large object header is truncated.");
+            return;
+        } // if
         const uint32 technique = readui32(ptr, len);
         const uint32 index = readui32(ptr, len);
         /*const uint32 FIXME =*/ readui32(ptr, len);

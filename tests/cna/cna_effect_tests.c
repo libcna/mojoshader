@@ -1402,6 +1402,140 @@ static void MOJOSHADERCALL inference_delete(const void *ctx, void *shader)
 { (void) ctx; MOJOSHADER_freeParseData((const MOJOSHADER_parseData *) shader); }
 static MOJOSHADER_parseData *MOJOSHADERCALL inference_parse(void *shader)
 { return (MOJOSHADER_parseData *) shader; }
+/* TQ-FORK-EFFECT-TRUNC-01: real fxc output, copied byte-for-byte from CNA's
+ * CnaConformanceEffect.fxb. Oracle: its source declares seven parameters, two
+ * techniques and 2 + 1 passes. Every prefix must refuse or retain that structure;
+ * exact-size copies let ASan check the declared input boundary as well. */
+static void *MOJOSHADERCALL truncation_compile(const void *ctx, const char *mainfn,
+    const unsigned char *tokens, unsigned int bytes, const MOJOSHADER_swizzle *swiz,
+    unsigned int swizcount, const MOJOSHADER_samplerMap *map, unsigned int count)
+{
+    (void) ctx;
+    return (void *) MOJOSHADER_parse("bytecode", mainfn, tokens, bytes, swiz, swizcount,
+                                   map, count, cna_alloc_malloc, cna_alloc_free, NULL);
+}
+
+static int read_conformance_effect(unsigned char bytes[5000])
+{
+    FILE *input = fopen(CNA_CONFORMANCE_EFFECT_PATH, "rb");
+    size_t count;
+    int trailing;
+    CNA_CHECK(input != NULL, "the committed real-effect fixture opens");
+    if (input == NULL) return 0;
+    count = fread(bytes, 1, 5000, input);
+    trailing = fgetc(input);
+    fclose(input);
+    CNA_CHECK(count == 5000, "all fixture bytes read");
+    CNA_CHECK(trailing == EOF, "the fixture has its recorded 5000-byte size");
+    return count == 5000 && trailing == EOF;
+} // read_conformance_effect
+
+static void test_real_effect_prefixes(void)
+{
+    unsigned char bytes[5000];
+    unsigned int prefix;
+    MOJOSHADER_effectShaderContext ctx = backend();
+    if (!read_conformance_effect(bytes)) return;
+    ctx.compileShader = truncation_compile;
+    ctx.deleteShader = inference_delete;
+    ctx.getParseData = inference_parse;
+    ctx.m = cna_alloc_malloc;
+    ctx.f = cna_alloc_free;
+    for (prefix = 0; prefix <= sizeof (bytes); prefix += 4)
+    {
+        unsigned char *copy = (unsigned char *) cna_exact_copy(bytes, prefix);
+        MOJOSHADER_effect *effect;
+        cna_alloc_reset(0);
+        effect = MOJOSHADER_compileEffect(copy, prefix, NULL, 0, NULL, 0, &ctx);
+        CNA_CHECK(effect != NULL, "each prefix returns a deletable result");
+        if (effect && (prefix == sizeof (bytes)))
+            CNA_CHECK(effect->error_count == 0, "the whole real effect parses");
+        if (effect && !effect->error_count)
+        {
+            int technique, pass, state;
+            /* The header at byte 1456 declares nine object slots. The source has
+             * a vertex/pixel shader pair in each of its three passes. */
+            CNA_CHECK(effect->object_count == 9, "accepted prefix retains all object slots");
+            CNA_CHECK(effect->param_count == 7, "accepted prefix retains seven parameters");
+            CNA_CHECK(effect->technique_count == 2, "accepted prefix retains both techniques");
+            if (effect->technique_count == 2)
+            {
+                CNA_CHECK(effect->techniques[0].pass_count == 2, "first technique retains both passes");
+                CNA_CHECK(effect->techniques[1].pass_count == 1, "second technique retains its pass");
+            } // if
+            for (technique = 0; technique < effect->technique_count; technique++)
+                for (pass = 0; pass < effect->techniques[technique].pass_count; pass++)
+                {
+                    MOJOSHADER_effectPass *p = &effect->techniques[technique].passes[pass];
+                    int shaders = 0;
+                    for (state = 0; state < p->state_count; state++)
+                        if (p->states[state].type == MOJOSHADER_RS_VERTEXSHADER ||
+                            p->states[state].type == MOJOSHADER_RS_PIXELSHADER)
+                        {
+                            MOJOSHADER_effectValue *v = &p->states[state].value;
+                            int index = v->value_count ? v->valuesI[0] : -1;
+                            shaders++;
+                            CNA_CHECK(index >= 0 && index < effect->object_count,
+                                      "accepted shader state references an object");
+                            if (index >= 0 && index < effect->object_count)
+                                CNA_CHECK(effect->objects[index].shader.shader != NULL,
+                                          "accepted prefix compiled every pass shader");
+                        } // if
+                    CNA_CHECK(shaders == 2, "accepted pass retains its vertex/pixel pair");
+                } // for
+        } // if
+        MOJOSHADER_deleteEffect(effect);
+        CNA_CHECK(cna_alloc_live() == 0, "each prefix frees all effect and shader allocations");
+        free(copy);
+    } // for
+} // test_real_effect_prefixes
+
+/* Hand-decoded fixture layout: structure begins at 8 + 1448 = 1456;
+ * parameter/annotation/technique/pass/state records end at 1876; object counts
+ * occupy eight bytes, the sole small record (index 1, length 0) eight more.
+ * Thus small/large headers start at 1884/1892. Slot 0 is never referenced.
+ * Missing fields cannot name a record, even if readui32 would yield zero. */
+static void test_effect_object_headers(void)
+{
+    unsigned char bytes[5000];
+    unsigned int kind, remaining;
+    MOJOSHADER_effectShaderContext ctx = backend();
+    if (!read_conformance_effect(bytes)) return;
+    ctx.m = cna_alloc_malloc;
+    ctx.f = cna_alloc_free;
+    for (kind = 0; kind < 2; kind++)
+        for (remaining = 0; remaining < (kind ? 24u : 8u); remaining++)
+        {
+            const unsigned int length = (kind ? 1892 : 1884) + remaining;
+            unsigned char *copy = (unsigned char *) cna_exact_copy(bytes, length);
+            MOJOSHADER_effect *effect;
+            cna_alloc_reset(0);
+            effect = MOJOSHADER_compileEffect(copy, length, NULL, 0, NULL, 0, &ctx);
+            CNA_CHECK(effect && effect->error_count == 1, "an incomplete object header refuses");
+            if (effect && effect->error_count)
+                CNA_CHECK(strcmp(effect->errors[0].error, kind ?
+                          "Effect large object header is truncated." :
+                          "Effect small object header is truncated.") == 0,
+                          "the parser identifies the missing object header");
+            MOJOSHADER_deleteEffect(effect);
+            CNA_CHECK(cna_alloc_live() == 0, "truncated-header refusal frees all allocations");
+            free(copy);
+        } // for
+    /* A complete record for unreferenced slot 0 must also refuse without asserting. */
+    memset(bytes + 1884, 0, 4);
+    cna_alloc_reset(0);
+    {
+        MOJOSHADER_effect *effect = MOJOSHADER_compileEffect(bytes, sizeof (bytes),
+                                                            NULL, 0, NULL, 0, &ctx);
+        CNA_CHECK(effect && effect->error_count == 1, "an untyped small object refuses");
+        if (effect && effect->error_count)
+            CNA_CHECK(strcmp(effect->errors[0].error, "Effect small object type is unknown.") == 0,
+                      "an untyped object uses the parser error path");
+        MOJOSHADER_deleteEffect(effect);
+    }
+    CNA_CHECK(cna_alloc_live() == 0, "untyped-object refusal frees all allocations");
+} // test_effect_object_headers
+
 static void inference_case(uint32_t type, int reverse, int large, int late, int explicitMap)
 {
     CnaSamplerEffect code;
@@ -1588,6 +1722,8 @@ static void test_effect_sampler_inference(void)
 
 int main(void)
 {
+    cna_test_run("real_effect_prefixes", test_real_effect_prefixes);
+    cna_test_run("effect_object_headers", test_effect_object_headers);
     cna_test_run("effect_legacy_sampler_inference", test_effect_sampler_inference);
     cna_test_run("effect_legacy_sampler_per_shader", test_effect_sampler_map_per_shader);
     cna_test_run("effect_legacy_sampler_opcode_refusals", test_effect_inferred_unsupported_opcodes);

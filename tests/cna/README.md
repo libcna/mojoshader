@@ -108,3 +108,23 @@ The FNA3D candidate's `fna3d_cna_texreg_tests` adds 48 full-image depth probes
 per driver, comparing these fractions against known depth clears and retaining
 a distinct nonzero color sentinel. Those GPU probes require the private runner;
 device-free translation alone is not native pixel qualification.
+
+### Effect truncation (TQ-FORK-EFFECT-TRUNC-01)
+
+`cna_effect_tests` parses every four-byte prefix (including empty and whole) of
+`CnaConformanceEffect.fxb` from exact-size allocations, without a graphics device.
+Successful parses retain the source's seven parameters, two techniques, three
+passes and their shader pairs; the whole file must parse. Separate cases check
+every missing byte in the first small/large object header and an unreferenced
+small-object slot. Run with `SDL_ASSERT=abort` so an SDL assertion is fatal too.
+
+The 5000-byte fixture is copied unchanged from CNA's
+`modules/renderers/fna3d/effects/CnaConformanceEffect.fxb`, compiled with Microsoft's
+`fxc /T fx_2_0` from CNA's MS-PL `CnaConformanceEffect.fx`. Its source and compiler
+provenance are recorded in that directory's README. SHA-256:
+`2e1fe1dd74d67f4395ae6db4451c1a19ee4478dfe7906f9d665a499e28d2a074`.
+The header at byte `8 + 1448 = 1456` declares seven parameters, two techniques and
+nine object slots. The tables end at 1876; two object counts take eight bytes,
+then the first small record (index 1, length 0) takes eight bytes. The first small
+and large headers therefore begin at 1884 and 1892. These source declarations
+and hand-decoded offsets are the tests' oracles.

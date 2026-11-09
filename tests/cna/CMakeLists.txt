@@ -107,6 +107,8 @@ add_test(NAME cna_version_header_merge
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cna_version_header_merge_test.cmake")
 
 mojoshader_cna_test(cna_effect_tests)
+target_compile_definitions(cna_effect_tests PRIVATE
+    CNA_CONFORMANCE_EFFECT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/CnaConformanceEffect.fxb")
 mojoshader_cna_test(cna_duplicate_object_tests)
 
 mojoshader_cna_test(cna_spirv_tests)
